@@ -1,0 +1,41 @@
+{
+	"format_version": "1.10.0",
+	"animations": {
+		"animation.sword.wield_third_person": {
+			"loop": true,
+			"bones": {
+				"pole": {
+					"rotation": [
+						94.61895,
+						-47.66577,
+						-1.50933
+					],
+					"position": [
+						1.5,
+						-2,
+						-15.5
+					],
+					"scale": 1.25
+				}
+			}
+		},
+		"animation.sword.wield_first_person": {
+			"loop": true,
+			"bones": {
+				"pole": {
+					"rotation": [
+						120,
+						22.03262,
+						-33.29277
+					],
+					"position": [
+						-7,
+						-8,
+						-2
+					],
+					"scale": 1.25
+				}
+			}
+		}
+	}
+}

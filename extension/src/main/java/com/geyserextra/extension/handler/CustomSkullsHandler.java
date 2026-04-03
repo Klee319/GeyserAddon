@@ -1,0 +1,289 @@
+/*
+ * GeyserExtra Extension - Custom Skulls Handler
+ * Loads and registers custom skulls from shared configuration file.
+ */
+package com.geyserextra.extension.handler;
+
+import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
+import org.geysermc.geyser.api.block.custom.CustomBlockData;
+import org.geysermc.geyser.api.event.lifecycle.GeyserDefineCustomSkullsEvent;
+import org.geysermc.geyser.api.event.lifecycle.GeyserDefineCustomSkullsEvent.SkullTextureType;
+import org.geysermc.geyser.api.extension.Extension;
+
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+
+/**
+ * Handler for loading and registering custom skulls from shared configuration.
+ *
+ * Why: This handler reads skull definitions from a shared JSON file (skulls.json)
+ * and registers them with Geyser to enable custom skull blocks for Bedrock players.
+ * Custom skulls require 'gameplay.enable-custom-content' to be true in Geyser config.
+ */
+public class CustomSkullsHandler {
+
+    private static final String SKULLS_FILE_NAME = "skulls.json";
+    private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
+
+    private final Extension extension;
+    private final Path sharedFolder;
+    private final List<SkullEntry> skullEntries;
+
+    /**
+     * Creates a new CustomSkullsHandler.
+     *
+     * @param extension the parent extension instance
+     * @param sharedFolder the path to the shared data folder
+     */
+    public CustomSkullsHandler(Extension extension, Path sharedFolder) {
+        this.extension = extension;
+        this.sharedFolder = sharedFolder;
+        this.skullEntries = new ArrayList<>();
+        loadSkullRegistry();
+    }
+
+    /**
+     * Loads skull entries from the shared skulls.json file.
+     * Creates the shared folder if it does not exist.
+     */
+    private void loadSkullRegistry() {
+        extension.logger().info("=== Loading Skull Registry ===");
+        Path skullsFile = sharedFolder.resolve(SKULLS_FILE_NAME);
+        extension.logger().info("Skulls file path: " + skullsFile.toAbsolutePath());
+
+        if (!Files.exists(sharedFolder)) {
+            try {
+                Files.createDirectories(sharedFolder);
+                extension.logger().info("Created shared folder: " + sharedFolder);
+            } catch (IOException e) {
+                extension.logger().error("Failed to create shared folder: " + e.getMessage());
+                return;
+            }
+        }
+
+        if (!Files.exists(skullsFile)) {
+            extension.logger().warning("No skulls.json found at " + skullsFile);
+            extension.logger().info("This file is created by the Paper plugin after scanning skulls.");
+            extension.logger().info("Steps to fix:");
+            extension.logger().info("  1. Place some custom player heads in the world");
+            extension.logger().info("  2. Restart server to let Paper plugin scan them");
+            extension.logger().info("  3. Restart again for Extension to load the skulls");
+            createSampleSkullsFile(skullsFile);
+            return;
+        }
+
+        try {
+            String content = Files.readString(skullsFile, StandardCharsets.UTF_8);
+            extension.logger().info("Read skulls.json (" + content.length() + " bytes)");
+
+            JsonObject root = JsonParser.parseString(content).getAsJsonObject();
+            parseSkullEntries(root);
+            extension.logger().info("Successfully loaded " + skullEntries.size() + " custom skull entries.");
+        } catch (IOException e) {
+            extension.logger().error("Failed to read skulls.json: " + e.getMessage());
+        } catch (Exception e) {
+            extension.logger().error("Failed to parse skulls.json: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+
+    /**
+     * Parses skull entries from the JSON configuration.
+     *
+     * @param root the root JSON object containing skull definitions
+     */
+    private void parseSkullEntries(JsonObject root) {
+        // Format: { "skulls": [ { "texture": "...", "type": "PROFILE|SKIN_HASH|USERNAME|UUID" }, ... ] }
+        if (!root.has("skulls")) {
+            extension.logger().warning("skulls.json missing 'skulls' array.");
+            return;
+        }
+
+        JsonArray skulls = root.getAsJsonArray("skulls");
+        for (JsonElement element : skulls) {
+            JsonObject skullDef = element.getAsJsonObject();
+            SkullEntry entry = parseSkullDefinition(skullDef);
+            if (entry != null) {
+                skullEntries.add(entry);
+            }
+        }
+    }
+
+    /**
+     * Parses a single skull definition from JSON.
+     *
+     * @param skullDef the JSON object containing skull properties
+     * @return the parsed SkullEntry or null if parsing fails
+     */
+    private SkullEntry parseSkullDefinition(JsonObject skullDef) {
+        try {
+            String texture = getStringOrDefault(skullDef, "texture", null);
+            String typeStr = getStringOrDefault(skullDef, "type", "PROFILE");
+
+            if (texture == null || texture.isBlank()) {
+                extension.logger().warning("Skull definition missing 'texture' field, skipping.");
+                return null;
+            }
+
+            SkullTextureType textureType = parseSkullTextureType(typeStr);
+            if (textureType == null) {
+                extension.logger().warning("Invalid skull texture type '" + typeStr + "', skipping.");
+                return null;
+            }
+
+            return new SkullEntry(texture, textureType);
+        } catch (Exception e) {
+            extension.logger().warning("Failed to parse skull definition: " + e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Parses the skull texture type from string.
+     *
+     * @param typeStr the type string (PROFILE, SKIN_HASH, USERNAME, UUID)
+     * @return the corresponding SkullTextureType or null if invalid
+     */
+    private SkullTextureType parseSkullTextureType(String typeStr) {
+        return switch (typeStr.toUpperCase()) {
+            case "PROFILE" -> SkullTextureType.PROFILE;
+            case "SKIN_HASH" -> SkullTextureType.SKIN_HASH;
+            case "USERNAME" -> SkullTextureType.USERNAME;
+            case "UUID" -> SkullTextureType.UUID;
+            default -> null;
+        };
+    }
+
+    /**
+     * Registers all loaded custom skulls with the Geyser event.
+     *
+     * @param event the custom skulls definition event from Geyser
+     */
+    public void registerSkulls(GeyserDefineCustomSkullsEvent event) {
+        extension.logger().info("=== Custom Skulls Registration ===");
+        extension.logger().info("Loaded skull entries: " + skullEntries.size());
+        extension.logger().info("NOTE: Geyser requires 'enable-custom-content: true' in config.yml");
+
+        int registeredCount = 0;
+
+        for (SkullEntry entry : skullEntries) {
+            try {
+                extension.logger().info("Registering skull - Type: " + entry.textureType()
+                    + ", Texture: " + truncateForLogging(entry.texture()));
+                event.register(entry.texture(), entry.textureType());
+                registeredCount++;
+                extension.logger().info("Successfully registered skull: " + truncateForLogging(entry.texture()));
+            } catch (Exception e) {
+                extension.logger().error("Failed to register skull with texture '"
+                    + truncateForLogging(entry.texture()) + "': " + e.getMessage());
+                e.printStackTrace();
+            }
+        }
+
+        extension.logger().info("=== Skull Registration Complete: " + registeredCount + " skull(s) ===");
+        if (registeredCount == 0) {
+            extension.logger().warning("No skulls registered! Make sure:");
+            extension.logger().warning("  1. Paper plugin has scanned skulls and saved to skulls.json");
+            extension.logger().warning("  2. The skulls.json file exists in the shared folder");
+            extension.logger().warning("  3. Server was restarted after Paper scanned skulls");
+        }
+    }
+
+    /**
+     * Creates a sample skulls.json file for reference.
+     *
+     * @param skullsFile the path to create the sample file
+     */
+    private void createSampleSkullsFile(Path skullsFile) {
+        JsonObject sample = new JsonObject();
+        JsonArray skulls = new JsonArray();
+
+        // Sample profile-based skull (Base64 encoded profile JSON)
+        JsonObject profileSkull = new JsonObject();
+        profileSkull.addProperty("texture", "eyJ0ZXh0dXJlcyI6eyJTS0lOIjp7InVybCI6Imh0dHA6Ly90ZXh0dXJlcy5taW5lY3JhZnQubmV0L3RleHR1cmUvZXhhbXBsZSJ9fX0=");
+        profileSkull.addProperty("type", "PROFILE");
+        // Note: Base64 encoded profile JSON for custom skull texture
+        skulls.add(profileSkull);
+
+        // Sample skin hash skull
+        JsonObject skinHashSkull = new JsonObject();
+        skinHashSkull.addProperty("texture", "a1b2c3d4e5f6...");
+        skinHashSkull.addProperty("type", "SKIN_HASH");
+        skulls.add(skinHashSkull);
+
+        // Sample username-based skull
+        JsonObject usernameSkull = new JsonObject();
+        usernameSkull.addProperty("texture", "Notch");
+        usernameSkull.addProperty("type", "USERNAME");
+        skulls.add(usernameSkull);
+
+        // Sample UUID-based skull
+        JsonObject uuidSkull = new JsonObject();
+        uuidSkull.addProperty("texture", "069a79f4-44e9-4726-a5be-fca90e38aaf5");
+        uuidSkull.addProperty("type", "UUID");
+        skulls.add(uuidSkull);
+
+        sample.add("skulls", skulls);
+
+        try {
+            Files.writeString(skullsFile, GSON.toJson(sample), StandardCharsets.UTF_8);
+            extension.logger().info("Created sample skulls.json at " + skullsFile);
+        } catch (IOException e) {
+            extension.logger().warning("Failed to create sample skulls.json: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Truncates a string for safe logging (to avoid logging very long base64 strings).
+     *
+     * @param str the string to truncate
+     * @return the truncated string with ellipsis if longer than 50 characters
+     */
+    private String truncateForLogging(String str) {
+        if (str == null) {
+            return "null";
+        }
+        if (str.length() <= 50) {
+            return str;
+        }
+        return str.substring(0, 47) + "...";
+    }
+
+    /**
+     * Gets a string value from JSON or returns default.
+     */
+    private String getStringOrDefault(JsonObject obj, String key, String defaultValue) {
+        if (obj.has(key) && !obj.get(key).isJsonNull()) {
+            return obj.get(key).getAsString();
+        }
+        return defaultValue;
+    }
+
+    /**
+     * Returns an unmodifiable list of loaded skull entries.
+     *
+     * @return the list of skull entries
+     */
+    public List<SkullEntry> getSkullEntries() {
+        return Collections.unmodifiableList(skullEntries);
+    }
+
+    /**
+     * Internal record for skull entry data.
+     * Why: This encapsulates skull texture and type information for registration.
+     */
+    public record SkullEntry(
+        String texture,
+        SkullTextureType textureType
+    ) {}
+}

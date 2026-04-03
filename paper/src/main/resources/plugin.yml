@@ -1,0 +1,64 @@
+name: GeyserExtra
+version: 1.0.0
+main: com.geyserextra.paper.GeyserExtraPaper
+api-version: '1.21'
+# Required dependencies - plugin will not work without these
+depend: [ProtocolLib, floodgate]
+# Optional dependencies - load before us if present, but not required
+# Geyser-Spigot is softdepend so GeyserExtra Paper loads BEFORE Geyser
+# This ensures custom_items.json is ready when Geyser Extension reads it
+softdepend: [Geyser-Spigot, ItemsAdder, Oraxen]
+# Load before Geyser-Spigot to ensure data is ready for Extension
+loadbefore: [Geyser-Spigot]
+description: Enhanced Bedrock player experience on Paper servers
+authors: [GeyserExtra]
+commands:
+  offhand:
+    description: Swap items between offhand and hotbar (Bedrock players only)
+    aliases: [oh]
+    permission: geyserextra.offhand
+  menu:
+    description: Open Bedrock command menu
+    aliases: [m]
+    permission: geyserextra.menu
+  tooltip:
+    description: Toggle tooltip display for Bedrock players
+    aliases: [tt]
+    permission: geyserextra.tooltip
+  advancements:
+    description: View advancements for Bedrock players
+    aliases: [adv]
+    permission: geyserextra.advancements
+  stats:
+    description: View statistics for Bedrock players
+    permission: geyserextra.stats
+  gamerules:
+    description: View game rules for Bedrock players
+    aliases: [gr]
+    permission: geyserextra.gamerules
+  settings:
+    description: Open display settings for Bedrock players
+    aliases: [ds]
+    permission: geyserextra.settings
+permissions:
+  geyserextra.offhand:
+    description: Allows using the offhand swap command
+    default: true
+  geyserextra.menu:
+    description: Allows using the Bedrock menu
+    default: true
+  geyserextra.tooltip:
+    description: Allows toggling tooltip display
+    default: true
+  geyserextra.advancements:
+    description: Allows viewing advancements
+    default: true
+  geyserextra.stats:
+    description: Allows viewing statistics
+    default: true
+  geyserextra.gamerules:
+    description: Allows viewing game rules
+    default: true
+  geyserextra.settings:
+    description: Allows configuring display settings
+    default: true

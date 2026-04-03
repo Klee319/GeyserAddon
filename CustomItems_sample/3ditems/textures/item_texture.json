@@ -1,0 +1,11 @@
+{
+    "resource_pack_name": "Hello My Custom Item Texture",
+    "texture_name": "atlas.items",
+    "texture_data": {
+        "geyser_custom:mymodel": {
+            "textures": [
+                "textures/3dweapons/my_custom_item"
+            ]
+        }
+    }
+}

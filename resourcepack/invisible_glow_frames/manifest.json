@@ -1,0 +1,17 @@
+{
+    "format_version": 2,
+    "header": {
+        "name": "GeyserExtra - Invisible Glow Frames",
+        "description": "Makes glow item frames invisible for Bedrock players",
+        "uuid": "bd4b4382-1ff0-45fc-bd1b-07f0669b66b3",
+        "version": [3, 0, 0],
+        "min_engine_version": [1, 21, 0]
+    },
+    "modules": [
+        {
+            "type": "resources",
+            "uuid": "5bddd186-4052-46b1-a33e-cba12adeced5",
+            "version": [3, 0, 0]
+        }
+    ]
+}

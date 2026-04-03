@@ -1,0 +1,6 @@
+id: geyserextra
+name: GeyserExtra
+main: com.geyserextra.extension.GeyserExtraExtension
+api: 2.9.0
+version: 1.0.0
+authors: [GeyserExtra]

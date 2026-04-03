@@ -1,0 +1,37 @@
+GeyserMappingの例
+
+
+
+
+
+`(Geyser)/custom_mappings/XXX.json`
+```json
+{
+  "format_version": 1,
+  "items": {
+    "minecraft:iron_sword": [  // ベースアイテムタイプ
+      {
+        "name": "mymodel",  // マッピング後のアイテムタイプ
+        "custom_model_data": 202,  // ItemStackに合わせる
+        "unbreakable": true  // ItemStackに合わせる
+(...ry)```
+`(RP)/textures/item_texture.json`
+```json
+{
+  "resource_pack_name": "Hello My Custom Item Texture",
+  "texture_name": "atlas.items",
+  "texture_data": {
+    "mymodel": {  // マッピング後のアイテムタイプ
+      "textures": [
+        "textures/items/my_custom_item"  // => (RP)/textures/items/my_custom_item.png
+(...ry)``` (↑ ここまでがアイテムスロットのテクスチャ)
+
+(↓ ここから attachable を使う装備中のモデル)
+`(RP)/attachables/XXX.entity.json`
+```json
+{
+  "format_version": "1.10.0",
+    "minecraft:attachable": {
+      "description": {
+        "identifier": "geyser_custom:mymodel",  // マッピング後のアイテムタイプ (namespace geyser_custom: が必要)
+(...ry)```
