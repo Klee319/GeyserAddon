@@ -473,10 +473,19 @@ public final class BedrockAnvilSimulator implements Listener {
                 // New enchantment being added
                 mergedEnchants.put(enchant, rightLevel);
                 changed = true;
-            } else if (currentLevel == rightLevel && overEnchantLevelUpEnabled) {
-                // Same level combining: level up by 1
-                mergedEnchants.put(enchant, currentLevel + 1);
-                changed = true;
+            } else if (currentLevel == rightLevel) {
+                // Same-level combining: level up by 1.
+                // Why: vanilla allows free level-up up to the enchantment's max level
+                // (e.g. Fortune I + Fortune I = Fortune II). The overEnchantLevelUpEnabled
+                // flag only governs the over-max case (e.g. Fortune III + III = IV).
+                int newLevel = currentLevel + 1;
+                int maxLevel = enchant.getMaxLevel();
+                boolean wouldExceedMax = maxLevel > 0 && newLevel > maxLevel;
+                if ((!wouldExceedMax || overEnchantLevelUpEnabled) && newLevel <= 255) {
+                    mergedEnchants.put(enchant, newLevel);
+                    changed = true;
+                }
+                // else: would exceed vanilla max and over-enchant level-up disabled — keep current level
             } else if (rightLevel > currentLevel) {
                 // Higher level from sacrifice wins
                 mergedEnchants.put(enchant, rightLevel);

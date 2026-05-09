@@ -74,7 +74,17 @@ public final class GameRulesCommand implements CommandExecutor {
         @SuppressWarnings("removal")
         GameRule<?>[] allRules = GameRule.values();
         for (GameRule<?> gameRule : allRules) {
-            Object value = world.getGameRuleValue(gameRule);
+            // Why try-catch: GameRule.values() exposes every rule Bukkit knows about,
+            // but the underlying NMS GameRules instance for a given world may not
+            // contain entries for rules added in newer versions or removed/relocated
+            // in custom worlds. world.getGameRuleValue() throws IllegalArgumentException
+            // for such rules. Skip them so a single missing rule does not break the form.
+            Object value;
+            try {
+                value = world.getGameRuleValue(gameRule);
+            } catch (IllegalArgumentException ex) {
+                continue;
+            }
             if (value == null) {
                 continue;
             }

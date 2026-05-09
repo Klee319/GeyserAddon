@@ -9,6 +9,7 @@ import com.geyserextra.paper.listener.ElytraFlightListener;
 import com.geyserextra.paper.listener.OffhandInteractionListener;
 import com.geyserextra.paper.enchantment.BedrockAnvilSimulator;
 import com.geyserextra.paper.enchantment.BedrockEnchantmentHandler;
+import com.geyserextra.paper.enchantment.BedrockEnchantmentTableGuard;
 import com.geyserextra.paper.recipe.CraftingRecipeHandler;
 import com.geyserextra.paper.recipe.SmithingRecipeHandler;
 import com.geyserextra.paper.pack.AutoBedrockPackBuilder;
@@ -63,6 +64,7 @@ public final class GeyserExtraPaper extends JavaPlugin {
     // Recipe handlers and enchantment handler for Bedrock compatibility
     private BedrockEnchantmentHandler bedrockEnchantmentHandler;
     private BedrockAnvilSimulator bedrockAnvilSimulator;
+    private BedrockEnchantmentTableGuard bedrockEnchantmentTableGuard;
     private SmithingRecipeHandler smithingRecipeHandler;
     private CraftingRecipeHandler craftingRecipeHandler;
 
@@ -414,6 +416,7 @@ public final class GeyserExtraPaper extends JavaPlugin {
     private void initializeRecipeHandlers() {
         bedrockEnchantmentHandler = new BedrockEnchantmentHandler(this);
         bedrockAnvilSimulator = new BedrockAnvilSimulator(this);
+        bedrockEnchantmentTableGuard = new BedrockEnchantmentTableGuard(this);
         smithingRecipeHandler = new SmithingRecipeHandler(this);
         craftingRecipeHandler = new CraftingRecipeHandler(this);
 
@@ -494,6 +497,9 @@ public final class GeyserExtraPaper extends JavaPlugin {
         }
         if (bedrockAnvilSimulator != null && bedrockAnvilSimulator.isEnabled()) {
             getServer().getPluginManager().registerEvents(bedrockAnvilSimulator, this);
+        }
+        if (bedrockEnchantmentTableGuard != null && bedrockEnchantmentTableGuard.isEnabled()) {
+            getServer().getPluginManager().registerEvents(bedrockEnchantmentTableGuard, this);
         }
         if (smithingRecipeHandler != null && smithingRecipeHandler.isEnabled()) {
             getServer().getPluginManager().registerEvents(smithingRecipeHandler, this);
