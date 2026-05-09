@@ -122,20 +122,7 @@ public class GeyserExtraExtension implements Extension {
             if (debug) {
                 logger().info("Initializing CustomItemsHandler...");
             }
-            // Why: Pass BE packs path from config to enable texture filtering.
-            // Auto-detect Geyser packs directory if not configured.
-            String bedrockPacksPath = config.customItems().bedrockPacksPath();
-            if (bedrockPacksPath == null || bedrockPacksPath.isBlank()) {
-                // Auto-detect: dataFolder = extensions/geyserextra, parent = extensions, parent.parent = Geyser-Spigot
-                java.nio.file.Path geyserPacksDir = dataFolder.getParent().getParent().resolve("packs");
-                if (java.nio.file.Files.isDirectory(geyserPacksDir)) {
-                    bedrockPacksPath = geyserPacksDir.toString();
-                    logger().info("Auto-detected BE packs path: " + bedrockPacksPath);
-                }
-            }
-            this.customItemsHandler = new CustomItemsHandler(
-                this, dataFolder, bedrockPacksPath
-            );
+            this.customItemsHandler = new CustomItemsHandler(this, dataFolder);
             if (debug) {
                 logger().info("CustomItemsHandler initialized: " + (customItemsHandler != null));
             }
@@ -187,6 +174,37 @@ public class GeyserExtraExtension implements Extension {
     public void onDefineResourcePacks(GeyserDefineResourcePacksEvent event) {
         if (config.resourcePacks().invisibleGlowFramesEnabled()) {
             registerBuiltInPack(event, "packs/invisible_glow_frames.zip", "invisible_glow_frames");
+        }
+
+        // Auto-generated pack from Paper plugin's CustomItem registry. May be absent on
+        // first launch (Paper hasn't built it yet) — that is OK; it ships next start.
+        if (config.customItems().enabled()) {
+            registerAutoCustomItemsPack(event);
+        }
+    }
+
+    /**
+     * Registers the textureless auto-generated pack produced by the Paper plugin's
+     * {@code AutoBedrockPackBuilder}. This pack alone makes detected custom items
+     * render with their vanilla BE base textures on Bedrock clients, allowing
+     * Geyser's custom item registration to succeed without the operator authoring
+     * any BE resource pack.
+     */
+    private void registerAutoCustomItemsPack(GeyserDefineResourcePacksEvent event) {
+        Path packFile = dataFolder().resolve("packs").resolve("geyserextra_auto.zip");
+        if (!Files.exists(packFile)) {
+            logger().info("Auto custom items pack not present yet: " + packFile);
+            return;
+        }
+        try {
+            PackCodec codec = PackCodec.path(packFile);
+            ResourcePack pack = ResourcePack.create(codec);
+            event.register(pack);
+            logger().info("Registered auto custom items pack: " + packFile);
+        } catch (IllegalArgumentException e) {
+            logger().debug("Auto custom items pack already registered: " + packFile);
+        } catch (Exception e) {
+            logger().warning("Failed to register auto custom items pack: " + e.getMessage());
         }
     }
 

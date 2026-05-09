@@ -25,7 +25,6 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 /**
  * Handler for loading and registering custom items from shared configuration.
@@ -33,56 +32,32 @@ import java.util.Set;
  * Why: This handler reads item definitions from a shared JSON file (custom_items.json)
  * and registers them with Geyser to enable custom items for Bedrock players.
  * The shared file approach allows synchronization with Paper plugin.
+ *
+ * Texture resolution: Items are registered with their generated name as both the
+ * Geyser item name and the texture key. The companion {@code AutoBedrockPackBuilder}
+ * (Paper module) generates a textureless BE pack whose {@code item_texture.json}
+ * points each generated key at the matching vanilla BE texture path, so BE clients
+ * fall back to bundled vanilla textures without operators authoring a custom pack.
  */
 public class CustomItemsHandler {
 
     private static final String ITEMS_FILE_NAME = "custom_items.json";
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
 
-    /**
-     * Why: These prefixes cover all known Geyser custom item texture key formats
-     * used in BE resource packs. The texture key in item_texture.json is typically
-     * prefixed with one of these before the item name.
-     */
-    private static final List<String> TEXTURE_KEY_PREFIXES = List.of(
-        "geyser_custom_",
-        "geyser_custom.",
-        "geyser_custom:"
-    );
-
     private final Extension extension;
     private final Path sharedFolder;
     private final List<ItemMapping> itemMappings;
-    /** Why: Holds all texture keys found in BE packs for O(1) lookup during registration */
-    private final Set<String> availableTextureKeys;
-    /** Why: Flag to skip filtering when no BE packs path is configured (backward compat) */
-    private final boolean textureFilterEnabled;
 
     /**
      * Creates a new CustomItemsHandler.
      *
-     * @param extension       the parent extension instance
-     * @param sharedFolder    the path to the shared data folder
-     * @param bedrockPacksPath the path to BE resource packs directory.
-     *                         Empty or null disables texture filtering.
+     * @param extension    the parent extension instance
+     * @param sharedFolder the path to the shared data folder
      */
-    public CustomItemsHandler(Extension extension, Path sharedFolder, String bedrockPacksPath) {
+    public CustomItemsHandler(Extension extension, Path sharedFolder) {
         this.extension = extension;
         this.sharedFolder = sharedFolder;
         this.itemMappings = new ArrayList<>();
-
-        // Why: Scan BE textures before loading items so filtering info is ready
-        this.availableTextureKeys = initializeTextureKeys(bedrockPacksPath);
-        this.textureFilterEnabled = !this.availableTextureKeys.isEmpty();
-
-        if (this.textureFilterEnabled) {
-            extension.logger().info("Texture filtering ENABLED: "
-                + availableTextureKeys.size() + " texture keys available");
-        } else {
-            extension.logger().info("Texture filtering DISABLED: "
-                + "no BE packs path configured or no textures found");
-        }
-
         loadItemMappings();
     }
 
@@ -185,11 +160,10 @@ public class CustomItemsHandler {
             }
             String name = sanitizeIdentifierValue(rawName, "name");
 
-            // Skip items explicitly marked as not to be registered (no BE texture ready)
+            // Honour explicit opt-out from BE registration (e.g. operator manually disabled an item).
             boolean register = getBooleanOrDefault(itemDef, "register", true);
             if (!register) {
-                extension.logger().info("Skipping item '" + name
-                    + "': register=false (no BE texture configured)");
+                extension.logger().info("Skipping item '" + name + "': register=false");
                 return null;
             }
 
@@ -277,19 +251,11 @@ public class CustomItemsHandler {
      *
      * @param event the custom items definition event from Geyser
      */
-    /**
-     * Registers all loaded custom items with the Geyser event.
-     * Items without matching BE textures are skipped when texture filtering is enabled.
-     *
-     * @param event the custom items definition event from Geyser
-     */
     public void registerItems(GeyserDefineCustomItemsEvent event) {
         extension.logger().info("=== Custom Items Registration ===");
         extension.logger().info("Loaded item mappings: " + itemMappings.size());
-        extension.logger().info("Texture filter: " + (textureFilterEnabled ? "ENABLED" : "DISABLED"));
         extension.logger().info("Shared folder path: " + sharedFolder.toAbsolutePath());
         int registeredCount = 0;
-        int skippedCount = 0;
 
         for (ItemMapping mapping : itemMappings) {
             try {
@@ -297,16 +263,6 @@ public class CustomItemsHandler {
                 // model IDs that would affect vanilla item textures
                 if (mapping.isNonVanilla) {
                     registeredCount += registerNonVanillaItem(event, mapping);
-                    continue;
-                }
-
-                // Why: Skip items without BE textures to prevent model ID consumption
-                // that would break vanilla item rendering
-                if (textureFilterEnabled && !hasMatchingTexture(mapping)) {
-                    extension.logger().warning("Skipping item '" + mapping.name()
-                        + "' (base: " + mapping.baseItem()
-                        + "): no matching texture found in BE resource packs");
-                    skippedCount++;
                     continue;
                 }
 
@@ -318,8 +274,7 @@ public class CustomItemsHandler {
             }
         }
 
-        extension.logger().info("=== Registration Complete: " + registeredCount
-            + " registered, " + skippedCount + " skipped ===");
+        extension.logger().info("=== Registration Complete: " + registeredCount + " registered ===");
     }
 
     /**
@@ -468,65 +423,6 @@ public class CustomItemsHandler {
             extension.logger().warning("Failed to create sample custom_items.json: " + e.getMessage());
         }
     }
-
-    /**
-     * Initializes the set of available texture keys from BE resource packs.
-     *
-     * Why: Separated from constructor to keep constructor focused on field
-     * assignment and to allow isolated testing of scan logic.
-     *
-     * @param bedrockPacksPath the path to scan, or empty/null to skip
-     * @return unmodifiable set of texture keys
-     */
-    private Set<String> initializeTextureKeys(String bedrockPacksPath) {
-        if (bedrockPacksPath == null || bedrockPacksPath.isBlank()) {
-            return Collections.emptySet();
-        }
-
-        Path packsPath = Path.of(bedrockPacksPath);
-        return BedrockTextureScanner.scanTextureKeys(packsPath, extension.logger());
-    }
-
-    /**
-     * Checks whether a matching texture key exists in the BE resource pack
-     * for the given item mapping.
-     *
-     * Why: Items may use different naming conventions. We check both the icon
-     * field (primary) and name field (fallback) against all known prefixes.
-     *
-     * @param mapping the item mapping to check
-     * @return true if a matching texture was found
-     */
-    private boolean hasMatchingTexture(ItemMapping mapping) {
-        // Why: Check icon first as it directly maps to the texture reference
-        if (mapping.icon() != null && matchesAnyTextureKey(mapping.icon())) {
-            return true;
-        }
-
-        // Why: Fallback to name field if icon didn't match
-        return mapping.name() != null && matchesAnyTextureKey(mapping.name());
-    }
-
-    /**
-     * Tests whether a given name matches any available texture key,
-     * either directly or with any known Geyser prefix.
-     *
-     * @param name the base item name to check
-     * @return true if a matching texture key was found
-     */
-    private boolean matchesAnyTextureKey(String name) {
-        // Why: Check bare name first (direct match)
-        if (availableTextureKeys.contains(name)) {
-            return true;
-        }
-
-        // Why: Check with each known Geyser prefix
-        return TEXTURE_KEY_PREFIXES.stream()
-            .anyMatch(prefix -> availableTextureKeys.contains(prefix + name));
-    }
-
-    private static final java.util.regex.Pattern VALID_IDENTIFIER_PATTERN =
-        java.util.regex.Pattern.compile("[a-z0-9_\\-./]+");
 
     /**
      * Sanitizes a name/identifier value for Geyser compatibility.

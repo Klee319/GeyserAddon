@@ -475,7 +475,10 @@ public final class ItemMappingRegistry {
             String iconPath = getStringOrNull(itemDef, "icon");
             int creativeCategory = getIntOrDefault(itemDef, "creative_category", 0);
             String creativeGroup = getStringOrNull(itemDef, "creative_group");
-            boolean register = getBooleanOrDefault(itemDef, "register", false);
+            // register defaults to true: the auto-generated BE pack now ships an
+            // item_texture.json entry for every mapping pointing at the base item's
+            // vanilla texture, so registration is safe even without an authored pack.
+            boolean register = getBooleanOrDefault(itemDef, "register", true);
 
             return new CustomItemMapping(
                 name,

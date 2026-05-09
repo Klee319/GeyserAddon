@@ -29,22 +29,30 @@ import java.util.logging.Level;
 /**
  * Scanner for detecting and registering custom items with CustomModelData.
  * Uses Paper's Data Component API (1.21+) to detect items and register them.
+ *
+ * Registration policy: Every detected CMD item is registered with {@code register=true}
+ * regardless of whether a PDC identifier was found. Items lacking a PDC fall back to
+ * an auto-generated name {@code custom_<base>_<CMD>}; the companion auto-generated BE
+ * pack supplies an {@code item_texture.json} entry that points the auto name at the
+ * vanilla base item texture, so BE clients render them as the underlying base item.
+ *
+ * The previous "skip without PDC + warn loudly" behaviour produced log spam on servers
+ * with bulk-registered custom items (ItemsAdder, Oraxen, Skript). The new flow keeps
+ * a debounced INFO summary per scan burst instead.
  */
 public final class CustomItemScanner {
 
     private static final String MINECRAFT_NAMESPACE = "minecraft:";
-    /** Debounce delay before printing the aggregate PDC-missing summary (5s @ 20 tps). */
-    private static final long PDC_SUMMARY_DELAY_TICKS = 100L;
+    /** Debounce delay before printing the aggregate auto-generated summary (5s @ 20 tps). */
+    private static final long AUTO_NAMED_SUMMARY_DELAY_TICKS = 100L;
 
-    // Track items that have been warned about missing PDC
-    private final Set<String> warnedItems = new HashSet<>();
+    /** Tracks which (baseItem:CMD) pairs we've already counted as auto-named to avoid double counting. */
+    private final Set<String> autoNamedSeen = new HashSet<>();
 
-    // PDC compact-mode state — guarded by main thread (warnings are emitted from main thread).
-    private boolean pdcInstructionShown = false;
-    // Debounced summary task. Mutated only on main thread; reads on main thread.
-    private BukkitTask pendingPdcSummaryTask;
-    // Tracks the warnedItems.size() observed at last summary print so we don't re-emit unchanged counts.
-    private int lastPdcSummaryCount = 0;
+    // Auto-named summary state — guarded by main thread (warnings are emitted from main thread).
+    private BukkitTask pendingAutoNamedSummaryTask;
+    /** Tracks the autoNamedSeen.size() observed at last summary print so we don't re-emit unchanged counts. */
+    private int lastAutoNamedSummaryCount = 0;
 
     private final ItemMappingRegistry registry;
     private final GeyserExtraPaper plugin;
@@ -100,23 +108,18 @@ public final class CustomItemScanner {
             }
         }
 
-        // Generate name (requires PDC or CMD strings)
+        // Generate name (prefers PDC, falls back to auto-generated form)
         String name = generateMappingName(itemStack, baseItem, primaryCmdValue, customModelData);
-
-        // If auto-generated name (no PDC found), warn and skip registration
-        if (name.startsWith("custom_")) {
-            warnMissingPDC(baseItem, primaryCmdValue, name);
-            return Optional.empty();  // Do not register without proper identifier
-        }
+        boolean autoNamed = name.startsWith("custom_");
 
         // Check by name
         if (registry.contains(name)) {
             return registry.getByName(name);
         }
 
-        // Create and register
-        // Why register=false by default: auto-detected items may not have BE textures.
-        // Users must set register=true in custom_items.json after preparing the texture.
+        // Create and register. register=true so the BE Geyser side picks the item up; the
+        // auto-generated BE pack supplies the matching item_texture.json entry pointing at
+        // the vanilla base texture, which is what makes this safe without an authored pack.
         CustomItemMapping mapping = new CustomItemMapping(
             name,
             baseItem,
@@ -126,34 +129,38 @@ public final class CustomItemScanner {
             null,
             determineCreativeCategory(itemStack.getType()),
             null,
-            false
+            true
         );
 
         registry.register(mapping);
-        plugin.getLogger().info("Registered custom item: " + name + " (CMD: " + primaryCmdValue + ")");
+
+        if (autoNamed) {
+            trackAutoNamed(baseItem, primaryCmdValue);
+            if (plugin.getGeyserExtraConfig().general().debugMode()) {
+                plugin.getLogger().fine("Auto-registered " + name + " (no PDC; CMD=" + primaryCmdValue + ")");
+            }
+        } else {
+            plugin.getLogger().info("Registered custom item: " + name + " (CMD: " + primaryCmdValue + ")");
+        }
 
         return Optional.of(mapping);
     }
 
     /**
-     * Warns about missing PDC identifier and prompts manual mapping.
+     * Records that an auto-named item was seen and schedules a debounced INFO summary.
      *
      * Verbosity is governed by {@code customItems.pdcWarning} configuration:
      * <ul>
-     *   <li>{@code FULL}: full 14-line block per unique item (legacy behavior).</li>
-     *   <li>{@code COMPACT} (default): full block emitted once with a transition notice,
-     *       then a single {@code [PDC missing] base CMD=N -> auto_name} line per
-     *       subsequent unique item plus a debounced aggregate summary 5 seconds after
-     *       the last new item (so log readers see one count per scan burst, not 50).</li>
-     *   <li>{@code DISABLED}: no log output (registration is still skipped).</li>
+     *   <li>{@code FULL}: per-item INFO line plus the debounced summary.</li>
+     *   <li>{@code COMPACT} (default): summary only.</li>
+     *   <li>{@code DISABLED}: no log output (registration still happens).</li>
      * </ul>
      */
-    private void warnMissingPDC(String baseItem, int cmdValue, String autoName) {
+    private void trackAutoNamed(String baseItem, int cmdValue) {
         String key = baseItem + ":" + cmdValue;
-        if (warnedItems.contains(key)) {
+        if (!autoNamedSeen.add(key)) {
             return;
         }
-        warnedItems.add(key);
 
         String mode = resolvePdcWarningMode();
 
@@ -162,56 +169,18 @@ public final class CustomItemScanner {
         }
 
         if (GeyserExtraConfig.CustomItemsConfig.PDC_WARNING_FULL.equals(mode)) {
-            printFullPdcWarning(baseItem, cmdValue, autoName);
-            return;
+            plugin.getLogger().info(String.format(
+                "[Auto] Registered without PDC: %s CMD=%d (BE will use base texture)",
+                baseItem, cmdValue));
         }
 
-        // COMPACT mode — show educational block once, then 1-line per unique item.
-        if (!pdcInstructionShown) {
-            pdcInstructionShown = true;
-            printFullPdcWarning(baseItem, cmdValue, autoName);
-            plugin.getLogger().warning(
-                "=== Further unmapped items will be listed compactly. "
-                + "Set customItems.pdcWarning=\"FULL\" for the full block per item, "
-                + "or \"DISABLED\" to silence. ===");
-        } else {
-            plugin.getLogger().warning(String.format(
-                "[PDC missing] %s CMD=%d -> %s",
-                baseItem, cmdValue, autoName));
-        }
-
-        scheduleCompactSummary();
+        scheduleAutoNamedSummary();
     }
 
     /**
-     * Emits the verbose 14-line guidance block. Used by FULL mode and the first
-     * occurrence in COMPACT mode.
-     */
-    private void printFullPdcWarning(String baseItem, int cmdValue, String autoName) {
-        plugin.getLogger().warning("=== Custom Item Mapping Warning ===");
-        plugin.getLogger().warning("Item detected without PersistentDataContainer identifier:");
-        plugin.getLogger().warning("  Base Item: " + baseItem);
-        plugin.getLogger().warning("  CustomModelData: " + cmdValue);
-        plugin.getLogger().warning("  Auto-generated name: " + autoName);
-        plugin.getLogger().warning("");
-        plugin.getLogger().warning("To fix: Add item ID to PersistentDataContainer in your plugin:");
-        plugin.getLogger().warning("  meta.getPersistentDataContainer().set(");
-        plugin.getLogger().warning("      new NamespacedKey(plugin, \"item_id\"),");
-        plugin.getLogger().warning("      PersistentDataType.STRING,");
-        plugin.getLogger().warning("      \"your_item_name\"");
-        plugin.getLogger().warning("  );");
-        plugin.getLogger().warning("");
-        plugin.getLogger().warning("Or manually edit custom_items.json to set the correct name.");
-        plugin.getLogger().warning("===================================");
-    }
-
-    /**
-     * Resolves the configured PDC warning mode, normalizing case and falling back to
-     * COMPACT when the config (or the field within it) is null.
-     *
-     * Why defensive null-checks: this method runs from listener callbacks before/after
-     * onEnable boundaries (e.g., tests, reload paths), and a partially-loaded plugin
-     * shouldn't crash the scanner.
+     * Resolves the configured verbosity mode, normalizing case and falling back to COMPACT
+     * when the config (or the field within it) is null. Defensive against partially-loaded
+     * plugins (tests, reload paths).
      */
     private String resolvePdcWarningMode() {
         GeyserExtraConfig config = plugin.getGeyserExtraConfig();
@@ -226,27 +195,23 @@ public final class CustomItemScanner {
     }
 
     /**
-     * (Re)schedules a debounced summary task that logs the total unique unmapped item
-     * count once a scan burst settles (5s of quiet). Each new warning during the burst
-     * cancels the previously scheduled task and re-arms it, so the user sees the
-     * summary exactly once per burst with the final count.
-     *
-     * Safe to call from any thread: BukkitScheduler.runTaskLater dispatches to the
-     * primary thread, where mutation of pendingPdcSummaryTask is also performed.
+     * (Re)schedules a debounced summary task that logs the total auto-named count once a
+     * scan burst settles (5s of quiet). Each new event during the burst cancels and re-arms
+     * so the user sees one summary line per burst with the final count.
      */
-    private void scheduleCompactSummary() {
+    private void scheduleAutoNamedSummary() {
         try {
-            if (pendingPdcSummaryTask != null) {
-                pendingPdcSummaryTask.cancel();
-                pendingPdcSummaryTask = null;
+            if (pendingAutoNamedSummaryTask != null) {
+                pendingAutoNamedSummaryTask.cancel();
+                pendingAutoNamedSummaryTask = null;
             }
-            pendingPdcSummaryTask = plugin.getServer().getScheduler().runTaskLater(
+            pendingAutoNamedSummaryTask = plugin.getServer().getScheduler().runTaskLater(
                 plugin,
                 () -> {
-                    pendingPdcSummaryTask = null;
-                    logPdcMissingSummary();
+                    pendingAutoNamedSummaryTask = null;
+                    logAutoNamedSummary();
                 },
-                PDC_SUMMARY_DELAY_TICKS
+                AUTO_NAMED_SUMMARY_DELAY_TICKS
             );
         } catch (IllegalStateException | IllegalArgumentException ignored) {
             // Plugin disabled mid-burst — onDisable will flush the summary instead.
@@ -254,51 +219,42 @@ public final class CustomItemScanner {
     }
 
     /**
-     * Logs the aggregate "N unique items lacked PDC identifier" summary if new
-     * unmapped items have been observed since the last summary. Idempotent: calling
-     * this repeatedly without new warnings is a no-op.
+     * Logs the aggregate "N items auto-registered without PDC" summary if new
+     * auto-named items have been observed since the last summary. Idempotent.
      *
      * Called by:
      * <ul>
-     *   <li>The debounced scheduled task at the end of a warning burst.</li>
-     *   <li>{@code GeyserExtraPaper.onDisable} as a safety net to flush any pending
-     *       summary that the scheduled task didn't get to fire.</li>
+     *   <li>The debounced scheduled task at the end of a scan burst.</li>
+     *   <li>{@code GeyserExtraPaper.onDisable} as a safety net.</li>
      * </ul>
      */
-    public void logPdcMissingSummary() {
-        int count = warnedItems.size();
-        if (count == 0 || count == lastPdcSummaryCount) {
+    public void logAutoNamedSummary() {
+        int count = autoNamedSeen.size();
+        if (count == 0 || count == lastAutoNamedSummaryCount) {
             return;
         }
-        lastPdcSummaryCount = count;
+        lastAutoNamedSummaryCount = count;
 
         String mode = resolvePdcWarningMode();
         if (GeyserExtraConfig.CustomItemsConfig.PDC_WARNING_DISABLED.equals(mode)) {
             return;
         }
 
-        if (GeyserExtraConfig.CustomItemsConfig.PDC_WARNING_COMPACT.equals(mode)) {
-            plugin.getLogger().info(String.format(
-                "[PDC] %d unique item(s) lacked PDC identifier (registration skipped). "
-                + "Set customItems.pdcWarning=\"FULL\" for per-item details "
-                + "or \"DISABLED\" to silence.",
-                count));
-        } else {
-            plugin.getLogger().info(String.format(
-                "[PDC] %d unique item(s) lacked PDC identifier (registration skipped).",
-                count));
-        }
+        plugin.getLogger().info(String.format(
+            "[CustomItems] Auto-registered %d item(s) without PDC identifier "
+            + "(BE clients render them as the base item via the auto-generated pack).",
+            count));
     }
 
     /**
      * Cancels any pending debounced summary task. Intended for plugin shutdown so
      * the scheduler doesn't try to fire a task against a disabled plugin instance.
      */
-    public void cancelPendingPdcSummary() {
+    public void cancelPendingAutoNamedSummary() {
         try {
-            if (pendingPdcSummaryTask != null) {
-                pendingPdcSummaryTask.cancel();
-                pendingPdcSummaryTask = null;
+            if (pendingAutoNamedSummaryTask != null) {
+                pendingAutoNamedSummaryTask.cancel();
+                pendingAutoNamedSummaryTask = null;
             }
         } catch (Exception ignored) {
             // Best-effort cleanup during shutdown.

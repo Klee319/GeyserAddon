@@ -1,7 +1,7 @@
 # GeyserExtra
 
 Geyser環境でBedrock Edition（統合版）プレイヤーにJava Editionに近い体験を提供するプラグイン＆エクステンション。
-
+リポジトリ：https://github.com/Klee319/GeyserAddon.git
 ## 概要
 
 GeyserExtraは**Paper Plugin**と**Geyser Extension**のハイブリッド構成で動作します。
@@ -15,11 +15,21 @@ GeyserExtraは**Paper Plugin**と**Geyser Extension**のハイブリッド構成
 
 ### 1. カスタムアイテム自動マッピング
 
-CustomModelDataを持つアイテムを自動検出し、Bedrockプレイヤーに正しいテクスチャを表示。
+CustomModelDataを持つアイテムを自動検出し、Bedrockプレイヤーから新規アイテムとして識別できるよう登録します。クラフトリザルトのプレビュー、レシピブック、操作・効果が JE と同等に動作します。
 
-**対応条件:**
-- PersistentDataContainerにアイテムIDが設定されていること
-- または、CustomModelData.strings()に識別子が設定されていること
+**Bedrock 側のテクスチャ:**
+- 既定では**ベースアイテムのバニラテクスチャ**で表示されます
+  （例: `minecraft:diamond_sword` ベースなら Bedrock 上はダイヤ剣の見た目）
+- 専用 BE リソースパックの作成は**不要**です。GeyserExtra が起動時に最小パック (`packs/geyserextra_auto.zip`) を自動生成し、`item_texture.json` の各エントリをベースアイテムのテクスチャパスへ向けて配信します
+- 専用テクスチャを表示したい場合は、自動パックのエントリを上書きする BE リソースパックを別途配置してください
+
+**マッピング名の決定（優先順）:**
+1. PersistentDataContainer の `item_id` 等のキー（複数の標準名に対応）
+2. CustomModelData の `strings()` に設定された識別子
+3. 自動生成名 `custom_<base>_<CMD>`（PDC・strings 共に未設定の場合）
+
+**ログ出力:**
+PDC無しで自動生成名を使ったアイテムは、スキャンバースト終息後に1行のINFOサマリ（例: `[CustomItems] Auto-registered 50 item(s) without PDC identifier`）として出力。詳細表示は `customItems.pdcWarning` で `FULL` / `COMPACT` / `DISABLED` を選択可能。
 
 ### 2. カスタムスカル自動マッピング
 
@@ -166,9 +176,9 @@ GeyserExtraはGeyser Recipe Fixerの上位互換として位置づけられま�
 
 ### プラグイン開発者向け: 自動マッピング対応方法
 
-GeyserExtraがカスタムアイテムを自動認識するには、**PersistentDataContainer**にアイテムIDを設定する必要があります。
+GeyserExtraはCustomModelData付きのアイテムをすべて自動登録します。PDCを設定しなくても登録自体は成立し、Bedrock 上ではベースアイテムのテクスチャで表示されます。**PDC設定は推奨**で、設定しておくとマッピング名がプラグイン由来の安定識別子になり、`custom_items.json` を編集して個別の表示名・専用 BE テクスチャを割り当てやすくなります。
 
-#### 必須: アイテムID設定
+#### 推奨: アイテムID設定
 
 ```java
 import org.bukkit.NamespacedKey;
@@ -237,7 +247,7 @@ public ItemStack createCustomItem() {
     "mappingsFile": "custom_items.json",
     "autoReload": false,
     "reloadIntervalSeconds": 60,
-    "bedrockPacksPath": ""
+    "pdcWarning": "COMPACT"
   },
   "skulls": {
     "enabled": true,
@@ -269,7 +279,7 @@ public ItemStack createCustomItem() {
 | `general.debugMode` | デバッグログ出力 | `false` |
 | `general.workerThreads` | バックグラウンドワーカースレッド数 | `2` |
 | `customItems.enabled` | カスタムアイテム機能 | `true` |
-| `customItems.bedrockPacksPath` | BEテクスチャフィルタ用パスク（空で無効） | `""` |
+| `customItems.pdcWarning` | PDC無しアイテムのログ詳細度 (`FULL`/`COMPACT`/`DISABLED`) | `COMPACT` |
 | `skulls.enabled` | カスタムスカル機能 | `true` |
 | `enchantment.enabled` | エンチャント表示・保護機能全体 | `true` |
 | `enchantment.showCustomEnchantments` | カスタムエンチャントのlore表示 | `true` |
@@ -284,19 +294,20 @@ public ItemStack createCustomItem() {
 
 ## トラブルシューティング
 
-### カスタムアイテムが認識されない
+### PDC無しアイテムが大量に検出される / ログを抑制したい
 
-**警告メッセージが表示される場合:**
+**INFOサマリが表示される場合（PDC無しでも自動登録は成功しています）:**
 ```
-=== Custom Item Mapping Warning ===
-Item detected without PersistentDataContainer identifier:
-  Base Item: minecraft:diamond
-  CustomModelData: 1005
+[CustomItems] Auto-registered 50 item(s) without PDC identifier
+(BE clients render them as the base item via the auto-generated pack).
 ```
 
-**解決方法:**
-1. プラグインでPersistentDataContainerにアイテムIDを設定
-2. または、`custom_items.json`を手動編集
+これは「PDC識別子無しのCMDアイテムを50件、ベース見た目で自動登録した」という通知で、機能不全ではありません。
+
+**抑制方法:**
+- `customItems.pdcWarning` を `DISABLED` にすると一切ログ出力しません（登録自体は継続）
+- `FULL` にすると 1 アイテムごとに INFO 行 + サマリを出力します
+- 個別アイテムの登録を無効化したい場合は `custom_items.json` の該当エントリで `"register": false` を指定
 
 ### エンチャントがloreに表示されない
 

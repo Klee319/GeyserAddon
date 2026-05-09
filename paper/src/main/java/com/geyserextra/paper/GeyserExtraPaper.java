@@ -11,6 +11,7 @@ import com.geyserextra.paper.enchantment.BedrockAnvilSimulator;
 import com.geyserextra.paper.enchantment.BedrockEnchantmentHandler;
 import com.geyserextra.paper.recipe.CraftingRecipeHandler;
 import com.geyserextra.paper.recipe.SmithingRecipeHandler;
+import com.geyserextra.paper.pack.AutoBedrockPackBuilder;
 import com.geyserextra.paper.scanner.CustomItemScanner;
 import com.geyserextra.paper.scanner.RecipeScanner;
 import com.geyserextra.paper.scanner.SkullScanner;
@@ -162,12 +163,12 @@ public final class GeyserExtraPaper extends JavaPlugin {
             discordSRVSkinHook.unregister();
         }
 
-        // Flush any pending PDC-missing summary so admins see the final count even if
+        // Flush any pending auto-named summary so admins see the final count even if
         // the debounced summary task hadn't fired yet, then cancel the scheduled task
         // to prevent it from firing against a disabled plugin.
         if (customItemScanner != null) {
-            customItemScanner.cancelPendingPdcSummary();
-            customItemScanner.logPdcMissingSummary();
+            customItemScanner.cancelPendingAutoNamedSummary();
+            customItemScanner.logAutoNamedSummary();
         }
 
         // Save registries to shared folder for Geyser extension
@@ -573,6 +574,20 @@ public final class GeyserExtraPaper extends JavaPlugin {
                 itemMappingRegistry.save(itemsPath);
                 if (debug) {
                     getLogger().info("Saved " + itemMappingRegistry.size() + " items.");
+                }
+
+                // Why: Geyser custom items render as missing texture without an item_texture.json
+                // entry. Generate a textureless pack that points every mapping at the matching
+                // vanilla BE texture so admins do not have to author a BE resource pack.
+                Path autoPackPath = extensionFolder.resolve("packs").resolve("geyserextra_auto.zip");
+                try {
+                    AutoBedrockPackBuilder.build(itemMappingRegistry, autoPackPath);
+                    if (debug) {
+                        getLogger().info("Built auto BE pack: " + autoPackPath
+                            + " (" + itemMappingRegistry.size() + " mappings)");
+                    }
+                } catch (IOException e) {
+                    getLogger().log(Level.WARNING, "Failed to build auto BE pack at " + autoPackPath, e);
                 }
             }
 

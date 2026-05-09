@@ -293,13 +293,17 @@ public final class GeyserExtraConfig {
 
         /**
          * Returns the path to the directory containing BE resource packs.
-         * When empty, texture filtering is disabled and all items are registered.
          *
-         * Why: Empty string as default ensures backward compatibility -
-         * existing configurations without this field will not break.
-         *
-         * @return the BE resource packs directory path, or empty string if unset
+         * @deprecated As of the auto-generated pack rework, GeyserExtra no longer
+         *     scans an external BE resource pack directory to filter mappings.
+         *     The companion {@code AutoBedrockPackBuilder} writes a textureless pack
+         *     under {@code <extension>/packs/geyserextra_auto.zip} that points every
+         *     mapping at the matching vanilla BE texture, so admins do not author
+         *     a pack themselves. This field is kept for backwards-compat with older
+         *     {@code config.json} files but is unused.
+         * @return the configured value (kept for compatibility), or empty string
          */
+        @Deprecated
         public String bedrockPacksPath() {
             return bedrockPacksPath;
         }
