@@ -162,6 +162,14 @@ public final class GeyserExtraPaper extends JavaPlugin {
             discordSRVSkinHook.unregister();
         }
 
+        // Flush any pending PDC-missing summary so admins see the final count even if
+        // the debounced summary task hadn't fired yet, then cancel the scheduled task
+        // to prevent it from firing against a disabled plugin.
+        if (customItemScanner != null) {
+            customItemScanner.cancelPendingPdcSummary();
+            customItemScanner.logPdcMissingSummary();
+        }
+
         // Save registries to shared folder for Geyser extension
         saveRegistriesToSharedFolder();
 

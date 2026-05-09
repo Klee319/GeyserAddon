@@ -224,11 +224,20 @@ public final class GeyserExtraConfig {
      * Custom items feature configuration.
      */
     public static final class CustomItemsConfig {
+
+        /** Verbose per-item warning (legacy 14-line block per occurrence). */
+        public static final String PDC_WARNING_FULL = "FULL";
+        /** Compact mode: full instructions once, then 1-line per unique item, debounced summary. */
+        public static final String PDC_WARNING_COMPACT = "COMPACT";
+        /** Suppress all PDC-missing warnings (registration is still skipped). */
+        public static final String PDC_WARNING_DISABLED = "DISABLED";
+
         private final boolean enabled;
         private final String mappingsFile;
         private final boolean autoReload;
         private final int reloadIntervalSeconds;
         private final String bedrockPacksPath;
+        private final String pdcWarning;
 
         public CustomItemsConfig() {
             this.enabled = true;
@@ -236,6 +245,7 @@ public final class GeyserExtraConfig {
             this.autoReload = false;
             this.reloadIntervalSeconds = 60;
             this.bedrockPacksPath = "";
+            this.pdcWarning = PDC_WARNING_COMPACT;
         }
 
         public CustomItemsConfig(
@@ -243,13 +253,26 @@ public final class GeyserExtraConfig {
                 String mappingsFile,
                 boolean autoReload,
                 int reloadIntervalSeconds,
-                String bedrockPacksPath
+                String bedrockPacksPath,
+                String pdcWarning
         ) {
             this.enabled = enabled;
             this.mappingsFile = mappingsFile != null ? mappingsFile : "custom_items.json";
             this.autoReload = autoReload;
             this.reloadIntervalSeconds = reloadIntervalSeconds > 0 ? reloadIntervalSeconds : 60;
             this.bedrockPacksPath = bedrockPacksPath != null ? bedrockPacksPath : "";
+            this.pdcWarning = normalizePdcWarning(pdcWarning);
+        }
+
+        private static String normalizePdcWarning(String raw) {
+            if (raw == null || raw.isBlank()) {
+                return PDC_WARNING_COMPACT;
+            }
+            String upper = raw.toUpperCase(java.util.Locale.ROOT);
+            return switch (upper) {
+                case PDC_WARNING_FULL, PDC_WARNING_COMPACT, PDC_WARNING_DISABLED -> upper;
+                default -> PDC_WARNING_COMPACT;
+            };
         }
 
         public boolean enabled() {
@@ -279,6 +302,25 @@ public final class GeyserExtraConfig {
          */
         public String bedrockPacksPath() {
             return bedrockPacksPath;
+        }
+
+        /**
+         * Returns the verbosity mode for PDC-missing warnings.
+         *
+         * Why: Servers using plugins that bulk-register CustomModelData items without PDC
+         * (ItemsAdder, Oraxen, Skript scripts, raw /give component data) hit dozens of
+         * unique items at once, and the legacy 14-line block per item produced log spam
+         * that drowned out other diagnostics. COMPACT keeps the educational guidance
+         * (printed once) while listing subsequent items as a single line each plus
+         * a debounced aggregate summary.
+         *
+         * Values: {@link #PDC_WARNING_FULL}, {@link #PDC_WARNING_COMPACT},
+         * {@link #PDC_WARNING_DISABLED}. Default: COMPACT.
+         *
+         * @return the configured warning mode (always normalized to one of the constants)
+         */
+        public String pdcWarning() {
+            return pdcWarning != null ? pdcWarning : PDC_WARNING_COMPACT;
         }
     }
 

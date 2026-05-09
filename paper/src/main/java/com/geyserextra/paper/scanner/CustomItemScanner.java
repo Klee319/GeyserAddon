@@ -1,6 +1,7 @@
 package com.geyserextra.paper.scanner;
 
 import com.geyserextra.core.api.CustomItemMapping;
+import com.geyserextra.core.config.GeyserExtraConfig;
 import com.geyserextra.core.registry.ItemMappingRegistry;
 import com.geyserextra.paper.GeyserExtraPaper;
 
@@ -15,9 +16,11 @@ import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.persistence.PersistentDataContainer;
 import org.bukkit.persistence.PersistentDataType;
+import org.bukkit.scheduler.BukkitTask;
 
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
@@ -30,9 +33,18 @@ import java.util.logging.Level;
 public final class CustomItemScanner {
 
     private static final String MINECRAFT_NAMESPACE = "minecraft:";
+    /** Debounce delay before printing the aggregate PDC-missing summary (5s @ 20 tps). */
+    private static final long PDC_SUMMARY_DELAY_TICKS = 100L;
 
     // Track items that have been warned about missing PDC
     private final Set<String> warnedItems = new HashSet<>();
+
+    // PDC compact-mode state — guarded by main thread (warnings are emitted from main thread).
+    private boolean pdcInstructionShown = false;
+    // Debounced summary task. Mutated only on main thread; reads on main thread.
+    private BukkitTask pendingPdcSummaryTask;
+    // Tracks the warnedItems.size() observed at last summary print so we don't re-emit unchanged counts.
+    private int lastPdcSummaryCount = 0;
 
     private final ItemMappingRegistry registry;
     private final GeyserExtraPaper plugin;
@@ -125,6 +137,16 @@ public final class CustomItemScanner {
 
     /**
      * Warns about missing PDC identifier and prompts manual mapping.
+     *
+     * Verbosity is governed by {@code customItems.pdcWarning} configuration:
+     * <ul>
+     *   <li>{@code FULL}: full 14-line block per unique item (legacy behavior).</li>
+     *   <li>{@code COMPACT} (default): full block emitted once with a transition notice,
+     *       then a single {@code [PDC missing] base CMD=N -> auto_name} line per
+     *       subsequent unique item plus a debounced aggregate summary 5 seconds after
+     *       the last new item (so log readers see one count per scan burst, not 50).</li>
+     *   <li>{@code DISABLED}: no log output (registration is still skipped).</li>
+     * </ul>
      */
     private void warnMissingPDC(String baseItem, int cmdValue, String autoName) {
         String key = baseItem + ":" + cmdValue;
@@ -133,6 +155,39 @@ public final class CustomItemScanner {
         }
         warnedItems.add(key);
 
+        String mode = resolvePdcWarningMode();
+
+        if (GeyserExtraConfig.CustomItemsConfig.PDC_WARNING_DISABLED.equals(mode)) {
+            return;
+        }
+
+        if (GeyserExtraConfig.CustomItemsConfig.PDC_WARNING_FULL.equals(mode)) {
+            printFullPdcWarning(baseItem, cmdValue, autoName);
+            return;
+        }
+
+        // COMPACT mode — show educational block once, then 1-line per unique item.
+        if (!pdcInstructionShown) {
+            pdcInstructionShown = true;
+            printFullPdcWarning(baseItem, cmdValue, autoName);
+            plugin.getLogger().warning(
+                "=== Further unmapped items will be listed compactly. "
+                + "Set customItems.pdcWarning=\"FULL\" for the full block per item, "
+                + "or \"DISABLED\" to silence. ===");
+        } else {
+            plugin.getLogger().warning(String.format(
+                "[PDC missing] %s CMD=%d -> %s",
+                baseItem, cmdValue, autoName));
+        }
+
+        scheduleCompactSummary();
+    }
+
+    /**
+     * Emits the verbose 14-line guidance block. Used by FULL mode and the first
+     * occurrence in COMPACT mode.
+     */
+    private void printFullPdcWarning(String baseItem, int cmdValue, String autoName) {
         plugin.getLogger().warning("=== Custom Item Mapping Warning ===");
         plugin.getLogger().warning("Item detected without PersistentDataContainer identifier:");
         plugin.getLogger().warning("  Base Item: " + baseItem);
@@ -148,6 +203,106 @@ public final class CustomItemScanner {
         plugin.getLogger().warning("");
         plugin.getLogger().warning("Or manually edit custom_items.json to set the correct name.");
         plugin.getLogger().warning("===================================");
+    }
+
+    /**
+     * Resolves the configured PDC warning mode, normalizing case and falling back to
+     * COMPACT when the config (or the field within it) is null.
+     *
+     * Why defensive null-checks: this method runs from listener callbacks before/after
+     * onEnable boundaries (e.g., tests, reload paths), and a partially-loaded plugin
+     * shouldn't crash the scanner.
+     */
+    private String resolvePdcWarningMode() {
+        GeyserExtraConfig config = plugin.getGeyserExtraConfig();
+        if (config == null || config.customItems() == null) {
+            return GeyserExtraConfig.CustomItemsConfig.PDC_WARNING_COMPACT;
+        }
+        String raw = config.customItems().pdcWarning();
+        if (raw == null || raw.isBlank()) {
+            return GeyserExtraConfig.CustomItemsConfig.PDC_WARNING_COMPACT;
+        }
+        return raw.toUpperCase(Locale.ROOT);
+    }
+
+    /**
+     * (Re)schedules a debounced summary task that logs the total unique unmapped item
+     * count once a scan burst settles (5s of quiet). Each new warning during the burst
+     * cancels the previously scheduled task and re-arms it, so the user sees the
+     * summary exactly once per burst with the final count.
+     *
+     * Safe to call from any thread: BukkitScheduler.runTaskLater dispatches to the
+     * primary thread, where mutation of pendingPdcSummaryTask is also performed.
+     */
+    private void scheduleCompactSummary() {
+        try {
+            if (pendingPdcSummaryTask != null) {
+                pendingPdcSummaryTask.cancel();
+                pendingPdcSummaryTask = null;
+            }
+            pendingPdcSummaryTask = plugin.getServer().getScheduler().runTaskLater(
+                plugin,
+                () -> {
+                    pendingPdcSummaryTask = null;
+                    logPdcMissingSummary();
+                },
+                PDC_SUMMARY_DELAY_TICKS
+            );
+        } catch (IllegalStateException | IllegalArgumentException ignored) {
+            // Plugin disabled mid-burst — onDisable will flush the summary instead.
+        }
+    }
+
+    /**
+     * Logs the aggregate "N unique items lacked PDC identifier" summary if new
+     * unmapped items have been observed since the last summary. Idempotent: calling
+     * this repeatedly without new warnings is a no-op.
+     *
+     * Called by:
+     * <ul>
+     *   <li>The debounced scheduled task at the end of a warning burst.</li>
+     *   <li>{@code GeyserExtraPaper.onDisable} as a safety net to flush any pending
+     *       summary that the scheduled task didn't get to fire.</li>
+     * </ul>
+     */
+    public void logPdcMissingSummary() {
+        int count = warnedItems.size();
+        if (count == 0 || count == lastPdcSummaryCount) {
+            return;
+        }
+        lastPdcSummaryCount = count;
+
+        String mode = resolvePdcWarningMode();
+        if (GeyserExtraConfig.CustomItemsConfig.PDC_WARNING_DISABLED.equals(mode)) {
+            return;
+        }
+
+        if (GeyserExtraConfig.CustomItemsConfig.PDC_WARNING_COMPACT.equals(mode)) {
+            plugin.getLogger().info(String.format(
+                "[PDC] %d unique item(s) lacked PDC identifier (registration skipped). "
+                + "Set customItems.pdcWarning=\"FULL\" for per-item details "
+                + "or \"DISABLED\" to silence.",
+                count));
+        } else {
+            plugin.getLogger().info(String.format(
+                "[PDC] %d unique item(s) lacked PDC identifier (registration skipped).",
+                count));
+        }
+    }
+
+    /**
+     * Cancels any pending debounced summary task. Intended for plugin shutdown so
+     * the scheduler doesn't try to fire a task against a disabled plugin instance.
+     */
+    public void cancelPendingPdcSummary() {
+        try {
+            if (pendingPdcSummaryTask != null) {
+                pendingPdcSummaryTask.cancel();
+                pendingPdcSummaryTask = null;
+            }
+        } catch (Exception ignored) {
+            // Best-effort cleanup during shutdown.
+        }
     }
 
     /**
