@@ -556,8 +556,11 @@ public final class BedrockAnvilSimulator implements Listener {
         // not in the ItemStack's enchantment map. Using addUnsafeEnchantment on a book
         // adds to BOTH locations, causing double Lore display on Bedrock clients.
         if (item.getItemMeta() instanceof org.bukkit.inventory.meta.EnchantmentStorageMeta storageMeta) {
-            // Clear existing stored enchantments
-            for (Enchantment existing : storageMeta.getStoredEnchants().keySet()) {
+            // Why copy keySet: getStoredEnchants() returns a live view backed by the
+            // meta's internal map, so iterating it while calling removeStoredEnchant
+            // can throw ConcurrentModificationException. Mirrors the safe pattern in
+            // BedrockEnchantmentHandler.applyEnchantmentsToMeta.
+            for (Enchantment existing : new java.util.ArrayList<>(storageMeta.getStoredEnchants().keySet())) {
                 storageMeta.removeStoredEnchant(existing);
             }
             // Apply new enchantments to stored enchants (allows over-enchant levels)
@@ -566,8 +569,9 @@ public final class BedrockAnvilSimulator implements Listener {
             }
             item.setItemMeta(storageMeta);
         } else {
-            // Non-book items: use standard enchantment map
-            for (Enchantment existing : item.getEnchantments().keySet()) {
+            // Non-book items: use standard enchantment map. Copy the keySet for the
+            // same reason as the book branch above.
+            for (Enchantment existing : new java.util.ArrayList<>(item.getEnchantments().keySet())) {
                 item.removeEnchantment(existing);
             }
             for (Map.Entry<Enchantment, Integer> entry : enchantments.entrySet()) {

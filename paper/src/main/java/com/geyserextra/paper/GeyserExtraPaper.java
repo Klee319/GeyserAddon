@@ -9,6 +9,7 @@ import com.geyserextra.paper.listener.ElytraFlightListener;
 import com.geyserextra.paper.listener.OffhandInteractionListener;
 import com.geyserextra.paper.enchantment.BedrockAnvilSimulator;
 import com.geyserextra.paper.enchantment.BedrockEnchantmentHandler;
+import com.geyserextra.paper.enchantment.BedrockEnchantmentTablePacketStripper;
 import com.geyserextra.paper.recipe.CraftingRecipeHandler;
 import com.geyserextra.paper.recipe.SmithingRecipeHandler;
 import com.geyserextra.paper.pack.AutoBedrockPackBuilder;
@@ -63,6 +64,7 @@ public final class GeyserExtraPaper extends JavaPlugin {
     // Recipe handlers and enchantment handler for Bedrock compatibility
     private BedrockEnchantmentHandler bedrockEnchantmentHandler;
     private BedrockAnvilSimulator bedrockAnvilSimulator;
+    private BedrockEnchantmentTablePacketStripper bedrockEnchantmentTableStripper;
     private SmithingRecipeHandler smithingRecipeHandler;
     private CraftingRecipeHandler craftingRecipeHandler;
 
@@ -412,7 +414,10 @@ public final class GeyserExtraPaper extends JavaPlugin {
      * These handlers ensure custom recipes and enchantment display work correctly.
      */
     private void initializeRecipeHandlers() {
-        bedrockEnchantmentHandler = new BedrockEnchantmentHandler(this);
+        // Why stripper first: BedrockEnchantmentHandler depends on the stripper
+        // for thread-safe inventory state queries from packet listeners.
+        bedrockEnchantmentTableStripper = new BedrockEnchantmentTablePacketStripper(this);
+        bedrockEnchantmentHandler = new BedrockEnchantmentHandler(this, bedrockEnchantmentTableStripper);
         bedrockAnvilSimulator = new BedrockAnvilSimulator(this);
         smithingRecipeHandler = new SmithingRecipeHandler(this);
         craftingRecipeHandler = new CraftingRecipeHandler(this);
@@ -489,6 +494,12 @@ public final class GeyserExtraPaper extends JavaPlugin {
                 new ChunkLoadListener(skullScanner, this),
                 this
             );
+        }
+
+        // Register the stripper FIRST so its inventory state is populated
+        // by InventoryOpenEvent before any handler queries it from packet threads.
+        if (bedrockEnchantmentTableStripper != null) {
+            getServer().getPluginManager().registerEvents(bedrockEnchantmentTableStripper, this);
         }
 
         // Register recipe handlers for Bedrock compatibility
