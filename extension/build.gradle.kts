@@ -4,7 +4,10 @@ plugins {
 
 dependencies {
     implementation(project(":core"))
-    compileOnly("org.geysermc.geyser:api:2.9.0-SNAPSHOT")
+    // Why 2.10.0-SNAPSHOT: the v2 custom item API (CustomItemDefinition,
+    // ItemRangeDispatchPredicate, CustomItemBedrockOptions) is @since 2.9.3.
+    // Runtime Geyser must be at least that version too.
+    compileOnly("org.geysermc.geyser:api:2.10.0-SNAPSHOT")
     // Gson is provided by Geyser runtime, but needed for compilation
     compileOnly("com.google.code.gson:gson:2.10.1")
 }

@@ -10,11 +10,17 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+
 import org.geysermc.geyser.api.event.lifecycle.GeyserDefineCustomItemsEvent;
 import org.geysermc.geyser.api.extension.Extension;
-import org.geysermc.geyser.api.item.custom.CustomItemData;
-import org.geysermc.geyser.api.item.custom.CustomItemOptions;
 import org.geysermc.geyser.api.item.custom.NonVanillaCustomItemData;
+import org.geysermc.geyser.api.item.custom.v2.CustomItemBedrockOptions;
+import org.geysermc.geyser.api.item.custom.v2.CustomItemDefinition;
+import org.geysermc.geyser.api.predicate.MinecraftPredicate;
+import org.geysermc.geyser.api.predicate.context.item.ItemPredicateContext;
+import org.geysermc.geyser.api.predicate.item.ItemRangeDispatchPredicate;
+import org.geysermc.geyser.api.util.CreativeCategory;
+import org.geysermc.geyser.api.util.Identifier;
 
 import java.io.IOException;
 import java.io.Reader;
@@ -22,6 +28,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -29,20 +36,37 @@ import java.util.Map;
 /**
  * Handler for loading and registering custom items from shared configuration.
  *
- * Why: This handler reads item definitions from a shared JSON file (custom_items.json)
+ * <p>Reads item definitions from a shared JSON file ({@code custom_items.json})
  * and registers them with Geyser to enable custom items for Bedrock players.
- * The shared file approach allows synchronization with Paper plugin.
+ * The shared file approach allows synchronization with the Paper plugin.</p>
  *
- * Texture resolution: Items are registered with their generated name as both the
- * Geyser item name and the texture key. The companion {@code AutoBedrockPackBuilder}
- * (Paper module) generates a textureless BE pack whose {@code item_texture.json}
- * points each generated key at the matching vanilla BE texture path, so BE clients
- * fall back to bundled vanilla textures without operators authoring a custom pack.
+ * <p><b>API usage:</b> vanilla extensions are registered via the v2 API
+ * ({@link CustomItemDefinition} + {@link ItemRangeDispatchPredicate#legacyCustomModelData(int)}).
+ * Non-vanilla items still use the deprecated v1 {@link NonVanillaCustomItemData}
+ * pending a follow-up migration once the v2 non-vanilla path is exercised in this codebase.</p>
+ *
+ * <p><b>Duplicate handling:</b> before registering each vanilla item, this handler
+ * inspects {@link GeyserDefineCustomItemsEvent#customItemDefinitions()} and skips
+ * any mapping whose ({@code base item}, {@code custom_model_data}) pair is already
+ * registered (e.g. by Geyser's own resource-pack auto-detection that emits
+ * {@code gmdl_*} identifiers). The previous v1 path threw
+ * {@code CustomItemDefinitionRegisterException} per duplicate, producing one stack
+ * trace per conflicting item.</p>
+ *
+ * <p><b>Texture resolution:</b> items are registered with their generated name as
+ * both the Geyser item name and the icon key. The companion
+ * {@code AutoBedrockPackBuilder} (Paper module) generates a textureless BE pack
+ * whose {@code item_texture.json} points each generated icon key at the matching
+ * vanilla BE texture path, so BE clients fall back to bundled vanilla textures
+ * without operators authoring a custom pack.</p>
  */
 public class CustomItemsHandler {
 
     private static final String ITEMS_FILE_NAME = "custom_items.json";
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
+
+    /** Bedrock-side namespace for items registered by this extension. */
+    private static final String BEDROCK_NAMESPACE = "geyserextra";
 
     private final Extension extension;
     private final Path sharedFolder;
@@ -110,8 +134,6 @@ public class CustomItemsHandler {
 
     /**
      * Parses item mappings from the JSON configuration.
-     *
-     * @param root the root JSON object containing item definitions
      */
     private void parseItemMappings(JsonObject root) {
         // Support format: { "items": { "minecraft:base_item": [ { ... }, ... ] } }
@@ -144,13 +166,6 @@ public class CustomItemsHandler {
         }
     }
 
-    /**
-     * Parses a single item definition for vanilla item extension.
-     *
-     * @param baseItem the base Minecraft item identifier
-     * @param itemDef the JSON object containing item properties
-     * @return the parsed ItemMapping or null if parsing fails
-     */
     private ItemMapping parseItemDefinition(String baseItem, JsonObject itemDef) {
         try {
             String rawName = getStringOrDefault(itemDef, "name", null);
@@ -160,7 +175,6 @@ public class CustomItemsHandler {
             }
             String name = sanitizeIdentifierValue(rawName, "name");
 
-            // Honour explicit opt-out from BE registration (e.g. operator manually disabled an item).
             boolean register = getBooleanOrDefault(itemDef, "register", true);
             if (!register) {
                 extension.logger().info("Skipping item '" + name + "': register=false");
@@ -178,33 +192,15 @@ public class CustomItemsHandler {
             String creativeGroup = getStringOrDefault(itemDef, "creative_group", null);
 
             return new ItemMapping(
-                baseItem,
-                name,
-                customModelData,
-                unbreakable,
-                damagePredicate,
-                displayName,
-                icon,
-                allowOffhand,
-                textureSize,
-                false,
-                null,
-                0,
-                creativeCategory,
-                creativeGroup
-            );
+                baseItem, name, customModelData, unbreakable, damagePredicate,
+                displayName, icon, allowOffhand, textureSize,
+                false, null, 0, creativeCategory, creativeGroup);
         } catch (Exception e) {
             extension.logger().warning("Failed to parse item definition: " + e.getMessage());
             return null;
         }
     }
 
-    /**
-     * Parses a non-vanilla item definition.
-     *
-     * @param itemDef the JSON object containing non-vanilla item properties
-     * @return the parsed ItemMapping or null if parsing fails
-     */
     private ItemMapping parseNonVanillaItemDefinition(JsonObject itemDef) {
         try {
             String rawName = getStringOrDefault(itemDef, "name", null);
@@ -225,21 +221,9 @@ public class CustomItemsHandler {
             String creativeGroup = getStringOrDefault(itemDef, "creative_group", null);
 
             return new ItemMapping(
-                null,
-                name,
-                0,
-                false,
-                -1,
-                displayName,
-                icon,
-                allowOffhand,
-                textureSize,
-                true,
-                identifier,
-                javaId,
-                creativeCategory,
-                creativeGroup
-            );
+                null, name, 0, false, -1,
+                displayName, icon, allowOffhand, textureSize,
+                true, identifier, javaId, creativeCategory, creativeGroup);
         } catch (Exception e) {
             extension.logger().warning("Failed to parse non-vanilla item definition: " + e.getMessage());
             return null;
@@ -247,152 +231,243 @@ public class CustomItemsHandler {
     }
 
     /**
-     * Registers all loaded custom items with the Geyser event.
+     * Registers all loaded custom items with the Geyser event using the v2 API.
      *
-     * @param event the custom items definition event from Geyser
+     * <p>Vanilla items: pre-checks {@link GeyserDefineCustomItemsEvent#customItemDefinitions()}
+     * to skip already-registered (base, CMD) pairs without provoking
+     * {@code CustomItemDefinitionRegisterException}. The exception is still caught as a
+     * safety net for sources that aren't visible in the snapshot (race or v1-only registrations).</p>
      */
     public void registerItems(GeyserDefineCustomItemsEvent event) {
         extension.logger().info("=== Custom Items Registration ===");
         extension.logger().info("Loaded item mappings: " + itemMappings.size());
         extension.logger().info("Shared folder path: " + sharedFolder.toAbsolutePath());
-        int registeredCount = 0;
+
+        Map<Identifier, Collection<CustomItemDefinition>> existing = snapshotExistingDefinitions(event);
+
+        int registered = 0;
+        int skippedDuplicate = 0;
+        int failed = 0;
 
         for (ItemMapping mapping : itemMappings) {
             try {
-                // Why: non_vanilla items have their own identifiers and don't consume
-                // model IDs that would affect vanilla item textures
                 if (mapping.isNonVanilla) {
-                    registeredCount += registerNonVanillaItem(event, mapping);
+                    if (registerNonVanillaItem(event, mapping)) {
+                        registered++;
+                    } else {
+                        failed++;
+                    }
                     continue;
                 }
 
-                registeredCount += registerVanillaItem(event, mapping);
-            } catch (Exception e) {
-                extension.logger().warning("Failed to register item '"
-                    + mapping.name() + "': " + e.getMessage());
-                e.printStackTrace();
+                Identifier baseId = Identifier.of(mapping.baseItem);
+                Collection<CustomItemDefinition> existingForBase =
+                    existing.getOrDefault(baseId, Collections.emptyList());
+
+                if (mapping.customModelData > 0
+                    && hasMatchingCmdPredicate(existingForBase, mapping.customModelData)) {
+                    skippedDuplicate++;
+                    continue;
+                }
+
+                if (registerVanillaItem(event, mapping, baseId)) {
+                    registered++;
+                }
+            } catch (Throwable t) {
+                // Geyser's own conflict detection (CustomItemDefinitionRegisterException)
+                // or any other registration error. Log compactly without stack trace.
+                String message = t.getMessage();
+                extension.logger().info(
+                    "Skipping " + mapping.name()
+                        + " (CMD=" + mapping.customModelData() + "): "
+                        + (message != null ? message : t.getClass().getSimpleName()));
+                skippedDuplicate++;
             }
         }
 
-        extension.logger().info("=== Registration Complete: " + registeredCount + " registered ===");
+        extension.logger().info("=== Registration Complete: " + registered + " registered, "
+            + skippedDuplicate + " duplicate-skipped, " + failed + " failed ===");
     }
 
     /**
-     * Registers a non-vanilla custom item.
-     *
-     * @return 1 if registration succeeded
+     * Snapshots the v2 custom item definition map at the start of registration.
+     * Falls back to an empty map if Geyser exposes no v2 query (older runtime).
      */
-    private int registerNonVanillaItem(GeyserDefineCustomItemsEvent event, ItemMapping mapping) {
-        NonVanillaCustomItemData data = buildNonVanillaItemData(mapping);
-        extension.logger().info("Registering NonVanilla: " + mapping.name()
-            + " (identifier=" + mapping.identifier()
-            + ", javaId=" + mapping.javaId() + ")");
-        event.register(data);
-        extension.logger().info("Successfully registered: " + mapping.name());
-        return 1;
+    private Map<Identifier, Collection<CustomItemDefinition>> snapshotExistingDefinitions(
+        GeyserDefineCustomItemsEvent event
+    ) {
+        try {
+            Map<Identifier, Collection<CustomItemDefinition>> map = event.customItemDefinitions();
+            return map != null ? map : Collections.emptyMap();
+        } catch (Throwable t) {
+            extension.logger().info(
+                "customItemDefinitions() unavailable; pre-check disabled ("
+                    + t.getClass().getSimpleName() + ")");
+            return Collections.emptyMap();
+        }
     }
 
     /**
-     * Registers a vanilla custom item extension.
-     *
-     * @return 1 if registration succeeded
+     * Registers a vanilla custom item extension via the v2 API.
      */
-    private int registerVanillaItem(GeyserDefineCustomItemsEvent event, ItemMapping mapping) {
-        CustomItemData data = buildCustomItemData(mapping);
-        extension.logger().info("Registering: " + mapping.name()
-            + " (base: " + mapping.baseItem()
-            + ", CMD: " + mapping.customModelData() + ")");
-        event.register(mapping.baseItem, data);
-        extension.logger().info("Successfully registered: " + mapping.name());
-        return 1;
-    }
+    private boolean registerVanillaItem(
+        GeyserDefineCustomItemsEvent event,
+        ItemMapping mapping,
+        Identifier baseId
+    ) {
+        Identifier bedrockId = Identifier.of(BEDROCK_NAMESPACE, mapping.name);
 
-    /**
-     * Builds CustomItemData for a vanilla item extension.
-     *
-     * @param mapping the item mapping configuration
-     * @return the built CustomItemData
-     */
-    private CustomItemData buildCustomItemData(ItemMapping mapping) {
-        CustomItemOptions.Builder optionsBuilder = CustomItemOptions.builder();
+        CustomItemBedrockOptions.Builder bedrockOptions = CustomItemBedrockOptions.builder()
+            .allowOffhand(mapping.allowOffhand);
+
+        if (mapping.icon != null && !mapping.icon.isBlank()) {
+            bedrockOptions.icon(mapping.icon);
+        }
+
+        CreativeCategory creativeCategory = mapCreativeCategory(mapping.creativeCategory);
+        if (creativeCategory != null) {
+            bedrockOptions.creativeCategory(creativeCategory);
+            if (mapping.creativeGroup != null && !mapping.creativeGroup.isBlank()) {
+                bedrockOptions.creativeGroup(mapping.creativeGroup);
+            }
+        }
+
+        CustomItemDefinition.Builder builder = CustomItemDefinition.builder(bedrockId, baseId)
+            .bedrockOptions(bedrockOptions);
+
+        if (mapping.displayName != null && !mapping.displayName.isBlank()) {
+            builder.displayName(mapping.displayName);
+        }
 
         if (mapping.customModelData > 0) {
-            optionsBuilder.customModelData(mapping.customModelData);
-        }
-        if (mapping.unbreakable) {
-            optionsBuilder.unbreakable(true);
-        }
-        if (mapping.damagePredicate >= 0) {
-            optionsBuilder.damagePredicate(mapping.damagePredicate);
+            builder.predicate(ItemRangeDispatchPredicate.legacyCustomModelData(mapping.customModelData));
         }
 
-        CustomItemOptions options = optionsBuilder.build();
-
-        CustomItemData.Builder builder = CustomItemData.builder()
-            .name(mapping.name)
-            .customItemOptions(options);
-
-        if (mapping.displayName != null) {
-            builder.displayName(mapping.displayName);
-        }
-        if (mapping.icon != null) {
-            builder.icon(mapping.icon);
-        }
-        builder.allowOffhand(mapping.allowOffhand);
-        builder.textureSize(mapping.textureSize);
-
-        // Set creative category for recipe book visibility
-        if (mapping.creativeCategory > 0 && mapping.creativeCategory <= 5) {
-            builder.creativeCategory(mapping.creativeCategory);
-            if (mapping.creativeGroup != null && !mapping.creativeGroup.isBlank()) {
-                builder.creativeGroup(mapping.creativeGroup);
-            }
-        }
-
-        return builder.build();
+        extension.logger().info("Registering: " + mapping.name()
+            + " (base: " + mapping.baseItem
+            + ", CMD: " + mapping.customModelData + ")");
+        event.register(baseId, builder.build());
+        extension.logger().info("Successfully registered: " + mapping.name());
+        return true;
     }
 
     /**
-     * Builds NonVanillaCustomItemData for a modded/custom item.
+     * Registers a non-vanilla custom item via the v1 API.
      *
-     * @param mapping the item mapping configuration
-     * @return the built NonVanillaCustomItemData
+     * <p>TODO: migrate to v2 {@code NonVanillaCustomItemDefinition} once the v2 API for
+     * non-vanilla items is exercised end-to-end in this codebase.</p>
      */
-    private NonVanillaCustomItemData buildNonVanillaItemData(ItemMapping mapping) {
-        NonVanillaCustomItemData.Builder builder = NonVanillaCustomItemData.builder()
+    @SuppressWarnings("deprecation")
+    private boolean registerNonVanillaItem(GeyserDefineCustomItemsEvent event, ItemMapping mapping) {
+        NonVanillaCustomItemData data = NonVanillaCustomItemData.builder()
             .name(mapping.name)
             .identifier(mapping.identifier)
-            .javaId(mapping.javaId);
+            .javaId(mapping.javaId)
+            .displayName(mapping.displayName)
+            .icon(mapping.icon)
+            .allowOffhand(mapping.allowOffhand)
+            .textureSize(mapping.textureSize)
+            .creativeCategory(
+                mapping.creativeCategory > 0 && mapping.creativeCategory <= 5
+                    ? mapping.creativeCategory : 0)
+            .creativeGroup(
+                mapping.creativeGroup != null && !mapping.creativeGroup.isBlank()
+                    ? mapping.creativeGroup : null)
+            .build();
 
-        if (mapping.displayName != null) {
-            builder.displayName(mapping.displayName);
-        }
-        if (mapping.icon != null) {
-            builder.icon(mapping.icon);
-        }
-        builder.allowOffhand(mapping.allowOffhand);
-        builder.textureSize(mapping.textureSize);
+        extension.logger().info("Registering NonVanilla: " + mapping.name()
+            + " (identifier=" + mapping.identifier
+            + ", javaId=" + mapping.javaId + ")");
+        event.register(data);
+        extension.logger().info("Successfully registered: " + mapping.name());
+        return true;
+    }
 
-        // Set creative category for recipe book visibility
-        if (mapping.creativeCategory > 0 && mapping.creativeCategory <= 5) {
-            builder.creativeCategory(mapping.creativeCategory);
-            if (mapping.creativeGroup != null && !mapping.creativeGroup.isBlank()) {
-                builder.creativeGroup(mapping.creativeGroup);
+    /**
+     * Maps the legacy 0-5 creative category integer onto Geyser's v2 enum.
+     * Returns {@code null} when the value is 0 (no category) or out of range.
+     */
+    private CreativeCategory mapCreativeCategory(int value) {
+        return switch (value) {
+            case 1 -> CreativeCategory.CONSTRUCTION;
+            case 2 -> CreativeCategory.NATURE;
+            case 3 -> CreativeCategory.EQUIPMENT;
+            case 4 -> CreativeCategory.ITEMS;
+            case 5 -> CreativeCategory.ITEM_COMMAND_ONLY;
+            default -> null;
+        };
+    }
+
+    /**
+     * Best-effort check: does any existing definition for the same base item already
+     * carry a {@code legacyCustomModelData} predicate matching {@code cmd}?
+     *
+     * <p>Geyser's predicate API does not expose a public typed accessor for the wrapped
+     * CMD value, so this inspects the predicate's {@code toString()}. The predicate
+     * is looked up by name fragment ({@code legacy_custom_model_data} /
+     * {@code legacyCustomModelData} / {@code customModelData}) plus the literal CMD
+     * integer to keep false positives unlikely. If the API reformats {@code toString()}
+     * in a future release, the snapshot pre-check silently degrades to "no match" and
+     * the {@code Throwable} catch in {@link #registerItems} still suppresses the resulting
+     * collision exception.</p>
+     */
+    private boolean hasMatchingCmdPredicate(Collection<CustomItemDefinition> defs, int cmd) {
+        if (defs.isEmpty()) {
+            return false;
+        }
+        String cmdLiteral = Integer.toString(cmd);
+        for (CustomItemDefinition def : defs) {
+            List<MinecraftPredicate<? super ItemPredicateContext>> predicates;
+            try {
+                predicates = def.predicates();
+            } catch (Throwable ignored) {
+                continue;
+            }
+            if (predicates == null) {
+                continue;
+            }
+            for (MinecraftPredicate<? super ItemPredicateContext> predicate : predicates) {
+                String repr = String.valueOf(predicate);
+                if (!containsCmdLiteral(repr, cmdLiteral)) {
+                    continue;
+                }
+                String lower = repr.toLowerCase();
+                if (lower.contains("legacy_custom_model_data")
+                    || lower.contains("legacycustommodeldata")
+                    || lower.contains("custom_model_data")
+                    || lower.contains("custommodeldata")) {
+                    return true;
+                }
             }
         }
+        return false;
+    }
 
-        return builder.build();
+    /**
+     * Word-boundary-aware containment check: ensures the CMD literal is not a substring
+     * of a longer number (e.g. avoids matching {@code 8778216} when looking for {@code 877821}).
+     */
+    private boolean containsCmdLiteral(String repr, String cmdLiteral) {
+        int idx = 0;
+        while ((idx = repr.indexOf(cmdLiteral, idx)) >= 0) {
+            int before = idx - 1;
+            int after = idx + cmdLiteral.length();
+            boolean leftOk = before < 0 || !Character.isDigit(repr.charAt(before));
+            boolean rightOk = after >= repr.length() || !Character.isDigit(repr.charAt(after));
+            if (leftOk && rightOk) {
+                return true;
+            }
+            idx = after;
+        }
+        return false;
     }
 
     /**
      * Creates a sample custom_items.json file for reference.
-     *
-     * @param itemsFile the path to create the sample file
      */
     private void createSampleItemsFile(Path itemsFile) {
         JsonObject sample = new JsonObject();
 
-        // Sample vanilla item extension
         JsonObject items = new JsonObject();
         JsonArray ironSwordItems = new JsonArray();
         JsonObject sampleItem = new JsonObject();
@@ -405,7 +480,6 @@ public class CustomItemsHandler {
         items.add("minecraft:iron_sword", ironSwordItems);
         sample.add("items", items);
 
-        // Sample non-vanilla items
         JsonArray nonVanillaItems = new JsonArray();
         JsonObject nonVanillaSample = new JsonObject();
         nonVanillaSample.addProperty("name", "modded_item");
@@ -427,7 +501,6 @@ public class CustomItemsHandler {
     /**
      * Sanitizes a name/identifier value for Geyser compatibility.
      * Geyser only allows [a-z0-9_\-./]+ in identifier values.
-     * Replaces invalid characters (e.g. ':') with '_' and logs a warning.
      */
     private String sanitizeIdentifierValue(String value, String fieldName) {
         if (value == null) {
@@ -441,9 +514,6 @@ public class CustomItemsHandler {
         return sanitized;
     }
 
-    /**
-     * Gets a string value from JSON or returns default.
-     */
     private String getStringOrDefault(JsonObject obj, String key, String defaultValue) {
         if (obj.has(key) && !obj.get(key).isJsonNull()) {
             return obj.get(key).getAsString();
@@ -451,9 +521,6 @@ public class CustomItemsHandler {
         return defaultValue;
     }
 
-    /**
-     * Gets an int value from JSON or returns default.
-     */
     private int getIntOrDefault(JsonObject obj, String key, int defaultValue) {
         if (obj.has(key) && !obj.get(key).isJsonNull()) {
             return obj.get(key).getAsInt();
@@ -461,9 +528,6 @@ public class CustomItemsHandler {
         return defaultValue;
     }
 
-    /**
-     * Gets a boolean value from JSON or returns default.
-     */
     private boolean getBooleanOrDefault(JsonObject obj, String key, boolean defaultValue) {
         if (obj.has(key) && !obj.get(key).isJsonNull()) {
             return obj.get(key).getAsBoolean();
@@ -473,8 +537,6 @@ public class CustomItemsHandler {
 
     /**
      * Returns an unmodifiable list of loaded item mappings.
-     *
-     * @return the list of item mappings
      */
     public List<ItemMapping> getItemMappings() {
         return Collections.unmodifiableList(itemMappings);
@@ -482,10 +544,9 @@ public class CustomItemsHandler {
 
     /**
      * Internal record for item mapping data.
-     * Why: This encapsulates all item configuration properties for both vanilla and non-vanilla items.
      *
-     * @param creativeCategory Bedrock creative inventory category (1-5), 0 = none
-     * @param creativeGroup Bedrock creative group for sub-categorization
+     * @param creativeCategory legacy 0-5 category code; mapped to v2 {@link CreativeCategory} at register time
+     * @param creativeGroup    Bedrock creative group for sub-categorization
      */
     public record ItemMapping(
         String baseItem,
