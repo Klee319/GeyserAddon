@@ -40,6 +40,10 @@ commands:
     description: Open display settings for Bedrock players
     aliases: [ds]
     permission: geyserextra.settings
+  geyserextra:
+    description: GeyserExtra master command (opens the Bedrock menu)
+    aliases: [ga]
+    permission: geyserextra.menu
 permissions:
   geyserextra.offhand:
     description: Allows using the offhand swap command

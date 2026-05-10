@@ -451,9 +451,12 @@ public final class GeyserExtraPaper extends JavaPlugin {
         // Tooltip command — one-shot SimpleForm item detail display
         Objects.requireNonNull(getCommand("tooltip")).setExecutor(new TooltipCommand());
 
-        // Menu command — central Floodgate form menu for all Bedrock commands
-        Objects.requireNonNull(getCommand("menu"))
-            .setExecutor(new BedrockMenuCommand(this, playerSettingsManager));
+        // Menu command — central Floodgate form menu for all Bedrock commands.
+        // /geyserextra (alias /ga) shares the same executor so admins and Bedrock
+        // players have a memorable master entry point without re-implementing the form.
+        BedrockMenuCommand menuExecutor = new BedrockMenuCommand(this, playerSettingsManager);
+        Objects.requireNonNull(getCommand("menu")).setExecutor(menuExecutor);
+        Objects.requireNonNull(getCommand("geyserextra")).setExecutor(menuExecutor);
 
         // Settings command — per-player display settings via Floodgate CustomForm
         // Why: The callback wires SettingsCommand to DisplayManager so that display
