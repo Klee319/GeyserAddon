@@ -5,10 +5,13 @@ import com.comphenix.protocol.ProtocolLibrary;
 import com.comphenix.protocol.ProtocolManager;
 import com.comphenix.protocol.events.ListenerPriority;
 import com.comphenix.protocol.events.PacketAdapter;
+import com.comphenix.protocol.events.PacketContainer;
 import com.comphenix.protocol.events.PacketEvent;
 import com.comphenix.protocol.events.PacketListener;
 import com.geyserextra.core.config.GeyserExtraConfig.EnchantmentConfig;
 import com.geyserextra.paper.GeyserExtraPaper;
+
+import io.papermc.paper.datacomponent.DataComponentTypes;
 
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
@@ -163,6 +166,16 @@ public final class BedrockEnchantmentHandler implements Listener {
     /**
      * Handles SET_SLOT packet by injecting enchantment lore for Bedrock players.
      *
+     * <p>Also strips the CustomModelData component when the slot is the enchantment
+     * table input slot. Why: Geyser registers CMD-bearing items as Bedrock-side
+     * custom items via the auto-generated pack. Bedrock's enchantment-preview
+     * computation reads enchantability/tag metadata from the item identifier;
+     * the auto pack does not provide those, and the client crashes. Removing
+     * the CMD component before Geyser translates the packet causes Geyser to
+     * forward the item as its vanilla base material, which Bedrock can preview
+     * safely. Server-side state is unaffected — only the outbound packet is
+     * modified.</p>
+     *
      * @param event the packet event
      */
     private void handleSetSlotPacket(PacketEvent event) {
@@ -170,10 +183,20 @@ public final class BedrockEnchantmentHandler implements Listener {
             return;
         }
 
-        ItemStack item = event.getPacket().getItemModifier().read(0);
+        PacketContainer packet = event.getPacket();
+        ItemStack item = packet.getItemModifier().read(0);
+
+        if (isEnchantmentTableInputSlot(event.getPlayer(), packet)) {
+            ItemStack stripped = stripCustomModelData(item);
+            if (stripped != null) {
+                packet.getItemModifier().write(0, stripped);
+                return;
+            }
+        }
+
         ItemStack modified = injectEnchantmentLore(item);
         if (modified != null) {
-            event.getPacket().getItemModifier().write(0, modified);
+            packet.getItemModifier().write(0, modified);
         }
     }
 
@@ -190,19 +213,32 @@ public final class BedrockEnchantmentHandler implements Listener {
             return;
         }
 
-        List<ItemStack> items = event.getPacket().getItemListModifier().read(0);
+        PacketContainer packet = event.getPacket();
+        List<ItemStack> items = packet.getItemListModifier().read(0);
         if (items == null || items.isEmpty()) {
             return;
         }
+
+        // Why: when the window is an enchantment table, slot 0 (the item-to-enchant
+        // slot) must have its CustomModelData stripped so Geyser forwards it as the
+        // vanilla base material. See handleSetSlotPacket for the full rationale.
+        boolean isEnchantingTableWindow = isEnchantingTableContainerPacket(event.getPlayer(), packet);
 
         // Lazy allocation: only create modifiedList when first modification is found
         List<ItemStack> modifiedList = null;
 
         for (int i = 0; i < items.size(); i++) {
             ItemStack item = items.get(i);
-            ItemStack modified = injectEnchantmentLore(item);
+            ItemStack output = null;
 
-            if (modified != null) {
+            if (i == 0 && isEnchantingTableWindow) {
+                output = stripCustomModelData(item);
+            }
+            if (output == null) {
+                output = injectEnchantmentLore(item);
+            }
+
+            if (output != null) {
                 if (modifiedList == null) {
                     // First modification found: copy all items up to this point
                     modifiedList = new ArrayList<>(items.size());
@@ -210,14 +246,84 @@ public final class BedrockEnchantmentHandler implements Listener {
                         modifiedList.add(items.get(j));
                     }
                 }
-                modifiedList.add(modified);
+                modifiedList.add(output);
             } else if (modifiedList != null) {
                 modifiedList.add(item);
             }
         }
 
         if (modifiedList != null) {
-            event.getPacket().getItemListModifier().write(0, modifiedList);
+            packet.getItemListModifier().write(0, modifiedList);
+        }
+    }
+
+    /**
+     * Returns whether this SET_SLOT packet targets the input slot of the
+     * enchantment table currently open in front of the player.
+     *
+     * <p>Reads the slot index defensively: protocol-version differences move
+     * the slot field between int and short on the wire, so both accessors are
+     * tried before giving up.</p>
+     */
+    private boolean isEnchantmentTableInputSlot(Player player, PacketContainer packet) {
+        try {
+            if (player.getOpenInventory().getTopInventory().getType() != InventoryType.ENCHANTING) {
+                return false;
+            }
+            int containerId = packet.getIntegers().read(0);
+            if (containerId == 0) {
+                return false;
+            }
+            int slot;
+            try {
+                slot = packet.getIntegers().read(2);
+            } catch (Throwable ignored) {
+                slot = packet.getShorts().read(0);
+            }
+            return slot == 0;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /**
+     * Returns whether this WINDOW_ITEMS packet targets the enchantment table
+     * currently open in front of the player.
+     */
+    private boolean isEnchantingTableContainerPacket(Player player, PacketContainer packet) {
+        try {
+            if (player.getOpenInventory().getTopInventory().getType() != InventoryType.ENCHANTING) {
+                return false;
+            }
+            int containerId = packet.getIntegers().read(0);
+            return containerId != 0;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /**
+     * Returns a clone of {@code item} with the CustomModelData component removed,
+     * or {@code null} when the item lacks the component (no work needed) or any
+     * step of the strip fails. Server-side state is never mutated.
+     */
+    private ItemStack stripCustomModelData(ItemStack item) {
+        if (item == null || item.getType() == Material.AIR) {
+            return null;
+        }
+        try {
+            if (!item.hasData(DataComponentTypes.CUSTOM_MODEL_DATA)) {
+                return null;
+            }
+        } catch (Throwable t) {
+            return null;
+        }
+        try {
+            ItemStack clone = item.clone();
+            clone.unsetData(DataComponentTypes.CUSTOM_MODEL_DATA);
+            return clone;
+        } catch (Throwable t) {
+            return null;
         }
     }
 
