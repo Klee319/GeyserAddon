@@ -788,12 +788,18 @@ public final class BedrockEnchantmentHandler implements Listener {
                 } else if (secondLevel == currentLevel && currentLevel > 0) {
                     int maxLevel = enchant.getMaxLevel();
                     boolean isOverEnchant = maxLevel > 0 && currentLevel >= maxLevel;
-                    if (isOverEnchant && !levelUpEnabled) {
-                        // Block combining when over-enchant level-up is disabled
-                        return null;
-                    } else if (currentLevel < 255) {
+                    boolean canLevelUp = !isOverEnchant || levelUpEnabled;
+                    if (canLevelUp && currentLevel < 255) {
                         combinedEnchants.put(enchant, currentLevel + 1);
                     }
+                    // else: preserve currentLevel (already seeded from firstEnchants).
+                    // Why not return null here: the caller would fall through to the
+                    // vanilla anvil result, which caps same-level combining at maxLevel
+                    // (e.g. Fortune V + V -> III on vanilla) and destroys the player's
+                    // over-enchant. Keeping the existing currentLevel in combinedEnchants
+                    // means the override still fires and the result shows the preserved
+                    // over-enchant level, matching the simulator path's stance that
+                    // level-up beyond max requires explicit opt-in.
                 }
             }
         }
