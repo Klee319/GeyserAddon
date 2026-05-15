@@ -322,6 +322,22 @@ public final class BedrockEnchantmentHandler implements Listener {
             return null;
         }
 
+        // Fast pre-filter: lore is only ever added for over-enchanted items and
+        // damageable items. Most inventory items (food, materials, blocks) are
+        // neither, and we would otherwise pay for a getItemMeta() snapshot +
+        // ArrayList + clone + meta re-serialization per packet per player just
+        // to confirm there is no work. Both checks below are cheap: Material's
+        // max durability is a constant lookup, and ItemStack#getEnchantments
+        // is a thin wrapper. Enchanted books store their enchantments in meta,
+        // so the cheap path can't see them — fall through to the slow path
+        // when the item is an ENCHANTED_BOOK.
+        boolean potentiallyDamageable = item.getType().getMaxDurability() > 0;
+        boolean possiblyEnchanted = !item.getEnchantments().isEmpty()
+            || item.getType() == Material.ENCHANTED_BOOK;
+        if (!potentiallyDamageable && !possiblyEnchanted) {
+            return null;
+        }
+
         List<Component> tooltipLines = new ArrayList<>();
 
         // Enchantment lore (existing feature)

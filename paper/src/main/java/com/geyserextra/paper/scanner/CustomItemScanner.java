@@ -310,16 +310,29 @@ public final class CustomItemScanner {
 
     /**
      * Scans all online player inventories for custom items.
+     *
+     * <p><b>Must be called on the primary server thread.</b> A previous revision
+     * gated each per-player block with {@code isPrimaryThread()}, which silently
+     * turned the entire method into a no-op whenever the caller scheduled it
+     * asynchronously — and the actual call site (now {@code performInitialScan}
+     * in {@code GeyserExtraPaper}) did exactly that, so the advertised
+     * "initial scan of all online inventories" never happened. The thread
+     * guard is removed; callers must arrange the proper thread themselves
+     * (use {@code BukkitScheduler.runTask}, not {@code runTaskAsynchronously}).</p>
      */
     public void scanAllPlayers() {
-        int totalDiscovered = 0;
+        if (!plugin.getServer().isPrimaryThread()) {
+            plugin.getLogger().warning(
+                "scanAllPlayers() called off the primary thread; this is a programmer error. "
+                + "Skipping to avoid concurrent inventory access.");
+            return;
+        }
 
+        int totalDiscovered = 0;
         for (Player player : plugin.getServer().getOnlinePlayers()) {
             try {
-                if (plugin.getServer().isPrimaryThread()) {
-                    totalDiscovered += scanInventory(player.getInventory());
-                    totalDiscovered += scanInventory(player.getEnderChest());
-                }
+                totalDiscovered += scanInventory(player.getInventory());
+                totalDiscovered += scanInventory(player.getEnderChest());
             } catch (Exception e) {
                 plugin.getLogger().log(Level.WARNING,
                     "Failed to scan inventory for player: " + player.getName(), e);

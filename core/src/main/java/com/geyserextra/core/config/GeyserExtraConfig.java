@@ -182,20 +182,29 @@ public final class GeyserExtraConfig {
         private final boolean debugMode;
         private final int workerThreads;
         private final boolean tooltipDefaultEnabled;
+        private final boolean sneakDropOffhandSwapEnabled;
 
         public GeneralConfig() {
             this.enabled = true;
             this.debugMode = false;
             this.workerThreads = 2;
             this.tooltipDefaultEnabled = false;
+            this.sneakDropOffhandSwapEnabled = true;
         }
 
         public GeneralConfig(boolean enabled, boolean debugMode,
                              int workerThreads, boolean tooltipDefaultEnabled) {
+            this(enabled, debugMode, workerThreads, tooltipDefaultEnabled, true);
+        }
+
+        public GeneralConfig(boolean enabled, boolean debugMode,
+                             int workerThreads, boolean tooltipDefaultEnabled,
+                             boolean sneakDropOffhandSwapEnabled) {
             this.enabled = enabled;
             this.debugMode = debugMode;
             this.workerThreads = workerThreads > 0 ? workerThreads : 2;
             this.tooltipDefaultEnabled = tooltipDefaultEnabled;
+            this.sneakDropOffhandSwapEnabled = sneakDropOffhandSwapEnabled;
         }
 
         public boolean enabled() {
@@ -206,6 +215,13 @@ public final class GeyserExtraConfig {
             return debugMode;
         }
 
+        /**
+         * @deprecated The plugin no longer maintains a worker thread pool; all
+         *     background work uses Bukkit's scheduler directly. The field is
+         *     retained so existing {@code config.json} files do not fail to load.
+         *     Scheduled for removal in a future major release.
+         */
+        @Deprecated
         public int workerThreads() {
             return workerThreads;
         }
@@ -217,6 +233,19 @@ public final class GeyserExtraConfig {
          */
         public boolean tooltipDefaultEnabled() {
             return tooltipDefaultEnabled;
+        }
+
+        /**
+         * Whether to register the sneak + drop key off-hand swap listener for
+         * Bedrock players.
+         *
+         * <p>Default: true. Operators who run anti-cheat plugins that flag the
+         * synthetic off-hand interaction event, or want their Bedrock players
+         * to be able to drop items while sneaking, can set this to false. The
+         * {@code /offhand} command remains available either way.</p>
+         */
+        public boolean sneakDropOffhandSwapEnabled() {
+            return sneakDropOffhandSwapEnabled;
         }
     }
 
@@ -447,7 +476,15 @@ public final class GeyserExtraConfig {
 
     /**
      * Cache configuration settings.
+     *
+     * @deprecated The plugin no longer maintains a separate texture cache. Skull
+     *     textures are cached in-memory by {@link SkullConfig#cacheTextures()}
+     *     and {@link SkullConfig#maxCachedTextures()}; all other on-disk cache
+     *     plans were never implemented. Fields are retained so existing
+     *     {@code config.json} files do not fail to load; the section is
+     *     scheduled for removal in a future major release.
      */
+    @Deprecated
     public static final class CacheConfig {
         private final boolean enabled;
         private final String cacheDirectory;
@@ -494,7 +531,14 @@ public final class GeyserExtraConfig {
 
     /**
      * Logging configuration settings.
+     *
+     * @deprecated The plugin uses Bukkit's built-in plugin logger (level set
+     *     by the server, no file-rotation logic in this codebase). These fields
+     *     were placeholders that never wired up to a logger configuration.
+     *     Retained so existing {@code config.json} files do not fail to load;
+     *     scheduled for removal in a future major release.
      */
+    @Deprecated
     public static final class LoggingConfig {
         private final String level;
         private final boolean logToFile;

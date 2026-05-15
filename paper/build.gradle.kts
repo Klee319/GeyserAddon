@@ -5,7 +5,11 @@ plugins {
 dependencies {
     implementation(project(":core"))
     compileOnly("io.papermc.paper:paper-api:1.21.11-R0.1-SNAPSHOT")
-    compileOnly("org.geysermc.geyser:api:2.9.0-SNAPSHOT")
+    // Why 2.10.0-SNAPSHOT: matches the extension module so both halves of the plugin
+    // compile against the same Geyser API surface. The v2 custom item types
+    // (CustomItemDefinition + range_dispatch predicates) are @since 2.9.3, so the
+    // runtime Geyser must also be 2.9.3+ regardless of which SNAPSHOT we compile against.
+    compileOnly("org.geysermc.geyser:api:2.10.0-SNAPSHOT")
     compileOnly("org.geysermc.floodgate:api:2.2.4-SNAPSHOT")
     compileOnly("net.dmulloy2:ProtocolLib:5.4.0")
     compileOnly("com.discordsrv:discordsrv:1.30.0")

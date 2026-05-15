@@ -112,10 +112,18 @@ public class CustomItemsHandler {
         }
 
         if (!Files.exists(itemsFile)) {
+            // Why: a previous revision auto-wrote a sample custom_items.json here so
+            // operators saw "something" on first boot. That kept stale placeholders
+            // pinned into the live data path and hid the real recovery action
+            // ("ensure Paper plugin loaded first and regenerated the JSON"). The
+            // extension now leaves the file absent and logs the recovery steps
+            // explicitly; the schema is documented in the project README and the
+            // file will be written by the Paper plugin once it finishes scanning.
             extension.logger().warning("No custom_items.json found at " + itemsFile);
-            extension.logger().warning("Please ensure Paper plugin has run and scanned recipes first.");
-            extension.logger().warning("Then restart the server for Extension to load the items.");
-            createSampleItemsFile(itemsFile);
+            extension.logger().warning("Recovery steps:");
+            extension.logger().warning("  1. Make sure the Paper-side GeyserExtra plugin loaded before Geyser.");
+            extension.logger().warning("  2. Restart the server so Paper writes custom_items.json before the extension reads it.");
+            extension.logger().warning("  3. See the README for the expected schema.");
             return;
         }
 
@@ -278,14 +286,32 @@ public class CustomItemsHandler {
                     registered++;
                 }
             } catch (Throwable t) {
-                // Geyser's own conflict detection (CustomItemDefinitionRegisterException)
-                // or any other registration error. Log compactly without stack trace.
+                // Distinguish expected dedup (Geyser refused to register a duplicate
+                // predicate, which is normal when sibling plugins ship overlapping
+                // mappings) from a genuinely unexpected registration failure (NPE,
+                // type error, API mismatch). The former is INFO and lumped with
+                // duplicates; the latter deserves a WARNING with the exception
+                // class so an operator can investigate.
                 String message = t.getMessage();
-                extension.logger().info(
-                    "Skipping " + mapping.name()
-                        + " (CMD=" + mapping.customModelData() + "): "
-                        + (message != null ? message : t.getClass().getSimpleName()));
-                skippedDuplicate++;
+                String exClass = t.getClass().getSimpleName();
+                boolean expectedDedup = "CustomItemDefinitionRegisterException".equals(exClass);
+                if (expectedDedup) {
+                    extension.logger().info(
+                        "Skipping " + mapping.name()
+                            + " (CMD=" + mapping.customModelData() + "): "
+                            + (message != null ? message : exClass));
+                    skippedDuplicate++;
+                } else {
+                    extension.logger().error(
+                        "Unexpected registration failure for " + mapping.name()
+                            + " (CMD=" + mapping.customModelData() + "): "
+                            + exClass + (message != null ? ": " + message : ""));
+                    // Print the stack trace so the operator can diagnose. The Geyser
+                    // API logger does not expose a (String, Throwable) overload, so
+                    // route the trace through Throwable.printStackTrace().
+                    t.printStackTrace();
+                    failed++;
+                }
             }
         }
 

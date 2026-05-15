@@ -529,10 +529,18 @@ public final class GeyserExtraPaper extends JavaPlugin {
 
         // Register sneak+drop offhand-swap listener so Bedrock players can swap
         // hands without the /offhand command (mirrors Java F-key behaviour).
-        getServer().getPluginManager().registerEvents(
-            new OffhandSwapListener(this),
-            this
-        );
+        // Gated on config because some anti-cheat plugins flag the synthetic
+        // off-hand event, and operators who rely on "drop while sneaking" can
+        // opt out without losing the /offhand command. See
+        // GeneralConfig.sneakDropOffhandSwapEnabled.
+        if (config.general().sneakDropOffhandSwapEnabled()) {
+            getServer().getPluginManager().registerEvents(
+                new OffhandSwapListener(this),
+                this
+            );
+        } else if (config.general().debugMode()) {
+            getLogger().info("OffhandSwapListener disabled by config (general.sneakDropOffhandSwapEnabled=false)");
+        }
 
         // Register elytra flight workaround for Bedrock gliding without elytra
         elytraFlightListener = new ElytraFlightListener(this);
@@ -566,9 +574,17 @@ public final class GeyserExtraPaper extends JavaPlugin {
 
     /**
      * Performs initial scan of all online player inventories.
+     *
+     * <p>Why {@code runTask} not {@code runTaskAsynchronously}: Bukkit's inventory
+     * API requires the primary server thread, so the scanner has to run there.
+     * A previous revision used {@code runTaskAsynchronously} together with an
+     * {@code isPrimaryThread()} short-circuit inside {@code scanAllPlayers()},
+     * which silently turned the entire startup scan into a no-op. With the
+     * scanner's thread guard now refusing to run off-thread, scheduling has to
+     * be synchronous from the start.</p>
      */
     private void performInitialScan() {
-        getServer().getScheduler().runTaskAsynchronously(this, () -> {
+        getServer().getScheduler().runTask(this, () -> {
             customItemScanner.scanAllPlayers();
 
             if (config.general().debugMode()) {

@@ -10,11 +10,15 @@ import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.inventory.InventoryClickEvent;
+import org.bukkit.event.inventory.InventoryCloseEvent;
 import org.bukkit.event.inventory.InventoryType;
 import org.bukkit.event.inventory.PrepareItemCraftEvent;
+import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.inventory.CraftingInventory;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.Recipe;
+
+import java.util.Arrays;
 import org.geysermc.floodgate.api.FloodgateApi;
 
 import java.util.Map;
@@ -173,6 +177,21 @@ public final class CraftingRecipeHandler implements Listener {
 
             if (cached != null && cached.result() != null) {
                 CraftingInventory craftingInv = (CraftingInventory) event.getInventory();
+
+                // Re-validate the matrix against the cached snapshot before applying
+                // the cached result. Without this check a player could swap grid items
+                // after the result was cached and still receive the stale result —
+                // effectively "predicting the future" of a recipe they no longer have
+                // ingredients for.
+                if (!matrixesMatch(cached.matrix(), craftingInv.getMatrix())) {
+                    if (plugin.getGeyserExtraConfig().general().debugMode()) {
+                        plugin.getLogger().info("[CraftingSync] Discarding stale cache for "
+                            + player.getName() + " — grid changed since cache was set");
+                    }
+                    craftResultCache.remove(player.getUniqueId());
+                    return;
+                }
+
                 ItemStack currentResult = craftingInv.getResult();
 
                 // If current result differs from cached, apply the cached one
@@ -197,6 +216,70 @@ public final class CraftingRecipeHandler implements Listener {
                 }, 1L);
             }
         }
+    }
+
+    /**
+     * Clears the cached result when a Bedrock player closes their crafting
+     * inventory. Without this, abandoned caches accumulated in {@link #craftResultCache}
+     * until either the player triggered another craft preview or quit — a slow leak
+     * proportional to crafting activity.
+     */
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onInventoryClose(InventoryCloseEvent event) {
+        if (!enabled) {
+            return;
+        }
+        InventoryType type = event.getInventory().getType();
+        if (type != InventoryType.CRAFTING && type != InventoryType.WORKBENCH) {
+            return;
+        }
+        if (event.getPlayer() instanceof Player player) {
+            craftResultCache.remove(player.getUniqueId());
+        }
+    }
+
+    /**
+     * Final safety net: clear any cached result on disconnect. Covers the case
+     * where the player crashes / network-disconnects without the inventory close
+     * event firing.
+     */
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onPlayerQuit(PlayerQuitEvent event) {
+        if (!enabled) {
+            return;
+        }
+        craftResultCache.remove(event.getPlayer().getUniqueId());
+    }
+
+    /**
+     * Whether two crafting matrices are equivalent (same length and each slot
+     * either both null/AIR or {@link ItemStack#isSimilar} matching). Used at
+     * result-click time to confirm the cached recipe still applies to the
+     * current grid contents.
+     */
+    private boolean matrixesMatch(ItemStack[] cached, ItemStack[] current) {
+        if (cached == null || current == null) {
+            return cached == current;
+        }
+        if (cached.length != current.length) {
+            return false;
+        }
+        for (int i = 0; i < cached.length; i++) {
+            ItemStack a = cached[i];
+            ItemStack b = current[i];
+            boolean aEmpty = a == null || a.getType() == Material.AIR;
+            boolean bEmpty = b == null || b.getType() == Material.AIR;
+            if (aEmpty && bEmpty) {
+                continue;
+            }
+            if (aEmpty != bEmpty) {
+                return false;
+            }
+            if (!a.isSimilar(b) || a.getAmount() != b.getAmount()) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**

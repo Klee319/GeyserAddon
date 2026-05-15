@@ -72,13 +72,15 @@ public class CustomSkullsHandler {
         }
 
         if (!Files.exists(skullsFile)) {
+            // Why: previously this branch auto-created a sample skulls.json, which
+            // pinned placeholder data into the live data folder and hid the real
+            // recovery flow. The extension now logs the actionable steps and waits
+            // for the Paper plugin to write the real file. No file is created.
             extension.logger().warning("No skulls.json found at " + skullsFile);
-            extension.logger().info("This file is created by the Paper plugin after scanning skulls.");
-            extension.logger().info("Steps to fix:");
-            extension.logger().info("  1. Place some custom player heads in the world");
-            extension.logger().info("  2. Restart server to let Paper plugin scan them");
-            extension.logger().info("  3. Restart again for Extension to load the skulls");
-            createSampleSkullsFile(skullsFile);
+            extension.logger().warning("Recovery steps:");
+            extension.logger().warning("  1. Place some custom player heads in the world so Paper can scan them.");
+            extension.logger().warning("  2. Restart the server so the Paper plugin writes skulls.json before Geyser loads.");
+            extension.logger().warning("  3. The extension picks up the file on subsequent startups.");
             return;
         }
 
