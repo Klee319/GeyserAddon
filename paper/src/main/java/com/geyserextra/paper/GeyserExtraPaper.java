@@ -7,6 +7,7 @@ import com.geyserextra.paper.listener.ChunkLoadListener;
 import com.geyserextra.paper.listener.ItemListener;
 import com.geyserextra.paper.listener.ElytraFlightListener;
 import com.geyserextra.paper.listener.OffhandInteractionListener;
+import com.geyserextra.paper.listener.OffhandSwapListener;
 import com.geyserextra.paper.enchantment.BedrockAnvilSimulator;
 import com.geyserextra.paper.enchantment.BedrockEnchantmentHandler;
 import com.geyserextra.paper.enchantment.BedrockEnchantmentTablePacketStripper;
@@ -519,6 +520,13 @@ public final class GeyserExtraPaper extends JavaPlugin {
         // Register offhand interaction listener for Bedrock right-click support
         getServer().getPluginManager().registerEvents(
             new OffhandInteractionListener(this),
+            this
+        );
+
+        // Register sneak+drop offhand-swap listener so Bedrock players can swap
+        // hands without the /offhand command (mirrors Java F-key behaviour).
+        getServer().getPluginManager().registerEvents(
+            new OffhandSwapListener(this),
             this
         );
 
