@@ -93,19 +93,49 @@ public final class CustomItemScanner {
         if (existingByCmd.isPresent()) {
             CustomItemMapping existing = existingByCmd.get();
 
-            // Try to upgrade auto-generated name to PDC name
-            if (existing.name().startsWith("custom_")) {
-                String pdcId = extractItemIdFromPDC(itemStack);
-                if (pdcId != null && !pdcId.startsWith("custom_")) {
-                    registry.unregister(existing.name());
-                    plugin.getLogger().info("Upgraded item mapping: " + existing.name() + " -> " + pdcId);
-                    // Continue to register with new name
-                } else {
-                    return Optional.of(existing);
-                }
-            } else {
+            // Non-auto-named entries are presumed authoritative (came from PDC,
+            // CMD strings, or operator-curated custom_items.json) and are left
+            // alone to avoid clobbering richer metadata with whatever the
+            // runtime ItemStack happens to expose.
+            if (!existing.name().startsWith("custom_")) {
                 return Optional.of(existing);
             }
+
+            // Auto-named entries can be upgraded once a richer source surfaces.
+            // This handles two cases at once:
+            //   (1) Pack-first registered a CMD from the Java pack with null
+            //       display name / unbreakable=false / category=ITEMS as
+            //       placeholders, and now the scanner sees the actual ItemStack
+            //       with operator-set metadata.
+            //   (2) The previous "auto-name + no PDC" entry now has a PDC value
+            //       available because a plugin filled it in after the fact.
+            String pdcId = extractItemIdFromPDC(itemStack);
+            String currentDisplayName = extractDisplayName(itemStack);
+            boolean currentUnbreakable = isUnbreakable(itemStack);
+            int currentCategory = determineCreativeCategory(itemStack.getType());
+
+            boolean wantNameUpgrade = pdcId != null && !pdcId.startsWith("custom_");
+            boolean wantDisplayUpgrade = !existing.hasDisplayName()
+                && currentDisplayName != null && !currentDisplayName.isBlank();
+            boolean wantUnbreakableUpgrade = !existing.unbreakable() && currentUnbreakable;
+            boolean wantCategoryUpgrade = currentCategory != CustomItemMapping.CREATIVE_CATEGORY_ITEMS
+                && existing.creativeCategory() == CustomItemMapping.CREATIVE_CATEGORY_ITEMS;
+
+            if (!wantNameUpgrade && !wantDisplayUpgrade
+                && !wantUnbreakableUpgrade && !wantCategoryUpgrade) {
+                return Optional.of(existing);
+            }
+
+            registry.unregister(existing.name());
+            StringBuilder reasons = new StringBuilder();
+            if (wantNameUpgrade) reasons.append("name,");
+            if (wantDisplayUpgrade) reasons.append("displayName,");
+            if (wantUnbreakableUpgrade) reasons.append("unbreakable,");
+            if (wantCategoryUpgrade) reasons.append("category,");
+            plugin.getLogger().info("Upgraded auto-named mapping " + existing.name()
+                + " [+" + reasons.substring(0, reasons.length() - 1) + "]"
+                + " — continuing to register with richer metadata");
+            // Fall through to register a new entry below.
         }
 
         // Generate name (prefers PDC, falls back to auto-generated form)

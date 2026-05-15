@@ -417,11 +417,34 @@ public final class JavaPackReader {
         return Files.isRegularFile(absolute) ? absolute : null;
     }
 
-    /** Resolves a texture reference (e.g. {@code "myns:items/fire_sword"}) to a PNG file. */
+    /**
+     * Resolves a texture reference (e.g. {@code "myns:items/fire_sword"}) to a PNG file.
+     *
+     * <p>Returns {@code null} for references in the {@code minecraft:} namespace.
+     * Why: a CMD override that points at a vanilla texture path is reusing an
+     * unmodified Mojang texture — registering it on Bedrock would add a custom
+     * item identifier with no visual distinction from its base material, just
+     * bloating the registry and the BE resource pack. The user-stated goal is
+     * "only register items whose Java pack has a custom texture added"; vanilla
+     * references fail that test by definition.</p>
+     *
+     * <p>If an operator genuinely wants Bedrock-side identity for a vanilla-
+     * textured CMD variant (e.g. for inventory distinction without visual
+     * changes), the runtime scanner path will still detect and register it as
+     * usual when a player interacts with the item — this filter only affects
+     * the pack-first pre-registration step.</p>
+     */
     private Path resolveTextureFile(String textureRef) {
         String[] parts = splitNamespacedKey(textureRef);
         String namespace = parts[0];
         String path = parts[1];
+        if ("minecraft".equals(namespace)) {
+            if (debug) {
+                logger.fine("[JavaPack] skipping vanilla texture reference (no custom texture added): "
+                    + textureRef);
+            }
+            return null;
+        }
         Path absolute = packRoot.resolve("assets").resolve(namespace)
             .resolve("textures").resolve(path + ".png");
         if (Files.isRegularFile(absolute)) {
