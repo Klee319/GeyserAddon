@@ -132,10 +132,40 @@ public final class AutoBedrockPackBuilder {
         Logger logger,
         boolean debug
     ) throws IOException {
-        Collection<CustomItemMapping> mappings = registry.getMappings();
-
         Map<JavaPackReader.CmdKey, JavaPackReader.JavaModelDefinition> javaPackEntries =
             scanJavaPack(javaPackRoot, javaPackFormat, logger, debug);
+        build(registry, outputZip, javaPackEntries, logger, debug);
+    }
+
+    /**
+     * Builds the pack ZIP using already-scanned Java pack entries.
+     *
+     * <p>Use this overload when the caller has already invoked
+     * {@link JavaPackReader#scan()} once for an earlier step (such as
+     * pre-populating the registry) and wants to avoid re-reading every
+     * model JSON a second time.</p>
+     *
+     * @param registry          source of custom item mappings
+     * @param outputZip         target ZIP file path
+     * @param javaPackEntries   pre-scanned Java pack overrides; pass
+     *                          {@link Collections#emptyMap()} to skip the
+     *                          texture-copy step entirely
+     * @param logger            plugin logger (must not be null when pack
+     *                          entries are present)
+     * @param debug             whether to emit verbose per-file diagnostics
+     * @throws IOException if writing the ZIP fails
+     */
+    public static void build(
+        ItemMappingRegistry registry,
+        Path outputZip,
+        Map<JavaPackReader.CmdKey, JavaPackReader.JavaModelDefinition> javaPackEntries,
+        Logger logger,
+        boolean debug
+    ) throws IOException {
+        Collection<CustomItemMapping> mappings = registry.getMappings();
+        if (javaPackEntries == null) {
+            javaPackEntries = Collections.emptyMap();
+        }
 
         Path parent = outputZip.getParent();
         if (parent != null) {
@@ -196,11 +226,11 @@ public final class AutoBedrockPackBuilder {
             }
 
             putEntryUnique(zos, "textures/item_texture.json",
-                buildItemTextureJson(mappings, customIconToTexturePath)
+                buildItemTextureJson(mappings, customIconToTexturePath, logger)
                     .getBytes(StandardCharsets.UTF_8),
                 writtenEntries, logger);
 
-            if (logger != null && javaPackRoot != null) {
+            if (logger != null && !javaPackEntries.isEmpty()) {
                 logger.info("[AutoPack] Java pack texture copy: " + textureCopyCount
                     + " custom textures applied, "
                     + (mappings.size() - textureCopyCount - duplicateSkipCount)
@@ -277,7 +307,7 @@ public final class AutoBedrockPackBuilder {
     }
 
     private static String buildItemTextureJson(Collection<CustomItemMapping> mappings) {
-        return buildItemTextureJson(mappings, Collections.emptyMap());
+        return buildItemTextureJson(mappings, Collections.emptyMap(), null);
     }
 
     /**
@@ -285,17 +315,22 @@ public final class AutoBedrockPackBuilder {
      *        the trailing {@code .png}) for items whose textures were copied
      *        from the Java pack. Missing entries fall back to the vanilla
      *        Bedrock texture for the base item.
+     * @param logger optional logger; when non-null, warns once per icon-key
+     *        collision so an operator can see when two distinct mappings
+     *        collapse to the same Bedrock identity (one will lose its
+     *        texture).
      */
     private static String buildItemTextureJson(
         Collection<CustomItemMapping> mappings,
-        Map<String, String> customIconToTexturePath
+        Map<String, String> customIconToTexturePath,
+        Logger logger
     ) {
         Map<String, Object> root = new LinkedHashMap<>();
         root.put("resource_pack_name", "geyserextra_auto");
         root.put("texture_name", "atlas.items");
 
         Map<String, Map<String, String>> textureData = new LinkedHashMap<>();
-        Set<String> seenIconKeys = new HashSet<>();
+        Map<String, String> seenIconKeys = new LinkedHashMap<>();  // iconKey -> first mapping name that claimed it
         for (CustomItemMapping mapping : mappings) {
             // Sanitize to the same form Extension's CustomItemsHandler uses when
             // registering the icon key. Without this transform, mapping names
@@ -304,8 +339,17 @@ public final class AutoBedrockPackBuilder {
             // Bedrock would silently fail to find the texture.
             String iconKey = toBedrockIconKey(mapping.name());
             // Dedup: if multiple registry entries collapse to the same sanitized
-            // key, only the first wins (matches the texture-copy de-dup loop).
-            if (!seenIconKeys.add(iconKey)) {
+            // key, only the first wins. The loser will be missing from item_texture.json
+            // and Bedrock will fall back to its default icon. Surface this loudly
+            // so an operator can rename the offender; with a silent skip the
+            // texture-not-applied result would be invisible to diagnostics.
+            String previous = seenIconKeys.putIfAbsent(iconKey, mapping.name());
+            if (previous != null) {
+                if (logger != null) {
+                    logger.warning("[AutoPack] icon-key collision: '" + iconKey
+                        + "' claimed by '" + previous + "', dropping later mapping '"
+                        + mapping.name() + "' (texture will not be applied for the duplicate)");
+                }
                 continue;
             }
             String texturePath = customIconToTexturePath.getOrDefault(

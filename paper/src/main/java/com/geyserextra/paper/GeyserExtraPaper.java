@@ -13,7 +13,9 @@ import com.geyserextra.paper.enchantment.BedrockEnchantmentHandler;
 import com.geyserextra.paper.enchantment.BedrockEnchantmentTablePacketStripper;
 import com.geyserextra.paper.recipe.CraftingRecipeHandler;
 import com.geyserextra.paper.recipe.SmithingRecipeHandler;
+import com.geyserextra.core.api.CustomItemMapping;
 import com.geyserextra.paper.pack.AutoBedrockPackBuilder;
+import com.geyserextra.paper.pack.JavaPackReader;
 import com.geyserextra.paper.scanner.CustomItemScanner;
 import com.geyserextra.paper.scanner.RecipeScanner;
 import com.geyserextra.paper.scanner.SkullScanner;
@@ -34,6 +36,8 @@ import com.geyserextra.paper.util.JapaneseTranslationLoader;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Collections;
+import java.util.Map;
 import java.util.Objects;
 import java.util.logging.Level;
 
@@ -607,12 +611,33 @@ public final class GeyserExtraPaper extends JavaPlugin {
                 Path autoPackPath = extensionFolder.resolve("packs").resolve("geyserextra_auto.zip");
                 Path javaPackRoot = resolveJavaPackRoot();
                 String javaPackFormat = config.customItems().javaResourcePackFormat();
+
+                // Scan the Java pack once and reuse the result for both pre-registration
+                // and texture copying. Pre-registration ("pack-first") guarantees every
+                // (baseItem, CMD) override in the operator's pack ends up in the registry
+                // — without it, only items the scanner has observed during play would get
+                // a Bedrock texture, breaking the "Java pack is always reflected on Bedrock"
+                // guarantee for items no one has picked up yet.
+                Map<JavaPackReader.CmdKey, JavaPackReader.JavaModelDefinition> javaPackEntries =
+                    Collections.emptyMap();
+                if (javaPackRoot != null) {
+                    try {
+                        javaPackEntries = new JavaPackReader(
+                            javaPackRoot, javaPackFormat, getLogger(), debug).scan();
+                    } catch (Exception ex) {
+                        getLogger().warning("[JavaPack] scan failed: "
+                            + ex.getClass().getSimpleName() + ": " + ex.getMessage());
+                    }
+                }
+                if (!javaPackEntries.isEmpty()) {
+                    prepopulateRegistryFromJavaPack(javaPackEntries);
+                }
+
                 try {
                     AutoBedrockPackBuilder.build(
                         itemMappingRegistry,
                         autoPackPath,
-                        javaPackRoot,
-                        javaPackFormat,
+                        javaPackEntries,
                         getLogger(),
                         debug
                     );
@@ -649,6 +674,74 @@ public final class GeyserExtraPaper extends JavaPlugin {
      */
     public Path getSharedFolder() {
         return getExtensionDataFolder();
+    }
+
+    /**
+     * Pre-populates {@link #itemMappingRegistry} with every {@code (baseItem,
+     * custom_model_data)} pair found in the operator's Java edition resource
+     * pack that the runtime scanner has not yet observed.
+     *
+     * <p>Why pack-first: the runtime scanner adds entries lazily as players
+     * touch items (inventory join, GUI open, held-item swap, craft result).
+     * Until that happens for a given CMD value, the registry has no entry,
+     * the auto-pack builder has nothing to iterate, and the matching Java
+     * texture never reaches Bedrock — even though the Java pack already
+     * defines it. Pre-populating from the pack itself closes that gap so
+     * "Java pack defines a texture for X" always implies "Bedrock sees the
+     * texture for X" without depending on player interaction order.</p>
+     *
+     * <p>Existing entries (whether from runtime scanning, custom_items.json
+     * load, or a previous pre-population pass) are left untouched: the first
+     * registration wins, so any operator-curated metadata (display name,
+     * creative category) is preserved.</p>
+     *
+     * @param packEntries scan result from {@link JavaPackReader#scan()}
+     */
+    private void prepopulateRegistryFromJavaPack(
+        Map<JavaPackReader.CmdKey, JavaPackReader.JavaModelDefinition> packEntries
+    ) {
+        int added = 0;
+        int skipped = 0;
+        for (JavaPackReader.CmdKey key : packEntries.keySet()) {
+            if (itemMappingRegistry.getByCustomModelData(key.baseItem(), key.cmd()).isPresent()) {
+                skipped++;
+                continue;
+            }
+            String autoName = generateAutoMappingName(key.baseItem(), key.cmd());
+            if (itemMappingRegistry.contains(autoName)) {
+                skipped++;
+                continue;
+            }
+            CustomItemMapping mapping = new CustomItemMapping(
+                autoName,
+                key.baseItem(),
+                key.cmd(),
+                false,   // unbreakable unknown from pack alone
+                null,    // display name unknown from pack alone
+                null,    // icon falls back to name via item_texture.json
+                CustomItemMapping.CREATIVE_CATEGORY_ITEMS,
+                null,    // creative group unset
+                true     // register with Geyser
+            );
+            itemMappingRegistry.register(mapping);
+            added++;
+        }
+        if (added > 0 || skipped > 0) {
+            getLogger().info("[JavaPack] pre-registration: " + added
+                + " items added from pack, " + skipped + " already in registry");
+        }
+    }
+
+    /**
+     * Mirrors {@code CustomItemScanner.generateMappingName}'s auto-generated
+     * fallback so a pack-first registration uses the same naming convention
+     * the scanner would have produced once a player interacted with the item.
+     */
+    private static String generateAutoMappingName(String baseItem, int cmd) {
+        String trimmed = baseItem.startsWith("minecraft:")
+            ? baseItem.substring("minecraft:".length())
+            : baseItem;
+        return "custom_" + trimmed + "_" + cmd;
     }
 
     /**

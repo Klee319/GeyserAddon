@@ -224,20 +224,40 @@ public final class JavaPackReader {
     ) throws IOException {
         Map<String, Object> root = readJsonObject(jsonFile);
         Object modelObj = root.get("model");
+        if (modelObj == null) {
+            return;  // file just doesn't have a model definition — not actionable
+        }
         if (!(modelObj instanceof Map<?, ?> model)) {
+            if (debug) {
+                logger.fine("[JavaPack-modern] " + jsonFile.getFileName()
+                    + ": 'model' is not an object (" + modelObj.getClass().getSimpleName()
+                    + ") — skipped");
+            }
             return;
         }
         Object typeObj = model.get("type");
         if (!"range_dispatch".equals(typeObj) && !"minecraft:range_dispatch".equals(typeObj)) {
+            // Most item files use other types (model, select, etc.) and aren't CMD overrides.
+            // Debug-only because logging every non-CMD file would spam warnings.
             return;
         }
         Object propertyObj = model.get("property");
         if (!"custom_model_data".equals(propertyObj)
             && !"minecraft:custom_model_data".equals(propertyObj)) {
+            // range_dispatch is present but on a different property (e.g. "damage").
+            // Worth warning because this is unusual and the operator may have intended
+            // custom_model_data.
+            logger.warning("[JavaPack-modern] " + jsonFile.getFileName()
+                + ": range_dispatch on property '" + propertyObj
+                + "' (expected 'custom_model_data') — skipped");
             return;
         }
         Object entriesObj = model.get("entries");
         if (!(entriesObj instanceof List<?> entries)) {
+            logger.warning("[JavaPack-modern] " + jsonFile.getFileName()
+                + ": range_dispatch.entries is not an array (got "
+                + (entriesObj == null ? "null" : entriesObj.getClass().getSimpleName())
+                + ") — skipped");
             return;
         }
 
@@ -346,6 +366,8 @@ public final class JavaPackReader {
             try {
                 modelJson = readJsonObject(modelFile);
             } catch (IOException ex) {
+                logger.warning("[JavaPack] failed to read model JSON " + modelFile
+                    + ": " + ex.getMessage());
                 return null;
             }
             Object texturesObj = modelJson.get("textures");
