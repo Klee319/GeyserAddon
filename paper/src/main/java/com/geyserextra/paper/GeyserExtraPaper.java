@@ -599,14 +599,28 @@ public final class GeyserExtraPaper extends JavaPlugin {
                 }
 
                 // Why: Geyser custom items render as missing texture without an item_texture.json
-                // entry. Generate a textureless pack that points every mapping at the matching
-                // vanilla BE texture so admins do not have to author a BE resource pack.
+                // entry. Generate a pack that points every mapping at the matching vanilla
+                // BE texture so admins do not have to author a BE resource pack. When a Java
+                // pack is configured, custom textures from that pack are mirrored as well so
+                // Bedrock players see the operator-supplied 2D textures (3D models remain
+                // out of scope — see the README's converter notes).
                 Path autoPackPath = extensionFolder.resolve("packs").resolve("geyserextra_auto.zip");
+                Path javaPackRoot = resolveJavaPackRoot();
+                String javaPackFormat = config.customItems().javaResourcePackFormat();
                 try {
-                    AutoBedrockPackBuilder.build(itemMappingRegistry, autoPackPath);
+                    AutoBedrockPackBuilder.build(
+                        itemMappingRegistry,
+                        autoPackPath,
+                        javaPackRoot,
+                        javaPackFormat,
+                        getLogger(),
+                        debug
+                    );
                     if (debug) {
                         getLogger().info("Built auto BE pack: " + autoPackPath
-                            + " (" + itemMappingRegistry.size() + " mappings)");
+                            + " (" + itemMappingRegistry.size() + " mappings"
+                            + (javaPackRoot != null ? ", Java pack: " + javaPackRoot : "")
+                            + ")");
                     }
                 } catch (IOException e) {
                     getLogger().log(Level.WARNING, "Failed to build auto BE pack at " + autoPackPath, e);
@@ -635,6 +649,33 @@ public final class GeyserExtraPaper extends JavaPlugin {
      */
     public Path getSharedFolder() {
         return getExtensionDataFolder();
+    }
+
+    /**
+     * Resolves the configured Java edition resource pack root path.
+     *
+     * <p>Returns {@code null} when the path is unset, blank, missing on disk,
+     * or not a directory — in those cases the auto-pack builder skips the
+     * Java pack scan and falls back to vanilla textures for every item.</p>
+     *
+     * <p>Relative paths are interpreted against this plugin's data folder
+     * (e.g. {@code plugins/GeyserExtra/}). Absolute paths are used verbatim.</p>
+     */
+    private Path resolveJavaPackRoot() {
+        String configured = config.customItems().javaResourcePackPath();
+        if (configured == null || configured.isBlank()) {
+            return null;
+        }
+        Path candidate = Path.of(configured);
+        if (!candidate.isAbsolute()) {
+            candidate = getDataFolder().toPath().resolve(configured);
+        }
+        if (!Files.isDirectory(candidate)) {
+            getLogger().warning("[JavaPack] configured java pack path is not a directory: "
+                + candidate + " — falling back to vanilla textures.");
+            return null;
+        }
+        return candidate;
     }
 
     /**

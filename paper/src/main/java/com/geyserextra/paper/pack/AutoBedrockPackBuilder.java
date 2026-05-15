@@ -12,9 +12,11 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.logging.Logger;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
@@ -58,12 +60,55 @@ public final class AutoBedrockPackBuilder {
      * Builds the pack ZIP at the given output path from the registry contents.
      * Overwrites any existing file. Creates parent directories as needed.
      *
+     * <p>Equivalent to {@link #build(ItemMappingRegistry, Path, Path, String, Logger, boolean)}
+     * with no Java pack source — every custom item is mapped to its base
+     * material's vanilla Bedrock texture.</p>
+     *
      * @param registry  source of custom item mappings
      * @param outputZip target ZIP file path (e.g. {@code .../packs/geyserextra_auto.zip})
      * @throws IOException if writing the ZIP fails
      */
     public static void build(ItemMappingRegistry registry, Path outputZip) throws IOException {
+        build(registry, outputZip, null, null, null, false);
+    }
+
+    /**
+     * Builds the pack ZIP, optionally mirroring textures from an operator-provided
+     * Java edition resource pack.
+     *
+     * <p>When {@code javaPackRoot} is non-null and points at an unzipped Java
+     * pack directory, the matching {@code (baseItem, custom_model_data)}
+     * entries have their PNG textures copied into the BE pack under
+     * {@code textures/items/<bedrock_id>.png} and their {@code item_texture.json}
+     * entry rewritten to point at that path. Items that have no Java pack
+     * counterpart fall back to the vanilla-texture mapping used by
+     * {@link #build(ItemMappingRegistry, Path)}.</p>
+     *
+     * <p>Only 2D textures are copied. 3D model geometry, attachables, and
+     * animations are out of scope — operators that need full visual parity
+     * should run an external converter (see README).</p>
+     *
+     * @param registry        source of custom item mappings
+     * @param outputZip       target ZIP file path
+     * @param javaPackRoot    unzipped Java pack root, or {@code null} to skip Java pack scan
+     * @param javaPackFormat  one of {@code AUTO} / {@code LEGACY} / {@code MODERN};
+     *                        ignored when {@code javaPackRoot} is null
+     * @param logger          plugin logger (may be null when {@code javaPackRoot} is null)
+     * @param debug           whether to emit verbose per-file diagnostics
+     * @throws IOException if writing the ZIP fails
+     */
+    public static void build(
+        ItemMappingRegistry registry,
+        Path outputZip,
+        Path javaPackRoot,
+        String javaPackFormat,
+        Logger logger,
+        boolean debug
+    ) throws IOException {
         Collection<CustomItemMapping> mappings = registry.getMappings();
+
+        Map<JavaPackReader.CmdKey, JavaPackReader.JavaModelDefinition> javaPackEntries =
+            scanJavaPack(javaPackRoot, javaPackFormat, logger, debug);
 
         Path parent = outputZip.getParent();
         if (parent != null) {
@@ -74,8 +119,71 @@ public final class AutoBedrockPackBuilder {
             putEntry(zos, "manifest.json",
                 buildManifestJson().getBytes(StandardCharsets.UTF_8));
             putEntry(zos, "pack_icon.png", buildPackIconPng());
+
+            // Track which icon keys were satisfied by a Java pack texture so the
+            // item_texture.json builder can prefer the copied texture over the
+            // vanilla fallback for those entries.
+            Map<String, String> customIconToTexturePath = new LinkedHashMap<>();
+            int textureCopyCount = 0;
+            for (CustomItemMapping mapping : mappings) {
+                JavaPackReader.CmdKey key = new JavaPackReader.CmdKey(
+                    mapping.baseItem(), mapping.customModelData());
+                JavaPackReader.JavaModelDefinition def = javaPackEntries.get(key);
+                if (def == null) {
+                    continue;
+                }
+                String bedrockTextureRelative = "textures/items/" + mapping.name();
+                String zipEntry = bedrockTextureRelative + ".png";
+                try {
+                    byte[] pngBytes = Files.readAllBytes(def.textureFile());
+                    putEntry(zos, zipEntry, pngBytes);
+                    customIconToTexturePath.put(mapping.name(), bedrockTextureRelative);
+                    textureCopyCount++;
+                    if (debug && logger != null) {
+                        logger.fine("[AutoPack] copied " + def.textureFile() + " -> " + zipEntry);
+                    }
+                } catch (IOException ex) {
+                    if (logger != null) {
+                        logger.warning("[AutoPack] failed to copy texture for " + key
+                            + " from " + def.textureFile() + ": " + ex.getMessage());
+                    }
+                }
+            }
+
             putEntry(zos, "textures/item_texture.json",
-                buildItemTextureJson(mappings).getBytes(StandardCharsets.UTF_8));
+                buildItemTextureJson(mappings, customIconToTexturePath)
+                    .getBytes(StandardCharsets.UTF_8));
+
+            if (logger != null && javaPackRoot != null) {
+                logger.info("[AutoPack] Java pack texture copy: " + textureCopyCount
+                    + " custom textures applied, "
+                    + (mappings.size() - textureCopyCount) + " fell back to vanilla");
+            }
+        }
+    }
+
+    /**
+     * Runs the Java pack scan with defensive error handling. Returns an empty
+     * map on any failure or when the pack root is null.
+     */
+    private static Map<JavaPackReader.CmdKey, JavaPackReader.JavaModelDefinition> scanJavaPack(
+        Path javaPackRoot,
+        String javaPackFormat,
+        Logger logger,
+        boolean debug
+    ) {
+        if (javaPackRoot == null) {
+            return Collections.emptyMap();
+        }
+        if (logger == null) {
+            // No logger means the caller didn't really want a scan.
+            return Collections.emptyMap();
+        }
+        try {
+            return new JavaPackReader(javaPackRoot, javaPackFormat, logger, debug).scan();
+        } catch (Exception ex) {
+            logger.warning("[AutoPack] Java pack scan failed: " + ex.getMessage());
+            return Collections.emptyMap();
         }
     }
 
@@ -101,6 +209,19 @@ public final class AutoBedrockPackBuilder {
     }
 
     private static String buildItemTextureJson(Collection<CustomItemMapping> mappings) {
+        return buildItemTextureJson(mappings, Collections.emptyMap());
+    }
+
+    /**
+     * @param customIconToTexturePath icon-key -> custom texture path (without
+     *        the trailing {@code .png}) for items whose textures were copied
+     *        from the Java pack. Missing entries fall back to the vanilla
+     *        Bedrock texture for the base item.
+     */
+    private static String buildItemTextureJson(
+        Collection<CustomItemMapping> mappings,
+        Map<String, String> customIconToTexturePath
+    ) {
         Map<String, Object> root = new LinkedHashMap<>();
         root.put("resource_pack_name", "geyserextra_auto");
         root.put("texture_name", "atlas.items");
@@ -111,7 +232,10 @@ public final class AutoBedrockPackBuilder {
             // Geyser uses that name as the icon key when no explicit icon is set,
             // so this entry must match it exactly.
             String iconKey = mapping.name();
-            String texturePath = vanillaTexturePathFor(mapping.baseItem());
+            String texturePath = customIconToTexturePath.getOrDefault(
+                iconKey,
+                vanillaTexturePathFor(mapping.baseItem())
+            );
             Map<String, String> entry = new LinkedHashMap<>();
             entry.put("textures", texturePath);
             textureData.put(iconKey, entry);

@@ -21,7 +21,38 @@ CustomModelDataを持つアイテムを自動検出し、Bedrockプレイヤー�
 - 既定では**ベースアイテムのバニラテクスチャ**で表示されます
   （例: `minecraft:diamond_sword` ベースなら Bedrock 上はダイヤ剣の見た目）
 - 専用 BE リソースパックの作成は**不要**です。GeyserExtra が起動時に最小パック (`packs/geyserextra_auto.zip`) を自動生成し、`item_texture.json` の各エントリをベースアイテムのテクスチャパスへ向けて配信します
+- **Java版リソースパックがある場合は2Dテクスチャを自動コピー**します。`customItems.javaResourcePackPath` を設定すると、その unzipped Java pack 内の CMD オーバーライドを読み取り、対応する PNG を BE pack に取り込みます（後述）
 - 専用テクスチャを表示したい場合は、自動パックのエントリを上書きする BE リソースパックを別途配置してください
+
+**Java pack 2Dテクスチャ自動コピー機能:**
+
+`customItems.javaResourcePackPath` に **unzipped** Java版リソースパックのディレクトリパスを設定すると、起動時に自動で:
+
+1. `assets/<ns>/models/item/<base>.json` (Legacy, 1.20.x-1.21.3) または `assets/<ns>/items/<name>.json` (Modern, 1.21.4+) を走査
+2. `custom_model_data` オーバーライドを抽出
+3. 各オーバーライドの参照テクスチャ PNG を `geyserextra_auto.zip` 内の `textures/items/<bedrock_id>.png` へコピー
+4. `item_texture.json` を該当テクスチャに紐付け
+
+これにより Bedrock プレイヤーも **Java と同じ 2D アイテムテクスチャ**で表示されます。
+
+**設定例:**
+```json
+{
+  "customItems": {
+    "javaResourcePackPath": "java-pack/",
+    "javaResourcePackFormat": "AUTO"
+  }
+}
+```
+
+- 相対パス → `plugins/GeyserExtra/<指定パス>/` 起点
+- 絶対パス → そのまま使用
+- 空文字 → 機能無効、vanilla テクスチャフォールバックのみ（既定）
+- フォーマット: `AUTO`（推奨・両方読む） / `LEGACY` / `MODERN`
+
+**3D カスタムモデルが必要な場合:**
+
+GeyserExtra は **2D テクスチャのみ**自動変換します。Java で BlockBench 由来のカスタム形状（剣の刃や独自ジオメトリの装備等）を使っており、Bedrock でも同じ 3D 形状を表示したい場合は、別途 [Kas-tle/java2bedrock](https://github.com/Kas-tle/java2bedrock.sh) などの外部コンバータをご利用ください。出力された BE pack を `plugins/Geyser-Spigot/packs/` に配置すれば auto pack より優先されます（同名 identifier の上書き）。
 
 **マッピング名の決定（優先順）:**
 1. PersistentDataContainer の `item_id` 等のキー（複数の標準名に対応）

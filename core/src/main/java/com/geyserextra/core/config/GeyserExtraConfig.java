@@ -232,12 +232,21 @@ public final class GeyserExtraConfig {
         /** Suppress all PDC-missing warnings (registration is still skipped). */
         public static final String PDC_WARNING_DISABLED = "DISABLED";
 
+        /** Auto-detect Java pack format from directory structure. */
+        public static final String JAVA_PACK_FORMAT_AUTO = "AUTO";
+        /** Read only legacy {@code models/item/<base>.json} overrides arrays (1.20.x-1.21.3). */
+        public static final String JAVA_PACK_FORMAT_LEGACY = "LEGACY";
+        /** Read only modern {@code items/<name>.json} range_dispatch entries (1.21.4+). */
+        public static final String JAVA_PACK_FORMAT_MODERN = "MODERN";
+
         private final boolean enabled;
         private final String mappingsFile;
         private final boolean autoReload;
         private final int reloadIntervalSeconds;
         private final String bedrockPacksPath;
         private final String pdcWarning;
+        private final String javaResourcePackPath;
+        private final String javaResourcePackFormat;
 
         public CustomItemsConfig() {
             this.enabled = true;
@@ -246,6 +255,8 @@ public final class GeyserExtraConfig {
             this.reloadIntervalSeconds = 60;
             this.bedrockPacksPath = "";
             this.pdcWarning = PDC_WARNING_COMPACT;
+            this.javaResourcePackPath = "";
+            this.javaResourcePackFormat = JAVA_PACK_FORMAT_AUTO;
         }
 
         public CustomItemsConfig(
@@ -256,12 +267,28 @@ public final class GeyserExtraConfig {
                 String bedrockPacksPath,
                 String pdcWarning
         ) {
+            this(enabled, mappingsFile, autoReload, reloadIntervalSeconds,
+                bedrockPacksPath, pdcWarning, "", JAVA_PACK_FORMAT_AUTO);
+        }
+
+        public CustomItemsConfig(
+                boolean enabled,
+                String mappingsFile,
+                boolean autoReload,
+                int reloadIntervalSeconds,
+                String bedrockPacksPath,
+                String pdcWarning,
+                String javaResourcePackPath,
+                String javaResourcePackFormat
+        ) {
             this.enabled = enabled;
             this.mappingsFile = mappingsFile != null ? mappingsFile : "custom_items.json";
             this.autoReload = autoReload;
             this.reloadIntervalSeconds = reloadIntervalSeconds > 0 ? reloadIntervalSeconds : 60;
             this.bedrockPacksPath = bedrockPacksPath != null ? bedrockPacksPath : "";
             this.pdcWarning = normalizePdcWarning(pdcWarning);
+            this.javaResourcePackPath = javaResourcePackPath != null ? javaResourcePackPath : "";
+            this.javaResourcePackFormat = normalizeJavaPackFormat(javaResourcePackFormat);
         }
 
         private static String normalizePdcWarning(String raw) {
@@ -272,6 +299,17 @@ public final class GeyserExtraConfig {
             return switch (upper) {
                 case PDC_WARNING_FULL, PDC_WARNING_COMPACT, PDC_WARNING_DISABLED -> upper;
                 default -> PDC_WARNING_COMPACT;
+            };
+        }
+
+        private static String normalizeJavaPackFormat(String raw) {
+            if (raw == null || raw.isBlank()) {
+                return JAVA_PACK_FORMAT_AUTO;
+            }
+            String upper = raw.toUpperCase(java.util.Locale.ROOT);
+            return switch (upper) {
+                case JAVA_PACK_FORMAT_AUTO, JAVA_PACK_FORMAT_LEGACY, JAVA_PACK_FORMAT_MODERN -> upper;
+                default -> JAVA_PACK_FORMAT_AUTO;
             };
         }
 
@@ -325,6 +363,38 @@ public final class GeyserExtraConfig {
          */
         public String pdcWarning() {
             return pdcWarning != null ? pdcWarning : PDC_WARNING_COMPACT;
+        }
+
+        /**
+         * Returns the operator-provided Java edition resource pack path used as a
+         * source for custom item textures when generating the Bedrock auto-pack.
+         *
+         * <p>Empty string disables the feature; the auto-pack falls back to vanilla
+         * textures for every custom item (matching pre-feature behaviour). When
+         * non-empty, the value is interpreted relative to the Paper plugin's data
+         * folder unless it is an absolute path.</p>
+         *
+         * <p>The path must point at an <b>unzipped</b> Java pack directory (the one
+         * containing {@code pack.mcmeta} and {@code assets/}). ZIP archives are not
+         * scanned in this release.</p>
+         *
+         * @return the configured path, or empty string when disabled
+         */
+        public String javaResourcePackPath() {
+            return javaResourcePackPath != null ? javaResourcePackPath : "";
+        }
+
+        /**
+         * Returns the Java pack scan format hint.
+         *
+         * <p>Values: {@link #JAVA_PACK_FORMAT_AUTO} (detect based on directory
+         * contents), {@link #JAVA_PACK_FORMAT_LEGACY} (force 1.20.x-1.21.3
+         * {@code models/item/<base>.json overrides[]} parsing), and
+         * {@link #JAVA_PACK_FORMAT_MODERN} (force 1.21.4+
+         * {@code items/<name>.json range_dispatch} parsing). Default: AUTO.</p>
+         */
+        public String javaResourcePackFormat() {
+            return javaResourcePackFormat != null ? javaResourcePackFormat : JAVA_PACK_FORMAT_AUTO;
         }
     }
 
