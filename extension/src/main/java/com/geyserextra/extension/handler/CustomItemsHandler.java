@@ -48,10 +48,14 @@ import java.util.Map;
  * <p><b>Duplicate handling:</b> before registering each vanilla item, this handler
  * inspects {@link GeyserDefineCustomItemsEvent#customItemDefinitions()} and skips
  * any mapping whose ({@code base item}, {@code custom_model_data}) pair is already
- * registered (e.g. by Geyser's own resource-pack auto-detection that emits
- * {@code gmdl_*} identifiers). The previous v1 path threw
- * {@code CustomItemDefinitionRegisterException} per duplicate, producing one stack
- * trace per conflicting item.</p>
+ * registered by another source. Common sources include
+ * {@code plugins/Geyser-Spigot/mappings/*.json} files shipped by sibling plugins
+ * (their items typically surface with author-chosen identifiers such as
+ * {@code gmdl_<hash>} written into the JSON's {@code name} field), and any other
+ * extension that registers via this same event. The earliest registration wins;
+ * ours is skipped so the operator-installed mapping keeps authority. The previous
+ * v1 path threw {@code CustomItemDefinitionRegisterException} per duplicate,
+ * producing one stack trace per conflicting item.</p>
  *
  * <p><b>Texture resolution:</b> items are registered with their generated name as
  * both the Geyser item name and the icon key. The companion
