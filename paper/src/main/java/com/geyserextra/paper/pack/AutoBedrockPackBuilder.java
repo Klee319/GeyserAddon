@@ -13,10 +13,13 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.logging.Logger;
+import java.util.regex.Pattern;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
@@ -54,7 +57,31 @@ public final class AutoBedrockPackBuilder {
     private static final String MINECRAFT_NAMESPACE_PREFIX = "minecraft:";
     private static final String VANILLA_TEXTURE_BASE = "textures/items/";
 
+    /**
+     * Same regex Extension's {@code CustomItemsHandler.sanitizeIdentifierValue}
+     * applies to {@code mapping.name()} before it becomes the Geyser icon key.
+     * The auto-pack must mirror that transform on the Paper side so the BE
+     * {@code item_texture.json} key and the ZIP texture path agree with what
+     * Extension registers as the item's icon. Without this, mapping names
+     * containing characters Extension rewrites (notably {@code ':'} from
+     * PDC-derived names) cause a lookup mismatch and the texture is never
+     * applied on Bedrock even though it exists on disk.
+     */
+    private static final Pattern BEDROCK_ICON_KEY_INVALID = Pattern.compile("[^a-z0-9_\\-./]");
+
     private AutoBedrockPackBuilder() {}
+
+    /**
+     * Sanitizes a registry mapping name into the icon-key form Geyser's
+     * extension side ultimately registers. Lower-cases the input and replaces
+     * any character outside {@code [a-z0-9_./-]} with {@code '_'}.
+     */
+    private static String toBedrockIconKey(String mappingName) {
+        if (mappingName == null || mappingName.isEmpty()) {
+            return "";
+        }
+        return BEDROCK_ICON_KEY_INVALID.matcher(mappingName.toLowerCase()).replaceAll("_");
+    }
 
     /**
      * Builds the pack ZIP at the given output path from the registry contents.
@@ -115,16 +142,24 @@ public final class AutoBedrockPackBuilder {
             Files.createDirectories(parent);
         }
 
+        // Track ZIP entry names we've already written; ZipOutputStream throws on
+        // duplicates, which would abort the whole pack build mid-write. With dedup
+        // we keep the first writer and log the collision instead of crashing.
+        Set<String> writtenEntries = new HashSet<>();
+
         try (ZipOutputStream zos = new ZipOutputStream(Files.newOutputStream(outputZip))) {
-            putEntry(zos, "manifest.json",
-                buildManifestJson().getBytes(StandardCharsets.UTF_8));
-            putEntry(zos, "pack_icon.png", buildPackIconPng());
+            putEntryUnique(zos, "manifest.json",
+                buildManifestJson().getBytes(StandardCharsets.UTF_8), writtenEntries, logger);
+            putEntryUnique(zos, "pack_icon.png", buildPackIconPng(), writtenEntries, logger);
 
             // Track which icon keys were satisfied by a Java pack texture so the
             // item_texture.json builder can prefer the copied texture over the
-            // vanilla fallback for those entries.
+            // vanilla fallback for those entries. The map key is the sanitized
+            // icon key — see toBedrockIconKey() for why this normalization is
+            // required to match Extension's side.
             Map<String, String> customIconToTexturePath = new LinkedHashMap<>();
             int textureCopyCount = 0;
+            int duplicateSkipCount = 0;
             for (CustomItemMapping mapping : mappings) {
                 JavaPackReader.CmdKey key = new JavaPackReader.CmdKey(
                     mapping.baseItem(), mapping.customModelData());
@@ -132,12 +167,22 @@ public final class AutoBedrockPackBuilder {
                 if (def == null) {
                     continue;
                 }
-                String bedrockTextureRelative = "textures/items/" + mapping.name();
+                String iconKey = toBedrockIconKey(mapping.name());
+                String bedrockTextureRelative = "textures/items/" + iconKey;
                 String zipEntry = bedrockTextureRelative + ".png";
+                if (writtenEntries.contains(zipEntry)) {
+                    duplicateSkipCount++;
+                    if (logger != null) {
+                        logger.warning("[AutoPack] duplicate ZIP entry skipped (mapping name "
+                            + "collides with already-written entry): " + zipEntry
+                            + " (mapping=" + mapping.name() + ", key=" + key + ")");
+                    }
+                    continue;
+                }
                 try {
                     byte[] pngBytes = Files.readAllBytes(def.textureFile());
-                    putEntry(zos, zipEntry, pngBytes);
-                    customIconToTexturePath.put(mapping.name(), bedrockTextureRelative);
+                    putEntryUnique(zos, zipEntry, pngBytes, writtenEntries, logger);
+                    customIconToTexturePath.put(iconKey, bedrockTextureRelative);
                     textureCopyCount++;
                     if (debug && logger != null) {
                         logger.fine("[AutoPack] copied " + def.textureFile() + " -> " + zipEntry);
@@ -150,16 +195,39 @@ public final class AutoBedrockPackBuilder {
                 }
             }
 
-            putEntry(zos, "textures/item_texture.json",
+            putEntryUnique(zos, "textures/item_texture.json",
                 buildItemTextureJson(mappings, customIconToTexturePath)
-                    .getBytes(StandardCharsets.UTF_8));
+                    .getBytes(StandardCharsets.UTF_8),
+                writtenEntries, logger);
 
             if (logger != null && javaPackRoot != null) {
                 logger.info("[AutoPack] Java pack texture copy: " + textureCopyCount
                     + " custom textures applied, "
-                    + (mappings.size() - textureCopyCount) + " fell back to vanilla");
+                    + (mappings.size() - textureCopyCount - duplicateSkipCount)
+                    + " fell back to vanilla, "
+                    + duplicateSkipCount + " skipped due to duplicate ZIP entry name");
             }
         }
+    }
+
+    /**
+     * Writes a ZIP entry only if its name hasn't been used yet. Records the
+     * name in {@code writtenEntries}; on duplicate, logs and skips.
+     */
+    private static void putEntryUnique(
+        ZipOutputStream zos,
+        String entryName,
+        byte[] data,
+        Set<String> writtenEntries,
+        Logger logger
+    ) throws IOException {
+        if (!writtenEntries.add(entryName)) {
+            if (logger != null) {
+                logger.warning("[AutoPack] duplicate ZIP entry skipped: " + entryName);
+            }
+            return;
+        }
+        putEntry(zos, entryName, data);
     }
 
     /**
@@ -227,11 +295,19 @@ public final class AutoBedrockPackBuilder {
         root.put("texture_name", "atlas.items");
 
         Map<String, Map<String, String>> textureData = new LinkedHashMap<>();
+        Set<String> seenIconKeys = new HashSet<>();
         for (CustomItemMapping mapping : mappings) {
-            // The mapping name is what CustomItemsHandler sends to Geyser as `name`.
-            // Geyser uses that name as the icon key when no explicit icon is set,
-            // so this entry must match it exactly.
-            String iconKey = mapping.name();
+            // Sanitize to the same form Extension's CustomItemsHandler uses when
+            // registering the icon key. Without this transform, mapping names
+            // containing characters Extension rewrites (notably ':') would
+            // produce a key here that does not match the registered icon, and
+            // Bedrock would silently fail to find the texture.
+            String iconKey = toBedrockIconKey(mapping.name());
+            // Dedup: if multiple registry entries collapse to the same sanitized
+            // key, only the first wins (matches the texture-copy de-dup loop).
+            if (!seenIconKeys.add(iconKey)) {
+                continue;
+            }
             String texturePath = customIconToTexturePath.getOrDefault(
                 iconKey,
                 vanillaTexturePathFor(mapping.baseItem())

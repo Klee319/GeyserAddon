@@ -253,12 +253,11 @@ public final class JavaPackReader {
                 continue;
             }
             Object innerModelObj = entry.get("model");
-            String modelRef = extractModelRef(innerModelObj);
+            int cmd = thresholdNumber.intValue();
+            String modelRef = extractModelRef(innerModelObj, baseItem + "#" + cmd);
             if (modelRef == null || modelRef.isBlank()) {
                 continue;
             }
-
-            int cmd = thresholdNumber.intValue();
             String textureRef = resolveTextureRefFromModel(modelRef);
             if (textureRef == null) {
                 if (debug) {
@@ -281,8 +280,17 @@ public final class JavaPackReader {
         }
     }
 
-    /** Extracts a model reference from the modern {@code entry.model} object. */
-    private String extractModelRef(Object obj) {
+    /**
+     * Extracts a model reference from the modern {@code entry.model} object.
+     *
+     * <p>Supports the common {@code {type: "model", model: "<ref>"}} shape and
+     * the bare string form. Other model types such as {@code "select"},
+     * {@code "composite"}, {@code "condition"} carry their model references in
+     * nested arrays/maps that this reader does not unpack — they are logged
+     * as unsupported so operators understand why those items receive no
+     * custom texture.</p>
+     */
+    private String extractModelRef(Object obj, String contextLabel) {
         if (obj instanceof String s) {
             return s;
         }
@@ -290,6 +298,12 @@ public final class JavaPackReader {
             Object inner = map.get("model");
             if (inner instanceof String s) {
                 return s;
+            }
+            Object type = map.get("type");
+            if (type instanceof String typeStr) {
+                logger.warning("[JavaPack] unsupported model type '" + typeStr
+                    + "' for " + contextLabel + " — texture extraction skipped."
+                    + " (Supported: \"model\", or bare string reference.)");
             }
         }
         return null;
@@ -301,11 +315,19 @@ public final class JavaPackReader {
 
     /**
      * Reads the referenced model JSON, walks the {@code parent} chain to find
-     * a {@code textures.layer0} or generic fallback texture key, and returns
-     * the raw texture reference (e.g. {@code "mymod:items/fire_sword"}).
+     * a {@code textures.layer0} (or {@code layerN}) entry, and returns the raw
+     * texture reference (e.g. {@code "mymod:items/fire_sword"}).
      *
-     * <p>Returns {@code null} when no usable texture key is present anywhere
+     * <p>Returns {@code null} when no layered texture key is present anywhere
      * in the chain.</p>
+     *
+     * <p>Why only {@code layerN}: Java item model JSONs reserve {@code layer0}
+     * (and optionally {@code layer1..layer9}) for the rendered icon texture.
+     * Other keys ({@code particle}, custom {@code #var} placeholders) are
+     * never the icon, and falling back to "any non-{@code #} string" — which
+     * earlier revisions did — caused the reader to mis-pick a particle
+     * texture for items whose model JSON happened to list one before any
+     * layer slot.</p>
      */
     private String resolveTextureRefFromModel(String modelRef) {
         String current = modelRef;
@@ -313,6 +335,11 @@ public final class JavaPackReader {
         while (current != null && hops < 8) {
             Path modelFile = resolveModelFile(current);
             if (modelFile == null) {
+                if (debug) {
+                    logger.fine("[JavaPack] parent model unresolved (vanilla file"
+                        + " or missing dependency): " + current
+                        + " at hop " + hops + " from " + modelRef);
+                }
                 return null;
             }
             Map<String, Object> modelJson;
@@ -323,16 +350,9 @@ public final class JavaPackReader {
             }
             Object texturesObj = modelJson.get("textures");
             if (texturesObj instanceof Map<?, ?> textures) {
-                Object layer0 = textures.get("layer0");
-                if (layer0 instanceof String s && !s.isBlank()) {
-                    return s;
-                }
-                // Some models use other keys; pick any non-blank string value
-                // as a last resort (avoiding internal "#var" references).
-                for (Map.Entry<?, ?> e : textures.entrySet()) {
-                    if (e.getValue() instanceof String v && !v.isBlank() && !v.startsWith("#")) {
-                        return v;
-                    }
+                String layered = pickLayeredTexture(textures);
+                if (layered != null) {
+                    return layered;
                 }
             }
             Object parent = modelJson.get("parent");
@@ -341,6 +361,26 @@ public final class JavaPackReader {
             }
             current = parentRef;
             hops++;
+        }
+        if (debug) {
+            logger.fine("[JavaPack] parent chain depth exceeded for " + modelRef);
+        }
+        return null;
+    }
+
+    /**
+     * Returns the first {@code layerN} (N from 0 to 9) string value in the
+     * textures map, or {@code null}. Internal {@code #var} placeholders are
+     * skipped because they reference template variables, not real texture
+     * files. Non-{@code layerN} keys (e.g. {@code particle}) are intentionally
+     * ignored — they are not the item's icon.
+     */
+    private String pickLayeredTexture(Map<?, ?> textures) {
+        for (int n = 0; n < 10; n++) {
+            Object val = textures.get("layer" + n);
+            if (val instanceof String s && !s.isBlank() && !s.startsWith("#")) {
+                return s;
+            }
         }
         return null;
     }
