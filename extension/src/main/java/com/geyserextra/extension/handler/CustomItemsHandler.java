@@ -4,8 +4,6 @@
  */
 package com.geyserextra.extension.handler;
 
-import com.google.gson.Gson;
-import com.google.gson.GsonBuilder;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
@@ -69,7 +67,6 @@ import java.util.concurrent.atomic.AtomicReference;
 public class CustomItemsHandler {
 
     private static final String ITEMS_FILE_NAME = "custom_items.json";
-    private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
 
     /** Bedrock-side namespace for items registered by this extension. */
     private static final String BEDROCK_NAMESPACE = "geyserextra";
@@ -92,23 +89,31 @@ public class CustomItemsHandler {
     }
 
     /**
-     * Loads item mappings from the custom_items.json file.
-     * Creates the data folder if it does not exist.
+     * Loads item mappings from the custom_items.json file. Always clears
+     * {@link #itemMappings} first so the method is safe to invoke multiple
+     * times (re-read paths, future hot-reload) without producing duplicate
+     * entries — the caller no longer has to remember to clear the list.
+     *
+     * <p>Logs are kept minimal: only a single one-line summary on success
+     * and warning / error lines on failure. The previous "every-step INFO"
+     * trace was useful during initial debugging but added 5-10 boot lines
+     * per server start with no diagnostic value once the load path was
+     * known to work.</p>
      */
     private void loadItemMappings() {
-        extension.logger().info("=== Loading Custom Items ===");
-        extension.logger().info("Data folder: " + sharedFolder.toAbsolutePath());
-        extension.logger().info("Data folder exists: " + Files.exists(sharedFolder));
+        // Idempotency: re-load always starts from a clean slate so callers
+        // can invoke loadItemMappings() multiple times without worrying
+        // about stacking duplicates from parseItemMappings's add() calls.
+        itemMappings.clear();
+
         Path itemsFile = sharedFolder.resolve(ITEMS_FILE_NAME);
-        extension.logger().info("Items file path: " + itemsFile.toAbsolutePath());
-        extension.logger().info("Items file exists: " + Files.exists(itemsFile));
 
         if (!Files.exists(sharedFolder)) {
             try {
                 Files.createDirectories(sharedFolder);
-                extension.logger().info("Created shared folder: " + sharedFolder);
             } catch (IOException e) {
-                extension.logger().error("Failed to create shared folder: " + e.getMessage());
+                extension.logger().error("Failed to create shared folder "
+                    + sharedFolder + ": " + e.getMessage());
                 return;
             }
         }
@@ -129,20 +134,18 @@ public class CustomItemsHandler {
             return;
         }
 
-        try (Reader reader = Files.newBufferedReader(itemsFile, StandardCharsets.UTF_8)) {
+        try {
             String content = Files.readString(itemsFile, StandardCharsets.UTF_8);
-            extension.logger().info("File content length: " + content.length() + " bytes");
-            extension.logger().info("File content preview: " + content.substring(0, Math.min(200, content.length())) + "...");
-
             JsonObject root = JsonParser.parseString(content).getAsJsonObject();
             parseItemMappings(root);
-            extension.logger().info("Loaded " + itemMappings.size() + " custom item mappings.");
+            extension.logger().info("Loaded " + itemMappings.size()
+                + " custom item mapping(s) from " + itemsFile.getFileName());
         } catch (IOException e) {
-            extension.logger().error("Failed to read custom_items.json: " + e.getMessage());
-            e.printStackTrace();
+            extension.logger().error("Failed to read custom_items.json ("
+                + e.getClass().getSimpleName() + "): " + e.getMessage());
         } catch (Exception e) {
-            extension.logger().error("Failed to parse custom_items.json: " + e.getMessage());
-            e.printStackTrace();
+            extension.logger().error("Failed to parse custom_items.json ("
+                + e.getClass().getSimpleName() + "): " + e.getMessage());
         }
     }
 
@@ -306,9 +309,6 @@ public class CustomItemsHandler {
                 + " (likely cause: Paper plugin completed its initial scan "
                 + "after this extension was constructed)");
         }
-        extension.logger().info("Loaded item mappings: " + itemMappings.size());
-        extension.logger().info("Shared folder path: " + sharedFolder.toAbsolutePath());
-
         Map<Identifier, Collection<CustomItemDefinition>> existing = snapshotExistingDefinitions(event);
 
         int registered = 0;
@@ -427,11 +427,13 @@ public class CustomItemsHandler {
             builder.predicate(ItemRangeDispatchPredicate.legacyCustomModelData(mapping.customModelData));
         }
 
-        extension.logger().info("Registering: " + mapping.name()
-            + " (base: " + mapping.baseItem
-            + ", CMD: " + mapping.customModelData + ")");
+        // Per-item registration log lines were intentionally removed: each
+        // line was ~80 bytes and a server with 1000+ custom items emitted
+        // ~2000 lines on every boot, drowning out the diagnostic value of
+        // the final "Registration Complete" summary. The caller logs an
+        // aggregate count; per-item visibility is now only via the WARN
+        // / ERROR paths for genuine failures.
         event.register(baseId, builder.build());
-        extension.logger().info("Successfully registered: " + mapping.name());
         return true;
     }
 
@@ -459,11 +461,8 @@ public class CustomItemsHandler {
                     ? mapping.creativeGroup : null)
             .build();
 
-        extension.logger().info("Registering NonVanilla: " + mapping.name()
-            + " (identifier=" + mapping.identifier
-            + ", javaId=" + mapping.javaId + ")");
+        // Per-item logging removed for the same reasons as registerVanillaItem.
         event.register(data);
-        extension.logger().info("Successfully registered: " + mapping.name());
         return true;
     }
 
@@ -594,12 +593,17 @@ public class CustomItemsHandler {
     }
 
     /**
-     * Looks for a zero-arg public accessor on {@code clazz} that returns the
-     * wrapped CMD integer. Tries the names most likely to be in use across
-     * Geyser versions ({@code value}, {@code customModelData},
+     * Looks for a zero-arg public <b>instance</b> accessor on {@code clazz}
+     * that returns the wrapped CMD integer. Tries the names most likely to
+     * be in use across Geyser versions ({@code value}, {@code customModelData},
      * {@code legacyCustomModelData}), preferring primitive {@code int}
      * returns. Returns {@link #NO_ACCESSOR_FOUND} when none match so the
      * caller can short-circuit subsequent lookups.
+     *
+     * <p>Static methods with the same name (e.g. a hypothetical
+     * {@code static int defaultValue()}) are explicitly excluded — invoking
+     * one against the predicate instance would return a value unrelated to
+     * the wrapped CMD and silently produce false duplicate-hit decisions.</p>
      */
     private static Method resolveValueAccessor(Class<?> clazz) {
         String[] candidateNames = {
@@ -609,6 +613,7 @@ public class CustomItemsHandler {
             for (Method m : clazz.getMethods()) {
                 if (m.getParameterCount() != 0) continue;
                 if (!name.equals(m.getName())) continue;
+                if (java.lang.reflect.Modifier.isStatic(m.getModifiers())) continue;
                 Class<?> ret = m.getReturnType();
                 if (ret == int.class || ret == Integer.class
                     || Number.class.isAssignableFrom(ret)) {
@@ -636,42 +641,6 @@ public class CustomItemsHandler {
             idx = after;
         }
         return false;
-    }
-
-    /**
-     * Creates a sample custom_items.json file for reference.
-     */
-    private void createSampleItemsFile(Path itemsFile) {
-        JsonObject sample = new JsonObject();
-
-        JsonObject items = new JsonObject();
-        JsonArray ironSwordItems = new JsonArray();
-        JsonObject sampleItem = new JsonObject();
-        sampleItem.addProperty("name", "custom_sword");
-        sampleItem.addProperty("custom_model_data", 1);
-        sampleItem.addProperty("display_name", "Custom Sword");
-        sampleItem.addProperty("icon", "custom_sword");
-        sampleItem.addProperty("allow_offhand", false);
-        ironSwordItems.add(sampleItem);
-        items.add("minecraft:iron_sword", ironSwordItems);
-        sample.add("items", items);
-
-        JsonArray nonVanillaItems = new JsonArray();
-        JsonObject nonVanillaSample = new JsonObject();
-        nonVanillaSample.addProperty("name", "modded_item");
-        nonVanillaSample.addProperty("identifier", "mymod:modded_item");
-        nonVanillaSample.addProperty("java_id", 10000);
-        nonVanillaSample.addProperty("display_name", "Modded Item");
-        nonVanillaSample.addProperty("icon", "modded_item");
-        nonVanillaItems.add(nonVanillaSample);
-        sample.add("non_vanilla_items", nonVanillaItems);
-
-        try {
-            Files.writeString(itemsFile, GSON.toJson(sample), StandardCharsets.UTF_8);
-            extension.logger().info("Created sample custom_items.json at " + itemsFile);
-        } catch (IOException e) {
-            extension.logger().warning("Failed to create sample custom_items.json: " + e.getMessage());
-        }
     }
 
     /**
