@@ -232,7 +232,7 @@ public final class AutoBedrockPackBuilder {
         // Bedrock clients "this is a new pack, drop your cached copy". Without
         // this the manifest UUID + version pair stays constant across pack
         // regenerations and the client silently keeps using stale textures.
-        String itemTextureJson = buildItemTextureJson(mappings, customIconToTexturePath, logger);
+        String itemTextureJson = buildItemTextureJson(mappings, customIconToTexturePath, logger, debug);
         int patchVersion = patchVersionFromContent(itemTextureJson);
         String manifestJson = buildManifestJson(patchVersion);
 
@@ -430,7 +430,7 @@ public final class AutoBedrockPackBuilder {
     }
 
     private static String buildItemTextureJson(Collection<CustomItemMapping> mappings) {
-        return buildItemTextureJson(mappings, Collections.emptyMap(), null);
+        return buildItemTextureJson(mappings, Collections.emptyMap(), null, false);
     }
 
     /**
@@ -458,7 +458,8 @@ public final class AutoBedrockPackBuilder {
     private static String buildItemTextureJson(
         Collection<CustomItemMapping> mappings,
         Map<String, String> customIconToTexturePath,
-        Logger logger
+        Logger logger,
+        boolean debug
     ) {
         Map<String, Object> root = new LinkedHashMap<>();
         root.put("resource_pack_name", "geyserextra_auto");
@@ -517,6 +518,16 @@ public final class AutoBedrockPackBuilder {
                     continue;
                 }
                 vanillaFallbackCount++;
+                // Per-entry log at debug=true so an operator who reports
+                // "this Bedrock item shows a missing/wrong texture" can
+                // cross-reference the iconKey to find which base material
+                // path was assumed and verify the BE vanilla texture
+                // actually exists under that path on Bedrock 1.21+.
+                if (logger != null && debug) {
+                    logger.info("[AutoPack] vanilla-fallback: " + mapping.baseItem()
+                        + "#" + mapping.customModelData()
+                        + " (iconKey=" + iconKey + ") -> " + texturePath);
+                }
             }
             Map<String, String> entry = new LinkedHashMap<>();
             entry.put("textures", texturePath);
