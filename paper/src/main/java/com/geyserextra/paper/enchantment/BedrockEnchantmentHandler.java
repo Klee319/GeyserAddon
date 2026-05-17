@@ -11,6 +11,7 @@ import com.comphenix.protocol.events.PacketListener;
 import com.geyserextra.core.api.CustomItemMapping;
 import com.geyserextra.core.config.GeyserExtraConfig.EnchantmentConfig;
 import com.geyserextra.paper.GeyserExtraPaper;
+import com.geyserextra.paper.pack.JavaPackLangReader;
 
 import io.papermc.paper.datacomponent.DataComponentTypes;
 import io.papermc.paper.datacomponent.item.CustomModelData;
@@ -148,9 +149,17 @@ public final class BedrockEnchantmentHandler implements Listener {
     private void registerPacketListeners() {
         ProtocolManager protocolManager = ProtocolLibrary.getProtocolManager();
 
+        // Priority HIGHEST: we want the final word on item appearance for Bedrock
+        // players. Any other plugin that mutates SET_SLOT / WINDOW_ITEMS (item
+        // model framework plugins, NBT injectors) typically runs at NORMAL/HIGH;
+        // we run last so the displayName fallback and CMD strip see the most
+        // up-to-date payload and are not silently overwritten by a later
+        // listener. The packet is only mutated when isBedrockPlayer(player) is
+        // true, so Java clients are unaffected and there is no contention with
+        // other plugins' Java-side modifications.
         PacketListener listener = new PacketAdapter(
             plugin,
-            ListenerPriority.NORMAL,
+            ListenerPriority.HIGHEST,
             PacketType.Play.Server.SET_SLOT,
             PacketType.Play.Server.WINDOW_ITEMS
         ) {
@@ -219,12 +228,14 @@ public final class BedrockEnchantmentHandler implements Listener {
             }
         }
 
-        // Per-player opt-out for the durability / over-enchant lore lines.
-        // Toggled via /ga menu, stored on PlayerSettings.
-        if (!isLoreTooltipEnabledFor(playerId)) {
-            return;
-        }
-        ItemStack modified = injectEnchantmentLore(item);
+        // Per-player opt-out for the durability / over-enchant lore lines
+        // (toggled via /ga menu, stored on PlayerSettings). The opt-out is
+        // intentionally scoped to *lore* only — the displayName fallback that
+        // hides raw Geyser identifiers ("gmdl_xxx") still runs regardless,
+        // because exposing those identifiers is never the user's intent and
+        // toggling lore off must not bring them back.
+        boolean loreEnabled = isLoreTooltipEnabledFor(playerId);
+        ItemStack modified = injectEnchantmentLore(item, loreEnabled);
         if (modified != null) {
             packet.getItemModifier().write(0, modified);
         }
@@ -257,7 +268,11 @@ public final class BedrockEnchantmentHandler implements Listener {
 
         boolean isEnchantingTableWindow = playerId != null
             && stripper.isEnchantmentTableWindow(playerId, packet);
-        boolean loreInjectionAllowed = isLoreTooltipEnabledFor(playerId);
+        // Lore lines are user-toggleable; displayName fallback is not (raw
+        // gmdl_* identifiers must never reach a Bedrock player). The flag is
+        // passed *into* injectEnchantmentLore which decides per-item whether
+        // to emit lore lines, while the displayName branch always runs.
+        boolean loreEnabled = isLoreTooltipEnabledFor(playerId);
 
         // Lazy allocation: only create modifiedList when first modification is found
         List<ItemStack> modifiedList = null;
@@ -269,8 +284,8 @@ public final class BedrockEnchantmentHandler implements Listener {
             if (i == 0 && isEnchantingTableWindow) {
                 output = stripper.stripCustomModelData(item);
             }
-            if (output == null && loreInjectionAllowed) {
-                output = injectEnchantmentLore(item);
+            if (output == null) {
+                output = injectEnchantmentLore(item, loreEnabled);
             }
 
             if (output != null) {
@@ -317,72 +332,86 @@ public final class BedrockEnchantmentHandler implements Listener {
     // ========================================================================
 
     /**
-     * Injects enchantment information as lore into the item for Bedrock display.
+     * Injects Bedrock-specific tooltip information into the item.
      *
-     * <p>Clones the item before modification to avoid mutating the original.
-     * Only adds lore lines for enchantments that match the configured criteria:
-     * custom enchantments (non-minecraft namespace) and/or over-enchantments
-     * (level exceeding vanilla max).</p>
+     * <p>Two independent responsibilities collapsed into one slow path:
+     * <ol>
+     *   <li><b>Lore lines</b> (durability, over-enchant) — added only when
+     *       {@code loreEnabled} is {@code true}. The user can toggle these off
+     *       via {@code /ga} to reduce visual noise.</li>
+     *   <li><b>Display-name fallback</b> — always evaluated for CMD-bearing
+     *       items, regardless of {@code loreEnabled}. A custom item without a
+     *       Bedrock-resolvable name would otherwise surface as the raw Geyser
+     *       identifier ({@code gmdl_xxx}); never showing that to the player is
+     *       a non-negotiable invariant, so this branch is not toggleable.</li>
+     * </ol>
+     * </p>
      *
-     * @param item the original item
-     * @return a cloned item with lore injected, or null if no lore was added
+     * <p>Clones the item before modification to avoid mutating the original.</p>
+     *
+     * @param item         the original item
+     * @param loreEnabled  whether the per-player lore opt-in is on
+     * @return a cloned item with tooltip injected, or null if no change was
+     *         applied (caller passes the original packet through untouched)
      */
-    private ItemStack injectEnchantmentLore(ItemStack item) {
+    private ItemStack injectEnchantmentLore(ItemStack item, boolean loreEnabled) {
         if (item == null || item.getType() == Material.AIR) {
             return null;
         }
 
-        // Fast pre-filter: any of (durability, enchantments, custom-model-data)
-        // is a reason to enter the slow path. Items with none of the three are
-        // returned untouched without paying for a getItemMeta() snapshot. Most
-        // inventory items (food, materials, blocks) hit this fast path. The
-        // CUSTOM_MODEL_DATA check is the new one: it gates the display-name
-        // fallback that works around Geyser's startup-only registration window
-        // (a custom item discovered at runtime, or registered by a sibling
-        // plugin without setting displayName, would otherwise surface to the
-        // Bedrock client as a raw {@code gmdl_<hash>}-style identifier).
+        // Fast pre-filter: an item is a candidate for the slow path only if at
+        // least one of the two responsibilities has a reason to fire.
+        //   - Lore branch needs lore enabled AND a damageable / enchanted item
+        //   - displayName branch needs a CMD component (its identity check is
+        //     deferred to hasResolvedServerSideDisplayName)
+        // Items that fail both predicates are returned untouched without paying
+        // for a getItemMeta() snapshot. Most inventory items (food, materials,
+        // blocks) hit this short-circuit.
         boolean potentiallyDamageable = item.getType().getMaxDurability() > 0;
         boolean possiblyEnchanted = !item.getEnchantments().isEmpty()
             || item.getType() == Material.ENCHANTED_BOOK;
         boolean possiblyCmd = hasCustomModelData(item);
-        if (!potentiallyDamageable && !possiblyEnchanted && !possiblyCmd) {
+        boolean loreCandidate = loreEnabled && (potentiallyDamageable || possiblyEnchanted);
+        if (!loreCandidate && !possiblyCmd) {
             return null;
         }
 
         List<Component> tooltipLines = new ArrayList<>();
 
-        // Enchantment lore (existing feature)
-        Map<Enchantment, Integer> enchantments = getEnchantments(item);
-        if (!enchantments.isEmpty()) {
-            EnchantmentConfig config = plugin.getGeyserExtraConfig().enchantment();
-            tooltipLines.addAll(buildEnchantmentLoreLines(enchantments, config));
-        }
+        if (loreEnabled) {
+            // Enchantment lore (existing feature)
+            Map<Enchantment, Integer> enchantments = getEnchantments(item);
+            if (!enchantments.isEmpty()) {
+                EnchantmentConfig config = plugin.getGeyserExtraConfig().enchantment();
+                tooltipLines.addAll(buildEnchantmentLoreLines(enchantments, config));
+            }
 
-        // Bedrock tooltip: durability display
-        // Why: Bedrock Edition doesn't show numeric durability values natively.
-        // Displaying remaining/max durability helps Bedrock players manage their tools.
-        ItemMeta meta = item.getItemMeta();
-        if (meta instanceof org.bukkit.inventory.meta.Damageable damageable) {
-            // Why: Use Damageable.getMaxDamage() first (respects custom max_damage component),
-            // then fall back to Material.getMaxDurability() for vanilla items.
-            // Custom items (plugins, data packs) can set max_damage higher than vanilla.
-            int maxDurability = damageable.hasMaxDamage()
-                ? damageable.getMaxDamage()
-                : item.getType().getMaxDurability();
-            if (maxDurability > 0) {
-                int remaining = maxDurability - damageable.getDamage();
-                // Color based on remaining percentage
-                float ratio = (float) remaining / maxDurability;
-                net.kyori.adventure.text.format.TextColor durColor;
-                if (ratio > 0.5f) {
-                    durColor = net.kyori.adventure.text.format.NamedTextColor.GREEN;
-                } else if (ratio > 0.2f) {
-                    durColor = net.kyori.adventure.text.format.NamedTextColor.YELLOW;
-                } else {
-                    durColor = net.kyori.adventure.text.format.NamedTextColor.RED;
+            // Bedrock tooltip: durability display
+            // Why: Bedrock Edition doesn't show numeric durability values natively.
+            // Displaying remaining/max durability helps Bedrock players manage their tools.
+            ItemMeta meta = item.getItemMeta();
+            if (meta instanceof org.bukkit.inventory.meta.Damageable damageable) {
+                // Why: Use Damageable.getMaxDamage() first (respects custom max_damage component),
+                // then fall back to Material.getMaxDurability() for vanilla items.
+                // Custom items (plugins, data packs) can set max_damage higher than vanilla.
+                int maxDurability = damageable.hasMaxDamage()
+                    ? damageable.getMaxDamage()
+                    : item.getType().getMaxDurability();
+                if (maxDurability > 0) {
+                    int remaining = maxDurability - damageable.getDamage();
+                    // Color based on remaining percentage
+                    float ratio = (float) remaining / maxDurability;
+                    net.kyori.adventure.text.format.TextColor durColor;
+                    if (ratio > 0.5f) {
+                        durColor = net.kyori.adventure.text.format.NamedTextColor.GREEN;
+                    } else if (ratio > 0.2f) {
+                        durColor = net.kyori.adventure.text.format.NamedTextColor.YELLOW;
+                    } else {
+                        durColor = net.kyori.adventure.text.format.NamedTextColor.RED;
+                    }
+                    tooltipLines.add(Component.text("耐久値: " + remaining + "/" + maxDurability)
+                        .color(durColor));
                 }
-                tooltipLines.add(Component.text("耐久値: " + remaining + "/" + maxDurability)
-                    .color(durColor));
             }
         }
 
@@ -476,27 +505,24 @@ public final class BedrockEnchantmentHandler implements Listener {
 
     /**
      * Whether the item carries a server-side display name that Bedrock can
-     * render correctly without further help. Returns {@code false} for
-     * TranslatableComponent display names so the packet-side injection can
-     * resolve them via the Java pack lang reader — Bedrock can't look up
-     * Java translation keys client-side, so a {@code Component.translatable}
-     * name would otherwise surface as the raw key.
+     * render correctly without further help. Returns {@code false} whenever
+     * <em>any</em> node in the Adventure Component tree is a
+     * {@link net.kyori.adventure.text.TranslatableComponent}, so the
+     * packet-side injection has a chance to resolve it through the Java pack
+     * lang reader.
      *
-     * <p>Returns {@code true} only when the display name is plain literal
-     * text. Plugins that have deliberately chosen a literal label keep it.</p>
+     * <p>Why walk the tree: a name like
+     * {@code Component.text("Sacred ").append(Component.translatable("item.mymod.sword"))}
+     * has a {@link net.kyori.adventure.text.TextComponent} at the root and a
+     * translation key buried in a child. The previous instanceof-only check
+     * passed it through unchanged, leaking the raw key
+     * ({@code item.mymod.sword}) onto the Bedrock client.</p>
      */
     private static boolean hasResolvedServerSideDisplayName(ItemStack item) {
         ItemMeta meta = item.getItemMeta();
         if (meta != null && meta.hasDisplayName()) {
             net.kyori.adventure.text.Component name = meta.displayName();
-            // TranslatableComponent → Bedrock cannot resolve; injection wins.
-            if (name instanceof net.kyori.adventure.text.TranslatableComponent) {
-                return false;
-            }
-            // Any other Component shape (TextComponent, decorated, etc.) is
-            // assumed to be safely serializable to plain text that Bedrock
-            // displays correctly via the NBT custom_name path.
-            return true;
+            return name != null && !containsTranslatableComponent(name);
         }
         try {
             return item.hasData(DataComponentTypes.CUSTOM_NAME)
@@ -507,12 +533,49 @@ public final class BedrockEnchantmentHandler implements Listener {
     }
 
     /**
-     * Resolves the item's {@link net.kyori.adventure.text.TranslatableComponent}
-     * display name against the operator-supplied Java pack lang files.
+     * Returns {@code true} when {@code node} or any of its descendants is a
+     * {@link net.kyori.adventure.text.TranslatableComponent}.
      *
-     * <p>Returns {@code null} when the ItemMeta name is absent, is not a
-     * translation key, or is a key the lang reader cannot resolve. Callers
-     * use the upstream fallback chain in those cases.</p>
+     * <p>The walk is intentionally exhaustive — Bedrock can't resolve a
+     * translation key in any position, so even a deeply-nested one means the
+     * server-side serialization is not safe to forward verbatim.</p>
+     */
+    private static boolean containsTranslatableComponent(net.kyori.adventure.text.Component node) {
+        if (node == null) {
+            return false;
+        }
+        if (node instanceof net.kyori.adventure.text.TranslatableComponent) {
+            return true;
+        }
+        for (net.kyori.adventure.text.Component child : node.children()) {
+            if (containsTranslatableComponent(child)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Resolves any {@link net.kyori.adventure.text.TranslatableComponent}
+     * nodes inside the item's display name against the operator-supplied Java
+     * pack lang files and returns the serialized plain-text form.
+     *
+     * <p>Handles three Component shapes:
+     * <ol>
+     *   <li>Pure TranslatableComponent root — resolves directly.</li>
+     *   <li>Wrapper TranslatableComponent + literal children (or vice versa,
+     *       i.e. a TextComponent with a TranslatableComponent child) —
+     *       resolves each TranslatableComponent in the tree and serializes the
+     *       whole as plain text. Without this branch, a mixed component would
+     *       fall through to {@code lookupRegistryDisplayName} and lose the
+     *       literal portions (or, before the fix, leak the raw key).</li>
+     *   <li>Anything without a TranslatableComponent — returns null so the
+     *       caller falls through to {@code lookupRegistryDisplayName}.</li>
+     * </ol>
+     * </p>
+     *
+     * <p>Returns {@code null} when the ItemMeta name is absent or no
+     * resolution could be performed.</p>
      */
     private String resolveTranslatableDisplayName(ItemStack item) {
         ItemMeta meta = item.getItemMeta();
@@ -520,15 +583,67 @@ public final class BedrockEnchantmentHandler implements Listener {
             return null;
         }
         net.kyori.adventure.text.Component name = meta.displayName();
-        if (!(name instanceof net.kyori.adventure.text.TranslatableComponent translatable)) {
+        if (name == null || !containsTranslatableComponent(name)) {
             return null;
         }
+        JavaPackLangReader langReader;
         try {
-            String resolved = plugin.getJavaPackLangReader().resolve(translatable.key());
-            return resolved != null && !resolved.isBlank() ? resolved : null;
+            langReader = plugin.getJavaPackLangReader();
         } catch (Throwable t) {
             return null;
         }
+        net.kyori.adventure.text.Component resolved = resolveTranslatablesInTree(name, langReader);
+        try {
+            String text = net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer
+                .plainText().serialize(resolved);
+            return text != null && !text.isBlank() ? text : null;
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /**
+     * Returns a deep copy of {@code node} in which every
+     * {@link net.kyori.adventure.text.TranslatableComponent} whose key is
+     * known to {@code langReader} has been replaced with a literal
+     * {@link net.kyori.adventure.text.TextComponent} carrying the resolved
+     * text. Unresolvable keys fall back to the translation key itself — that
+     * preserves enough information for the caller to notice resolution failed
+     * without erasing the literal portions that surround it.
+     */
+    private static net.kyori.adventure.text.Component resolveTranslatablesInTree(
+        net.kyori.adventure.text.Component node,
+        JavaPackLangReader langReader
+    ) {
+        if (node == null) {
+            return net.kyori.adventure.text.Component.empty();
+        }
+        net.kyori.adventure.text.Component current = node;
+        if (node instanceof net.kyori.adventure.text.TranslatableComponent translatable) {
+            String resolved = null;
+            if (langReader != null) {
+                try {
+                    resolved = langReader.resolve(translatable.key());
+                } catch (Throwable ignored) {
+                    // resolver failures degrade to the key fallback below
+                }
+            }
+            if (resolved == null || resolved.isBlank()) {
+                resolved = translatable.fallback() != null
+                    ? translatable.fallback()
+                    : translatable.key();
+            }
+            current = net.kyori.adventure.text.Component.text(resolved).style(translatable.style());
+        }
+        List<net.kyori.adventure.text.Component> originalChildren = node.children();
+        if (originalChildren.isEmpty()) {
+            return current;
+        }
+        List<net.kyori.adventure.text.Component> newChildren = new ArrayList<>(originalChildren.size());
+        for (net.kyori.adventure.text.Component child : originalChildren) {
+            newChildren.add(resolveTranslatablesInTree(child, langReader));
+        }
+        return current.children(newChildren);
     }
 
     /**
