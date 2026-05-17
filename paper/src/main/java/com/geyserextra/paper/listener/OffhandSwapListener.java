@@ -235,8 +235,25 @@ public final class OffhandSwapListener implements Listener {
                     inv.setItemInOffHand(null);
                     Map<Integer, ItemStack> overflow = inv.addItem(snapshot);
                     if (!overflow.isEmpty()) {
-                        // Couldn't place; restore so the player doesn't lose it.
-                        inv.setItemInOffHand(snapshot);
+                        // addItem partially succeeded — sum the overflow
+                        // ItemStacks and restore only that amount to the
+                        // off-hand. Returning the full snapshot here would
+                        // duplicate the portion addItem already deposited
+                        // into the main inventory (exploitable: a 64-stack
+                        // shift-click into a near-full inventory would leave
+                        // the deposited 32 in storage AND 64 back in the
+                        // off-hand, yielding a 32-item duplication).
+                        int overflowAmount = 0;
+                        for (ItemStack leftover : overflow.values()) {
+                            if (leftover != null) {
+                                overflowAmount += leftover.getAmount();
+                            }
+                        }
+                        if (overflowAmount > 0) {
+                            ItemStack remaining = snapshot.clone();
+                            remaining.setAmount(overflowAmount);
+                            inv.setItemInOffHand(remaining);
+                        }
                     }
                     player.updateInventory();
                 });
