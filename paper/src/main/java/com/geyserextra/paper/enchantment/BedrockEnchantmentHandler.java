@@ -64,6 +64,15 @@ import java.util.logging.Level;
  */
 public final class BedrockEnchantmentHandler implements Listener {
 
+    /**
+     * Invisible prefix prepended to every lore line we inject. Used to strip
+     * previously-injected lines on the next packet so the tooltip cannot
+     * accumulate when a re-broadcast SET_SLOT carries lore that was the
+     * result of our own prior injection. Zero-width space renders nothing on
+     * either Java or Bedrock clients, so the player never sees it.
+     */
+    private static final String INJECTED_LORE_MARKER = "​";
+
     private final GeyserExtraPaper plugin;
     private final FloodgateApi floodgateApi;
     private final BedrockEnchantmentTablePacketStripper stripper;
@@ -361,19 +370,23 @@ public final class BedrockEnchantmentHandler implements Listener {
         }
 
         // Fast pre-filter: an item is a candidate for the slow path only if at
-        // least one of the two responsibilities has a reason to fire.
+        // least one of the responsibilities has a reason to fire.
         //   - Lore branch needs lore enabled AND a damageable / enchanted item
-        //   - displayName branch needs a CMD component (its identity check is
-        //     deferred to hasResolvedServerSideDisplayName)
-        // Items that fail both predicates are returned untouched without paying
-        // for a getItemMeta() snapshot. Most inventory items (food, materials,
-        // blocks) hit this short-circuit.
+        //   - displayName branch needs either a CMD component OR an item whose
+        //     server-side identity is carried purely through ItemMeta (PDC
+        //     plugins, other plugins' renamed-but-no-CMD items). The identity
+        //     check is deferred to hasResolvedServerSideDisplayName.
+        //   - The hasItemMeta() short-circuit is intentionally cheap: it is a
+        //     boolean field probe in Paper, no allocation, so adding it to the
+        //     hot path is acceptable in exchange for never silently dropping
+        //     a PDC-only or display-named item from the injection pipeline.
         boolean potentiallyDamageable = item.getType().getMaxDurability() > 0;
         boolean possiblyEnchanted = !item.getEnchantments().isEmpty()
             || item.getType() == Material.ENCHANTED_BOOK;
         boolean possiblyCmd = hasCustomModelData(item);
+        boolean hasMeta = item.hasItemMeta();
         boolean loreCandidate = loreEnabled && (potentiallyDamageable || possiblyEnchanted);
-        if (!loreCandidate && !possiblyCmd) {
+        if (!loreCandidate && !possiblyCmd && !hasMeta) {
             return null;
         }
 
@@ -417,20 +430,26 @@ public final class BedrockEnchantmentHandler implements Listener {
         }
 
         // Decide whether the item also needs the fallback display-name fix.
-        // Why: a CMD item without a Bedrock-resolvable display name renders
-        // on Bedrock as the registered Geyser identifier (e.g.
-        // "gmdl_abc1234"). We need to inject a readable name when:
+        // Why: a Geyser-registered custom item without a Bedrock-resolvable
+        // display name renders on Bedrock as the registered Geyser identifier
+        // (e.g. "gmdl_abc1234" or the custom_items.json `name` field). We
+        // need to inject a readable name when:
         //   (a) The item has no ItemMeta display name at all, or
         //   (b) The item's display name is a TranslatableComponent whose key
         //       Bedrock cannot resolve — Java-side lang resolution returns
         //       readable text, but the Bedrock client only knows its own
         //       built-in translation keys, so the key would surface as-is.
-        // Items with a literal Text display name are left alone — their NBT
-        // already carries the right label and Geyser forwards it correctly.
-        boolean wantDisplayNameFallback = possiblyCmd
+        // The condition is broadened from "possiblyCmd only" to "possiblyCmd
+        // OR hasMeta", because other-plugin items that surface in Geyser as
+        // custom items may carry their identity through PDC / a literal
+        // displayName rather than the CUSTOM_MODEL_DATA component. Items
+        // with a literal Text display name still short-circuit safely via
+        // hasResolvedServerSideDisplayName so legitimate names are kept.
+        boolean wantDisplayNameFallback = (possiblyCmd || hasMeta)
             && !hasResolvedServerSideDisplayName(item);
 
-        if (tooltipLines.isEmpty() && !wantDisplayNameFallback) {
+        boolean hasInjectedLeftover = containsInjectedLoreMarker(item);
+        if (tooltipLines.isEmpty() && !wantDisplayNameFallback && !hasInjectedLeftover) {
             return null;
         }
 
@@ -443,13 +462,18 @@ public final class BedrockEnchantmentHandler implements Listener {
 
         boolean changed = false;
 
-        if (!tooltipLines.isEmpty()) {
+        if (!tooltipLines.isEmpty() || hasInjectedLeftover) {
+            // Strip any previously-injected lines first so the tooltip can't
+            // accumulate across re-broadcast SET_SLOT packets. Lines that
+            // start with INJECTED_LORE_MARKER were written by an earlier
+            // pass; everything else is the operator's / plugin's lore and
+            // must survive untouched.
             List<Component> existingLore = clonedMeta.lore();
-            List<Component> newLore = existingLore != null
-                ? new ArrayList<>(existingLore)
-                : new ArrayList<>();
-            newLore.addAll(tooltipLines);
-            clonedMeta.lore(newLore);
+            List<Component> newLore = new ArrayList<>(stripInjectedLore(existingLore));
+            for (Component line : tooltipLines) {
+                newLore.add(prependInjectedMarker(line));
+            }
+            clonedMeta.lore(newLore.isEmpty() ? null : newLore);
             changed = true;
         }
 
@@ -687,6 +711,76 @@ public final class BedrockEnchantmentHandler implements Listener {
             return name != null && !name.isBlank() ? name : null;
         } catch (Throwable t) {
             return null;
+        }
+    }
+
+    /**
+     * Returns {@code true} when any line of the item's lore starts with the
+     * {@link #INJECTED_LORE_MARKER}. Used to decide whether the slow path
+     * has to run purely to strip a stale injection (e.g. the lore-toggle was
+     * just turned off and a previously-injected line should disappear).
+     */
+    private static boolean containsInjectedLoreMarker(ItemStack item) {
+        if (item == null || !item.hasItemMeta()) {
+            return false;
+        }
+        ItemMeta meta = item.getItemMeta();
+        if (meta == null) {
+            return false;
+        }
+        List<Component> lore = meta.lore();
+        if (lore == null || lore.isEmpty()) {
+            return false;
+        }
+        for (Component line : lore) {
+            if (startsWithInjectedMarker(line)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Returns a copy of {@code lore} with every line that begins with
+     * {@link #INJECTED_LORE_MARKER} removed. Returns an empty list when the
+     * input is null. This is what guarantees the tooltip can't accumulate
+     * across re-broadcast packets: every pass starts from the operator's /
+     * plugin's lore alone.
+     */
+    private static List<Component> stripInjectedLore(List<Component> lore) {
+        if (lore == null || lore.isEmpty()) {
+            return new ArrayList<>();
+        }
+        List<Component> filtered = new ArrayList<>(lore.size());
+        for (Component line : lore) {
+            if (!startsWithInjectedMarker(line)) {
+                filtered.add(line);
+            }
+        }
+        return filtered;
+    }
+
+    /** Prepends the invisible marker character to a tooltip line. */
+    private static Component prependInjectedMarker(Component line) {
+        return Component.text(INJECTED_LORE_MARKER).append(line);
+    }
+
+    /**
+     * Tests whether a Component's plain-text serialization begins with the
+     * injected-lore marker. The serializer call is cheap (no allocation
+     * beyond a small StringBuilder) and the marker is a single character,
+     * so the check is constant-time on small components.
+     */
+    private static boolean startsWithInjectedMarker(Component component) {
+        if (component == null) {
+            return false;
+        }
+        try {
+            String plain = net.kyori.adventure.text.serializer.plain
+                .PlainTextComponentSerializer.plainText().serialize(component);
+            return plain != null && plain.startsWith(INJECTED_LORE_MARKER);
+        } catch (Throwable ignored) {
+            return false;
         }
     }
 
