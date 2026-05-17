@@ -86,6 +86,17 @@ public final class CustomItemScanner {
         }
 
         int primaryCmdValue = floats.isEmpty() ? 0 : floats.getFirst().intValue();
+        if (primaryCmdValue <= 0) {
+            // Don't register CMD 0 (or negative) items. Geyser registers a
+            // CustomItemDefinition with no CMD predicate as a wholesale
+            // override of the base vanilla item, which would clobber every
+            // player's view of, say, "minecraft:bucket" with our custom
+            // texture. Plugins occasionally tag items with CMD=0 as a
+            // sentinel without intending vanilla-override semantics; the
+            // scanner has no way to tell the difference, so skipping is
+            // the only safe default.
+            return Optional.empty();
+        }
         String baseItem = buildBaseItemIdentifier(itemStack);
 
         // Check if already registered by CMD

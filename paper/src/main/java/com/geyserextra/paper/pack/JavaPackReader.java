@@ -172,6 +172,20 @@ public final class JavaPackReader {
             }
 
             int cmd = cmdNumber.intValue();
+            if (cmd <= 0) {
+                // Skip CMD <= 0 entries: a Geyser custom-item registered with
+                // predicate-less CMD 0 would override the vanilla base item
+                // itself ("Custom item ... overrides the vanilla item model ...
+                // without additional predicates"), replacing the base material's
+                // texture with our texture for every player. Vanilla packs
+                // occasionally ship a CMD 0 entry as the "fallback model", so
+                // dropping it here is the correct behaviour for our use case.
+                if (debug) {
+                    logger.fine("[JavaPack-legacy] skipped CMD<=0 override on "
+                        + baseItem + " (would clobber the vanilla item itself)");
+                }
+                continue;
+            }
             String textureRef = resolveTextureRefFromModel(modelRef);
             if (textureRef == null) {
                 if (debug) {
@@ -274,6 +288,16 @@ public final class JavaPackReader {
             }
             Object innerModelObj = entry.get("model");
             int cmd = thresholdNumber.intValue();
+            if (cmd <= 0) {
+                // See parseLegacyItemModel for the rationale: CMD 0 entries
+                // would override the base vanilla item itself, breaking
+                // every player's view of the underlying material.
+                if (debug) {
+                    logger.fine("[JavaPack-modern] skipped CMD<=0 entry on "
+                        + baseItem + " (would clobber the vanilla item itself)");
+                }
+                continue;
+            }
             String modelRef = extractModelRef(innerModelObj, baseItem + "#" + cmd);
             if (modelRef == null || modelRef.isBlank()) {
                 continue;

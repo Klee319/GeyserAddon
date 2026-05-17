@@ -326,6 +326,24 @@ public class CustomItemsHandler {
                     continue;
                 }
 
+                if (mapping.customModelData <= 0) {
+                    // Vanilla items with CMD<=0 would be registered with no
+                    // CMD predicate, which Geyser treats as a wholesale
+                    // override of the base vanilla item (it logs:
+                    // "Custom item ... overrides the vanilla item model ...
+                    // without additional predicates" and the base item's
+                    // texture is replaced by ours for every player). Drop
+                    // these defensively even though the Paper-side scanner
+                    // / pack reader already filter them out, in case the
+                    // shared custom_items.json was hand-edited or written
+                    // by an older build.
+                    extension.logger().warning("Skipping " + mapping.name()
+                        + " (base=" + mapping.baseItem + ", CMD=" + mapping.customModelData
+                        + "): would override the vanilla item itself without a predicate");
+                    skippedDuplicate++;
+                    continue;
+                }
+
                 Identifier baseId = Identifier.of(mapping.baseItem);
                 Collection<CustomItemDefinition> existingForBase =
                     existing.getOrDefault(baseId, Collections.emptyList());

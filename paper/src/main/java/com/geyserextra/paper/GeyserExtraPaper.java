@@ -752,6 +752,16 @@ public final class GeyserExtraPaper extends JavaPlugin {
             : packEntries.entrySet()) {
             JavaPackReader.CmdKey key = entry.getKey();
             JavaPackReader.JavaModelDefinition def = entry.getValue();
+            if (key.cmd() <= 0) {
+                // Defence-in-depth: JavaPackReader already drops CMD<=0
+                // entries, but a future reader change could let one slip
+                // through. Registering CMD 0 here would build a Geyser
+                // CustomItemDefinition with no predicate, which Geyser
+                // treats as a wholesale override of the base vanilla item
+                // and clobbers its texture for every player.
+                skipped++;
+                continue;
+            }
             if (itemMappingRegistry.getByCustomModelData(key.baseItem(), key.cmd()).isPresent()) {
                 skipped++;
                 continue;
