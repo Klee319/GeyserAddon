@@ -394,9 +394,21 @@ public final class JavaPackReader {
      * <p>Supported wrappers (Mojang model types, namespaced or bare):
      * <ul>
      *   <li>{@code "model"} — leaf, takes the {@code model} string.</li>
-     *   <li>{@code "condition"} — visits {@code on_false} first (the
-     *       default branch for most boolean conditions) then {@code on_true};
-     *       lets us pick up whichever branch ships the custom texture.</li>
+     *   <li>{@code "condition"} — visits {@code on_false} <b>only</b>.
+     *       The {@code on_true} branch is the transient / in-use state
+     *       (drawing a bow, casting a fishing rod, opening an item)
+     *       and Bedrock has no equivalent of the predicate that drives
+     *       it, so it can only display a single static frame. Walking
+     *       on_true and silently substituting its texture when on_false
+     *       fails to resolve produces visibly wrong results — e.g.
+     *       ValhallaMMO's skill icons (bow#1 = skillicon_archery,
+     *       fishing_rod#1 = skillicon_fishing, anvil#1 = skillicon_smithing,
+     *       enchanted_book#1 = skillicon_enchanting) whose icon PNGs are
+     *       missing from the Java pack would fall through to the
+     *       bow_pulling / fishing_rod_cast frame and look "buggy" on
+     *       Bedrock. Dropping the entry instead lets the Bedrock client
+     *       render the base material's vanilla texture, matching what a
+     *       Java player without the pack would see.</li>
      *   <li>{@code "composite"} — visits every entry of {@code models[]};
      *       composite layers stack textures so any layer can carry the
      *       custom artwork we want.</li>
@@ -454,8 +466,13 @@ public final class JavaPackReader {
 
         switch (typeKey) {
             case "condition" -> {
+                // Only on_false: it's the steady-state branch. on_true is
+                // transient (using item / drawing bow / casting rod) and
+                // Bedrock can't mirror the predicate, so substituting its
+                // texture when on_false fails produces wrong icons (e.g.
+                // bow_pulling frame instead of the missing skillicon_*).
+                // See the javadoc above for the full rationale.
                 collectModelRefs(map.get("on_false"), contextLabel, out, depth + 1);
-                collectModelRefs(map.get("on_true"), contextLabel, out, depth + 1);
             }
             case "composite" -> {
                 Object models = map.get("models");
