@@ -4,6 +4,8 @@ import com.geyserextra.core.api.CustomItemMapping;
 import com.geyserextra.core.registry.ItemMappingRegistry;
 import com.geyserextra.core.util.JsonUtil;
 
+import org.bukkit.Material;
+
 import javax.imageio.ImageIO;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayOutputStream;
@@ -407,18 +409,57 @@ public final class AutoBedrockPackBuilder {
         return JsonUtil.toPrettyJson(root);
     }
 
+    /** Bedrock vanilla texture root for block-base items ({@code stone}, {@code oak_log}, …). */
+    private static final String VANILLA_BLOCK_TEXTURE_BASE = "textures/blocks/";
+
     /**
      * Maps a Java-side base item identifier to the BE vanilla texture path.
      *
-     * Most JE/BE item names align (diamond_sword, copper_sword, arrow, snowball...).
-     * BE clients resolve {@code textures/items/<name>} against the bundled vanilla
-     * resource pack when no override exists in our pack, which is the desired fallback.
+     * <p>Bedrock's vanilla resource pack splits textures by type:
+     * <ul>
+     *   <li>Plain items (sword, paper, arrow, food, …) live under
+     *       {@code textures/items/}.</li>
+     *   <li>Block-as-item textures (stone, oak_log, dirt, …) live under
+     *       {@code textures/blocks/}.</li>
+     * </ul>
+     * Hard-coding {@code textures/items/<name>} unconditionally — the
+     * earlier behaviour — pointed every block-base CMD entry at a path
+     * that doesn't exist in Bedrock vanilla and surfaced as a missing-
+     * texture purple/black checker on the client. We now consult
+     * {@link Material#isBlock()} when the identifier resolves to a known
+     * Material and prefix the correct directory; non-Material identifiers
+     * (modded namespaces) fall back to {@code textures/items/} as
+     * before.</p>
+     *
+     * <p>Most JE/BE item names align (diamond_sword, copper_sword, arrow,
+     * snowball, …). BE clients resolve the result against the bundled
+     * vanilla resource pack when no override exists in our pack, which is
+     * the desired fallback when no Java pack custom texture is supplied.</p>
      */
     private static String vanillaTexturePathFor(String baseItem) {
         String name = baseItem.startsWith(MINECRAFT_NAMESPACE_PREFIX)
             ? baseItem.substring(MINECRAFT_NAMESPACE_PREFIX.length())
             : baseItem;
+        if (isBlockBaseItem(baseItem)) {
+            return VANILLA_BLOCK_TEXTURE_BASE + name;
+        }
         return VANILLA_TEXTURE_BASE + name;
+    }
+
+    /**
+     * Whether the supplied {@code namespace:name} identifier resolves to a
+     * Bukkit {@link Material} that lives in the block category. Wrapped in
+     * a try/catch so a modded namespace ({@code mymod:something}) — which
+     * {@link Material#matchMaterial} cannot resolve — degrades to
+     * {@code false} (item fallback) rather than throwing.
+     */
+    private static boolean isBlockBaseItem(String baseItem) {
+        try {
+            Material material = Material.matchMaterial(baseItem);
+            return material != null && material.isBlock();
+        } catch (Throwable t) {
+            return false;
+        }
     }
 
     /**
