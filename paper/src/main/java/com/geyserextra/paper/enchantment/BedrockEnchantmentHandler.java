@@ -11,6 +11,8 @@ import com.comphenix.protocol.events.PacketListener;
 import com.geyserextra.core.config.GeyserExtraConfig.EnchantmentConfig;
 import com.geyserextra.paper.GeyserExtraPaper;
 
+import io.papermc.paper.datacomponent.DataComponentTypes;
+
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.format.TextDecoration;
@@ -328,19 +330,20 @@ public final class BedrockEnchantmentHandler implements Listener {
             return null;
         }
 
-        // Fast pre-filter: lore is only ever added for over-enchanted items and
-        // damageable items. Most inventory items (food, materials, blocks) are
-        // neither, and we would otherwise pay for a getItemMeta() snapshot +
-        // ArrayList + clone + meta re-serialization per packet per player just
-        // to confirm there is no work. Both checks below are cheap: Material's
-        // max durability is a constant lookup, and ItemStack#getEnchantments
-        // is a thin wrapper. Enchanted books store their enchantments in meta,
-        // so the cheap path can't see them — fall through to the slow path
-        // when the item is an ENCHANTED_BOOK.
+        // Fast pre-filter: any of (durability, enchantments, custom-model-data)
+        // is a reason to enter the slow path. Items with none of the three are
+        // returned untouched without paying for a getItemMeta() snapshot. Most
+        // inventory items (food, materials, blocks) hit this fast path. The
+        // CUSTOM_MODEL_DATA check is the new one: it gates the display-name
+        // fallback that works around Geyser's startup-only registration window
+        // (a custom item discovered at runtime, or registered by a sibling
+        // plugin without setting displayName, would otherwise surface to the
+        // Bedrock client as a raw {@code gmdl_<hash>}-style identifier).
         boolean potentiallyDamageable = item.getType().getMaxDurability() > 0;
         boolean possiblyEnchanted = !item.getEnchantments().isEmpty()
             || item.getType() == Material.ENCHANTED_BOOK;
-        if (!potentiallyDamageable && !possiblyEnchanted) {
+        boolean possiblyCmd = hasCustomModelData(item);
+        if (!potentiallyDamageable && !possiblyEnchanted && !possiblyCmd) {
             return null;
         }
 
@@ -381,7 +384,19 @@ public final class BedrockEnchantmentHandler implements Listener {
             }
         }
 
-        if (tooltipLines.isEmpty()) {
+        // Decide whether the item also needs the fallback display-name fix.
+        // Why: even when there is no lore work, a CMD item lacking an
+        // ItemMeta-set display name renders on Bedrock as the registered
+        // Geyser identifier (e.g. "gmdl_abc1234" or
+        // "geyserextra.custom_diamond_sword_100"). We supply the prettified
+        // base material name as a per-instance custom_name in the packet so
+        // Bedrock sees something readable. Items that already carry a server-
+        // side display name are left alone — the plugin that created them
+        // has chosen a label, and we mustn't override it.
+        boolean wantDisplayNameFallback = possiblyCmd
+            && !hasServerSideDisplayName(item);
+
+        if (tooltipLines.isEmpty() && !wantDisplayNameFallback) {
             return null;
         }
 
@@ -392,15 +407,92 @@ public final class BedrockEnchantmentHandler implements Listener {
             return null;
         }
 
-        List<Component> existingLore = clonedMeta.lore();
-        List<Component> newLore = existingLore != null
-            ? new ArrayList<>(existingLore)
-            : new ArrayList<>();
-        newLore.addAll(tooltipLines);
+        boolean changed = false;
 
-        clonedMeta.lore(newLore);
+        if (!tooltipLines.isEmpty()) {
+            List<Component> existingLore = clonedMeta.lore();
+            List<Component> newLore = existingLore != null
+                ? new ArrayList<>(existingLore)
+                : new ArrayList<>();
+            newLore.addAll(tooltipLines);
+            clonedMeta.lore(newLore);
+            changed = true;
+        }
+
+        if (wantDisplayNameFallback && !clonedMeta.hasDisplayName()) {
+            // Italic-disabled to match vanilla style (display names are non-italic;
+            // only the default lore-derived "renamed in anvil" italic case applies).
+            clonedMeta.displayName(Component.text(prettifyMaterialName(item.getType()))
+                .decoration(net.kyori.adventure.text.format.TextDecoration.ITALIC, false));
+            changed = true;
+        }
+
+        if (!changed) {
+            return null;
+        }
+
         cloned.setItemMeta(clonedMeta);
         return cloned;
+    }
+
+    /**
+     * Whether the item has the {@code custom_model_data} component set.
+     * Wrapped in a try/catch so a Paper API mismatch with the runtime never
+     * disables the lore-injection path entirely.
+     */
+    private static boolean hasCustomModelData(ItemStack item) {
+        try {
+            return item.hasData(DataComponentTypes.CUSTOM_MODEL_DATA);
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /**
+     * Whether the item carries a server-side display name (ItemMeta or the
+     * 1.21.4+ {@code custom_name} component). Used to skip the Bedrock
+     * fallback-name injection so a plugin's deliberately set name wins.
+     */
+    private static boolean hasServerSideDisplayName(ItemStack item) {
+        ItemMeta meta = item.getItemMeta();
+        if (meta != null && meta.hasDisplayName()) {
+            return true;
+        }
+        try {
+            return item.hasData(DataComponentTypes.CUSTOM_NAME)
+                || item.hasData(DataComponentTypes.ITEM_NAME);
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /**
+     * Builds the same vanilla-style display name fallback the Paper-side
+     * registration uses, so a Bedrock player sees identical text in both
+     * the registry-derived and the packet-injected paths.
+     *
+     * <p>Example: {@code Material.DIAMOND_SWORD} -> {@code "Diamond Sword"}.</p>
+     */
+    private static String prettifyMaterialName(Material material) {
+        if (material == null) {
+            return "Unknown";
+        }
+        String raw = material.getKey().getKey();  // "diamond_sword"
+        StringBuilder pretty = new StringBuilder(raw.length());
+        boolean upcaseNext = true;
+        for (int i = 0; i < raw.length(); i++) {
+            char c = raw.charAt(i);
+            if (c == '_' || c == '/' || c == ':') {
+                pretty.append(' ');
+                upcaseNext = true;
+            } else if (upcaseNext) {
+                pretty.append(Character.toUpperCase(c));
+                upcaseNext = false;
+            } else {
+                pretty.append(c);
+            }
+        }
+        return pretty.toString();
     }
 
     /**
