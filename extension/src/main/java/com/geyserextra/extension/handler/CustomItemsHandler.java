@@ -251,9 +251,32 @@ public class CustomItemsHandler {
      * to skip already-registered (base, CMD) pairs without provoking
      * {@code CustomItemDefinitionRegisterException}. The exception is still caught as a
      * safety net for sources that aren't visible in the snapshot (race or v1-only registrations).</p>
+     *
+     * <p><b>Load-order fail-safe:</b> the file is re-read from disk at
+     * registration time. The constructor's earlier read may have hit an
+     * absent file if the Paper plugin had not yet written
+     * {@code custom_items.json} — Bukkit's {@code loadbefore} hint covers the
+     * normal case, but server platforms / operator overrides occasionally
+     * reverse the load order. Re-reading here is safe because
+     * {@code GeyserDefineCustomItemsEvent} fires after every plugin's
+     * {@code onEnable()}, so the Paper plugin has definitely finished writing
+     * by this point. Without the re-read, a single boot with the wrong order
+     * would silently produce zero registered items until the next server
+     * restart.</p>
      */
     public void registerItems(GeyserDefineCustomItemsEvent event) {
         extension.logger().info("=== Custom Items Registration ===");
+        // Fail-safe re-read; details in method Javadoc above.
+        int beforeCount = itemMappings.size();
+        itemMappings.clear();
+        loadItemMappings();
+        int afterCount = itemMappings.size();
+        if (afterCount != beforeCount) {
+            extension.logger().info("Mapping count changed after re-read: "
+                + beforeCount + " -> " + afterCount
+                + " (likely cause: Paper plugin completed its initial scan "
+                + "after this extension was constructed)");
+        }
         extension.logger().info("Loaded item mappings: " + itemMappings.size());
         extension.logger().info("Shared folder path: " + sharedFolder.toAbsolutePath());
 
