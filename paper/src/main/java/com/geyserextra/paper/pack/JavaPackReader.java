@@ -96,6 +96,15 @@ public final class JavaPackReader {
         }
 
         Map<CmdKey, JavaModelDefinition> result = new HashMap<>();
+        // Counters surface per-pass attempt/resolve numbers in the final
+        // summary log line so operators can tell at a glance whether the
+        // scanner found CMD entries but failed to resolve their textures
+        // (X attempted, 0 resolved) vs. didn't find any candidates at all
+        // (0 attempted). Reset on each scan() call.
+        modernAttempted = 0;
+        modernResolved = 0;
+        legacyAttempted = 0;
+        legacyResolved = 0;
 
         boolean wantLegacy = !GeyserExtraConfig.CustomItemsConfig.JAVA_PACK_FORMAT_MODERN.equals(formatHint);
         boolean wantModern = !GeyserExtraConfig.CustomItemsConfig.JAVA_PACK_FORMAT_LEGACY.equals(formatHint);
@@ -113,9 +122,19 @@ public final class JavaPackReader {
         }
 
         logger.info("[JavaPack] scanned " + result.size()
-            + " custom_model_data entries from " + packRoot.getFileName());
+            + " custom_model_data entries from " + packRoot.getFileName()
+            + " (modern: " + modernResolved + "/" + modernAttempted + " resolved, "
+            + "legacy: " + legacyResolved + "/" + legacyAttempted + " resolved)");
         return result;
     }
+
+    // Per-scan counters; reset at the top of scan() and incremented inside
+    // each parse method. Not thread-safe — scan() is intended to be invoked
+    // from the main thread or with external synchronisation.
+    private int modernAttempted;
+    private int modernResolved;
+    private int legacyAttempted;
+    private int legacyResolved;
 
     // ========================================================================
     // Legacy: models/item/<base>.json with overrides[]
@@ -181,15 +200,16 @@ public final class JavaPackReader {
                 // occasionally ship a CMD 0 entry as the "fallback model", so
                 // dropping it here is the correct behaviour for our use case.
                 if (debug) {
-                    logger.fine("[JavaPack-legacy] skipped CMD<=0 override on "
+                    logger.info("[JavaPack-legacy] skipped CMD<=0 override on "
                         + baseItem + " (would clobber the vanilla item itself)");
                 }
                 continue;
             }
+            legacyAttempted++;
             String textureRef = resolveTextureRefFromModel(modelRef);
             if (textureRef == null) {
                 if (debug) {
-                    logger.fine("[JavaPack] no texture resolved for legacy override "
+                    logger.info("[JavaPack-legacy] no texture resolved for "
                         + baseItem + " CMD=" + cmd + " -> " + modelRef);
                 }
                 continue;
@@ -197,13 +217,18 @@ public final class JavaPackReader {
 
             Path texturePath = resolveTextureFile(textureRef);
             if (texturePath == null) {
+                if (debug) {
+                    logger.info("[JavaPack-legacy] texture file missing for "
+                        + baseItem + " CMD=" + cmd + " -> " + textureRef);
+                }
                 continue;
             }
 
             CmdKey key = new CmdKey(baseItem, cmd);
             out.put(key, new JavaModelDefinition(baseItem, cmd, modelRef, textureRef, texturePath));
+            legacyResolved++;
             if (debug) {
-                logger.fine("[JavaPack-legacy] " + key + " -> " + texturePath);
+                logger.info("[JavaPack-legacy] " + key + " -> " + texturePath);
             }
         }
     }
@@ -299,9 +324,14 @@ public final class JavaPackReader {
                 continue;
             }
             String contextLabel = baseItem + "#" + cmd;
+            modernAttempted++;
             List<String> modelRefs = new ArrayList<>();
             collectModelRefs(innerModelObj, contextLabel, modelRefs, 0);
             if (modelRefs.isEmpty()) {
+                if (debug) {
+                    logger.info("[JavaPack-modern] no model refs collected for "
+                        + contextLabel);
+                }
                 continue;
             }
 
@@ -313,8 +343,10 @@ public final class JavaPackReader {
             // model with no override while on_false has the custom texture
             // we want).
             JavaModelDefinition resolved = null;
+            String lastTriedRef = null;
             for (String modelRef : modelRefs) {
                 if (modelRef == null || modelRef.isBlank()) continue;
+                lastTriedRef = modelRef;
                 String textureRef = resolveTextureRefFromModel(modelRef);
                 if (textureRef == null) continue;
                 Path texturePath = resolveTextureFile(textureRef);
@@ -324,16 +356,18 @@ public final class JavaPackReader {
             }
             if (resolved == null) {
                 if (debug) {
-                    logger.fine("[JavaPack] no texture resolved for modern entry "
-                        + contextLabel + " (" + modelRefs.size() + " model ref(s) tried)");
+                    logger.info("[JavaPack-modern] no texture resolved for "
+                        + contextLabel + " (" + modelRefs.size()
+                        + " model ref(s) tried, last=" + lastTriedRef + ")");
                 }
                 continue;
             }
 
             CmdKey key = new CmdKey(baseItem, cmd);
             out.put(key, resolved);
+            modernResolved++;
             if (debug) {
-                logger.fine("[JavaPack-modern] " + key + " -> " + resolved.textureFile());
+                logger.info("[JavaPack-modern] " + key + " -> " + resolved.textureFile());
             }
         }
     }
