@@ -527,11 +527,28 @@ public final class JavaPackReader {
     }
 
     /**
-     * Returns the first {@code layerN} (N from 0 to 9) string value in the
-     * textures map, or {@code null}. Internal {@code #var} placeholders are
-     * skipped because they reference template variables, not real texture
-     * files. Non-{@code layerN} keys (e.g. {@code particle}) are intentionally
-     * ignored — they are not the item's icon.
+     * Returns the best-effort icon texture reference from a model's
+     * {@code textures} map, or {@code null} when none is suitable.
+     *
+     * <p>Resolution order:
+     * <ol>
+     *   <li><b>{@code layerN}</b> (N from 0 to 9) — the canonical 2D-icon
+     *       slot in Mojang item models. Picked first whenever present.</li>
+     *   <li><b>First non-{@code particle} non-{@code #}-reference string</b>
+     *       value in declaration order — handles 3D models (Blockbench
+     *       output) where the textures map uses numeric keys like
+     *       {@code "0"}, {@code "1"}, {@code "2"}, … to address each face
+     *       of the geometry. The 2D icon Bedrock renders won't perfectly
+     *       reproduce a multi-face 3D mesh, but it gives Bedrock players a
+     *       sensible single-image representation that matches what they'd
+     *       see on the main face of the model. Previously these models
+     *       resolved to {@code null}, producing 0 custom textures in the
+     *       auto-pack despite the Java pack being correctly extracted.</li>
+     * </ol>
+     * Internal {@code #var} placeholders reference template variables, not
+     * real texture files, so they're skipped. The {@code particle} key is
+     * also skipped because it's the block-break / use particle effect, not
+     * the item icon.</p>
      */
     private String pickLayeredTexture(Map<?, ?> textures) {
         for (int n = 0; n < 10; n++) {
@@ -539,6 +556,20 @@ public final class JavaPackReader {
             if (val instanceof String s && !s.isBlank() && !s.startsWith("#")) {
                 return s;
             }
+        }
+        for (Map.Entry<?, ?> entry : textures.entrySet()) {
+            Object keyObj = entry.getKey();
+            Object valObj = entry.getValue();
+            if (!(keyObj instanceof String key) || !(valObj instanceof String val)) {
+                continue;
+            }
+            if (val.isBlank() || val.startsWith("#")) {
+                continue;
+            }
+            if ("particle".equals(key)) {
+                continue;
+            }
+            return val;
         }
         return null;
     }
