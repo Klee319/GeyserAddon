@@ -266,10 +266,39 @@ public class CustomItemsHandler {
      */
     public void registerItems(GeyserDefineCustomItemsEvent event) {
         extension.logger().info("=== Custom Items Registration ===");
-        // Fail-safe re-read; details in method Javadoc above.
-        int beforeCount = itemMappings.size();
+        // Fail-safe re-read with rollback.
+        // Why snapshot + rollback: loadItemMappings catches I/O / parse errors
+        // internally and returns silently with an empty itemMappings list.
+        // Without the snapshot, a transient failure (e.g. the Paper plugin
+        // is mid-write and the file is briefly locked) would clear every
+        // mapping and Geyser would register zero items, leaving the server
+        // in a broken state until the next restart. The snapshot preserves
+        // the previous boot's mappings so a re-read miss only loses the
+        // *deltas* the Paper plugin would have added this boot, not the
+        // entire registry.
+        List<ItemMapping> previousMappings = new ArrayList<>(itemMappings);
+        int beforeCount = previousMappings.size();
         itemMappings.clear();
-        loadItemMappings();
+        try {
+            loadItemMappings();
+        } catch (RuntimeException ex) {
+            // Defensive: loadItemMappings catches IOException / parse errors
+            // internally, but a future refactor could leak a RuntimeException.
+            // Restore the snapshot rather than register zero items.
+            extension.logger().error("Re-read threw "
+                + ex.getClass().getSimpleName() + ": " + ex.getMessage()
+                + " — restoring " + beforeCount + " prior mapping(s)");
+            itemMappings.clear();
+            itemMappings.addAll(previousMappings);
+        }
+        if (itemMappings.isEmpty() && beforeCount > 0) {
+            extension.logger().warning("Re-read produced empty list while "
+                + beforeCount + " mapping(s) were already loaded; restoring "
+                + "previous mappings to avoid registering zero items "
+                + "(likely cause: custom_items.json was unreadable at "
+                + "registration time)");
+            itemMappings.addAll(previousMappings);
+        }
         int afterCount = itemMappings.size();
         if (afterCount != beforeCount) {
             extension.logger().info("Mapping count changed after re-read: "
