@@ -619,33 +619,34 @@ public final class JavaPackReader {
     }
 
     /**
-     * Resolves a texture reference (e.g. {@code "myns:items/fire_sword"}) to a PNG file.
+     * Resolves a texture reference (e.g. {@code "myns:items/fire_sword"} or
+     * {@code "item/weapons/copper_dagger"}) to a PNG file path inside the
+     * pack. Returns {@code null} when no PNG exists at the resolved path.
      *
-     * <p>Returns {@code null} for references in the {@code minecraft:} namespace.
-     * Why: a CMD override that points at a vanilla texture path is reusing an
-     * unmodified Mojang texture — registering it on Bedrock would add a custom
-     * item identifier with no visual distinction from its base material, just
-     * bloating the registry and the BE resource pack. The user-stated goal is
-     * "only register items whose Java pack has a custom texture added"; vanilla
-     * references fail that test by definition.</p>
+     * <p>Resolution is "namespace + path → file on disk", with no
+     * namespace-based filtering: a pack that overrides
+     * {@code assets/minecraft/textures/item/weapons/copper_dagger.png}
+     * (the typical ValhallaMMO / large-modpack pattern of stamping custom
+     * textures on top of vanilla paths) is honoured, because the PNG
+     * physically exists in the pack and is therefore a real custom texture.
+     * A reference whose PNG does not exist returns {@code null} and the
+     * caller falls back to vanilla rendering for that entry.</p>
      *
-     * <p>If an operator genuinely wants Bedrock-side identity for a vanilla-
-     * textured CMD variant (e.g. for inventory distinction without visual
-     * changes), the runtime scanner path will still detect and register it as
-     * usual when a player interacts with the item — this filter only affects
-     * the pack-first pre-registration step.</p>
+     * <p><b>Previously</b> this method returned {@code null} for any
+     * {@code minecraft:} namespace reference under the assumption that
+     * "minecraft path = vanilla texture, no custom artwork", but that
+     * broke every pack that uses the minecraft-override pattern — they
+     * were silently treated as having no custom textures, leading to
+     * {@code 0 custom resolved} even on packs that clearly do override
+     * vanilla items. The file-existence check above gives the same outcome
+     * for genuinely vanilla references (the file isn't there in the
+     * operator's pack so it returns {@code null}) without false negatives
+     * on minecraft-override packs.</p>
      */
     private Path resolveTextureFile(String textureRef) {
         String[] parts = splitNamespacedKey(textureRef);
         String namespace = parts[0];
         String path = parts[1];
-        if ("minecraft".equals(namespace)) {
-            if (debug) {
-                logger.fine("[JavaPack] skipping vanilla texture reference (no custom texture added): "
-                    + textureRef);
-            }
-            return null;
-        }
         Path absolute = packRoot.resolve("assets").resolve(namespace)
             .resolve("textures").resolve(path + ".png");
         if (Files.isRegularFile(absolute)) {
