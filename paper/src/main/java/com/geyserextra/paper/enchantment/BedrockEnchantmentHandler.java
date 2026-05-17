@@ -38,6 +38,7 @@ import org.bukkit.inventory.AnvilInventory;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.EnchantmentStorageMeta;
 import org.bukkit.inventory.meta.ItemMeta;
+import org.bukkit.inventory.view.AnvilView;
 import org.geysermc.floodgate.api.FloodgateApi;
 
 import java.util.ArrayList;
@@ -871,6 +872,11 @@ public final class BedrockEnchantmentHandler implements Listener {
             return;
         }
 
+        // Why AnvilView rather than inventory.setRepairCost: Paper marked
+        // AnvilInventory#setRepairCost/getRepairCost for removal and routed
+        // the canonical cost-modification through AnvilView. PrepareAnvilEvent
+        // always exposes the view as an AnvilView, so the cast is safe.
+        AnvilView view = (AnvilView) event.getView();
         for (AnvilRecipe recipe : customRecipes.values()) {
             if (recipe.matches(firstItem, secondItem)) {
                 ItemStack result = recipe.getResult(firstItem, secondItem);
@@ -878,7 +884,7 @@ public final class BedrockEnchantmentHandler implements Listener {
                     event.setResult(result);
                     int cost = recipe.getCost(firstItem, secondItem);
                     if (cost > 0) {
-                        inventory.setRepairCost(cost);
+                        view.setRepairCost(cost);
                     }
                     break;
                 }
@@ -932,7 +938,10 @@ public final class BedrockEnchantmentHandler implements Listener {
                 continue;
             }
 
-            int cost = inventory.getRepairCost();
+            // Same Paper migration rationale as onPrepareAnvilCustomRecipe:
+            // AnvilInventory#getRepairCost is deprecated for removal; AnvilView
+            // is the supported accessor.
+            int cost = ((AnvilView) event.getView()).getRepairCost();
             bedrockAnvilCache.put(player.getUniqueId(), new CachedAnvilResult(
                 firstItem.clone(),
                 secondItem != null ? secondItem.clone() : null,
