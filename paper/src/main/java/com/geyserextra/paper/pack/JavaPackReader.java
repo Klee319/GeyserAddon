@@ -206,8 +206,8 @@ public final class JavaPackReader {
                 continue;
             }
             legacyAttempted++;
-            String textureRef = resolveTextureRefFromModel(modelRef);
-            if (textureRef == null) {
+            JavaModelDefinition resolved = resolveSingleModelRef(baseItem, cmd, modelRef);
+            if (resolved == null) {
                 if (debug) {
                     logger.info("[JavaPack-legacy] no texture resolved for "
                         + baseItem + " CMD=" + cmd + " -> " + modelRef);
@@ -215,20 +215,11 @@ public final class JavaPackReader {
                 continue;
             }
 
-            Path texturePath = resolveTextureFile(textureRef);
-            if (texturePath == null) {
-                if (debug) {
-                    logger.info("[JavaPack-legacy] texture file missing for "
-                        + baseItem + " CMD=" + cmd + " -> " + textureRef);
-                }
-                continue;
-            }
-
             CmdKey key = new CmdKey(baseItem, cmd);
-            out.put(key, new JavaModelDefinition(baseItem, cmd, modelRef, textureRef, texturePath));
+            out.put(key, resolved);
             legacyResolved++;
             if (debug) {
-                logger.info("[JavaPack-legacy] " + key + " -> " + texturePath);
+                logger.info("[JavaPack-legacy] " + key + " -> " + resolved.textureFile());
             }
         }
     }
@@ -347,12 +338,10 @@ public final class JavaPackReader {
             for (String modelRef : modelRefs) {
                 if (modelRef == null || modelRef.isBlank()) continue;
                 lastTriedRef = modelRef;
-                String textureRef = resolveTextureRefFromModel(modelRef);
-                if (textureRef == null) continue;
-                Path texturePath = resolveTextureFile(textureRef);
-                if (texturePath == null) continue;
-                resolved = new JavaModelDefinition(baseItem, cmd, modelRef, textureRef, texturePath);
-                break;
+                resolved = resolveSingleModelRef(baseItem, cmd, modelRef);
+                if (resolved != null) {
+                    break;
+                }
             }
             if (resolved == null) {
                 if (debug) {
@@ -502,6 +491,46 @@ public final class JavaPackReader {
     // ========================================================================
     // Texture reference resolution
     // ========================================================================
+
+    /**
+     * Resolves a single {@code modelRef} (e.g. {@code "myns:item/sword"}) to a
+     * usable {@link JavaModelDefinition} by trying, in order:
+     * <ol>
+     *   <li><b>Model JSON chain</b>: read the model file, walk the
+     *       {@code parent} chain, pick a {@code textures.layerN} (or any
+     *       non-{@code #} entry) and verify the referenced PNG exists.</li>
+     *   <li><b>Model-name-as-texture-path fallback</b>: when the model JSON
+     *       is missing entirely, doesn't declare a {@code textures} map, or
+     *       declares only template (#) placeholders, try the model ref's
+     *       path verbatim as a texture path (i.e. swap {@code models/} for
+     *       {@code textures/} and {@code .json} for {@code .png}). This
+     *       handles the very common 2D-icon convention where pack authors
+     *       ship just a PNG and rely on the {@code model_name == texture_name}
+     *       implicit mapping (e.g. ValhallaMMO's
+     *       {@code item/gui/merchants/services/service_*} icons).</li>
+     * </ol>
+     * Returns {@code null} when neither resolution path produces an on-disk
+     * PNG. Diagnostic logging is left to the caller so it can report the
+     * full ref chain it tried.
+     */
+    private JavaModelDefinition resolveSingleModelRef(String baseItem, int cmd, String modelRef) {
+        String textureRef = resolveTextureRefFromModel(modelRef);
+        if (textureRef != null) {
+            Path texturePath = resolveTextureFile(textureRef);
+            if (texturePath != null) {
+                return new JavaModelDefinition(baseItem, cmd, modelRef, textureRef, texturePath);
+            }
+        }
+        Path direct = resolveTextureFile(modelRef);
+        if (direct != null) {
+            if (debug) {
+                logger.fine("[JavaPack] " + baseItem + "#" + cmd
+                    + ": resolved via model-name-as-texture-path fallback for " + modelRef);
+            }
+            return new JavaModelDefinition(baseItem, cmd, modelRef, modelRef, direct);
+        }
+        return null;
+    }
 
     /**
      * Reads the referenced model JSON, walks the {@code parent} chain to find

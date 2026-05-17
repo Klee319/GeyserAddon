@@ -5,6 +5,9 @@ import com.geyserextra.core.util.JsonUtil;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.Objects;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -275,6 +278,7 @@ public final class GeyserExtraConfig {
         private final String bedrockPacksPath;
         private final String pdcWarning;
         private final String javaResourcePackPath;
+        private final List<String> javaResourcePackPaths;
         private final String javaResourcePackFormat;
         private final String javaPackLocale;
 
@@ -286,6 +290,7 @@ public final class GeyserExtraConfig {
             this.bedrockPacksPath = "";
             this.pdcWarning = PDC_WARNING_COMPACT;
             this.javaResourcePackPath = "";
+            this.javaResourcePackPaths = Collections.emptyList();
             this.javaResourcePackFormat = JAVA_PACK_FORMAT_AUTO;
             this.javaPackLocale = "en_us";
         }
@@ -328,6 +333,23 @@ public final class GeyserExtraConfig {
                 String javaResourcePackFormat,
                 String javaPackLocale
         ) {
+            this(enabled, mappingsFile, autoReload, reloadIntervalSeconds,
+                bedrockPacksPath, pdcWarning, javaResourcePackPath,
+                Collections.emptyList(), javaResourcePackFormat, javaPackLocale);
+        }
+
+        public CustomItemsConfig(
+                boolean enabled,
+                String mappingsFile,
+                boolean autoReload,
+                int reloadIntervalSeconds,
+                String bedrockPacksPath,
+                String pdcWarning,
+                String javaResourcePackPath,
+                List<String> javaResourcePackPaths,
+                String javaResourcePackFormat,
+                String javaPackLocale
+        ) {
             this.enabled = enabled;
             this.mappingsFile = mappingsFile != null ? mappingsFile : "custom_items.json";
             this.autoReload = autoReload;
@@ -335,6 +357,9 @@ public final class GeyserExtraConfig {
             this.bedrockPacksPath = bedrockPacksPath != null ? bedrockPacksPath : "";
             this.pdcWarning = normalizePdcWarning(pdcWarning);
             this.javaResourcePackPath = javaResourcePackPath != null ? javaResourcePackPath : "";
+            this.javaResourcePackPaths = javaResourcePackPaths != null
+                ? List.copyOf(javaResourcePackPaths)
+                : Collections.emptyList();
             this.javaResourcePackFormat = normalizeJavaPackFormat(javaResourcePackFormat);
             this.javaPackLocale = (javaPackLocale != null && !javaPackLocale.isBlank())
                 ? javaPackLocale.toLowerCase()
@@ -432,6 +457,62 @@ public final class GeyserExtraConfig {
          */
         public String javaResourcePackPath() {
             return javaResourcePackPath != null ? javaResourcePackPath : "";
+        }
+
+        /**
+         * Returns additional Java pack paths to merge alongside
+         * {@link #javaResourcePackPath()}. Each entry is interpreted exactly
+         * like the singleton path: an absolute path is used verbatim, a
+         * relative path is resolved against the Paper plugin's data folder,
+         * and {@code .zip} archives are extracted into the managed cache
+         * before scanning.
+         *
+         * <p>Use case: a server that runs multiple custom-item plugins
+         * (e.g. ValhallaMMO + ItemsAdder + MMOItems) where each plugin
+         * generates its own Java resource pack into its own folder. Listing
+         * each pack here lets GeyserExtra merge all of them into a single
+         * Bedrock auto-pack without the operator having to hand-merge ZIPs
+         * before pointing {@code server.properties}'s {@code resource-pack}
+         * at the result.</p>
+         *
+         * <p>Merge order: the singleton {@link #javaResourcePackPath()} is
+         * scanned first, then each entry of {@code javaResourcePackPaths}
+         * in declaration order. When two packs define the same
+         * {@code (baseItem, custom_model_data)} key, the <b>later</b> pack
+         * wins — so place higher-priority packs later in the list.</p>
+         *
+         * <p>Default: empty list (only the singleton path /
+         * {@code server.properties} URL is used).</p>
+         *
+         * @return the configured additional pack paths (never {@code null})
+         */
+        public List<String> javaResourcePackPaths() {
+            return javaResourcePackPaths != null ? javaResourcePackPaths : Collections.emptyList();
+        }
+
+        /**
+         * Returns the effective list of Java pack paths to scan, combining
+         * {@link #javaResourcePackPath()} (when non-blank) and every
+         * non-blank entry of {@link #javaResourcePackPaths()} in declaration
+         * order.
+         *
+         * <p>Returned list is unmodifiable; blank entries are dropped so the
+         * downstream {@code JavaPackResolver} doesn't waste a no-op resolve
+         * attempt on each empty string. When the result is empty the
+         * resolver falls back to the {@code server.properties} URL.</p>
+         */
+        public List<String> effectiveJavaResourcePackPaths() {
+            List<String> out = new ArrayList<>();
+            String single = javaResourcePackPath();
+            if (!single.isBlank()) {
+                out.add(single);
+            }
+            for (String path : javaResourcePackPaths()) {
+                if (path != null && !path.isBlank()) {
+                    out.add(path);
+                }
+            }
+            return List.copyOf(out);
         }
 
         /**

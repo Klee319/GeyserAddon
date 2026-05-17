@@ -38,7 +38,8 @@ import com.geyserextra.paper.util.JapaneseTranslationLoader;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.logging.Level;
@@ -633,32 +634,47 @@ public final class GeyserExtraPaper extends JavaPlugin {
                 // Bedrock players see the operator-supplied 2D textures (3D models remain
                 // out of scope — see the README's converter notes).
                 Path autoPackPath = extensionFolder.resolve("packs").resolve("geyserextra_auto.zip");
-                Path javaPackRoot = resolveJavaPackRoot();
+                List<Path> javaPackRoots = resolveJavaPackRoots();
                 String javaPackFormat = config.customItems().javaResourcePackFormat();
 
-                // Scan the Java pack once and reuse the result for both pre-registration
-                // and texture copying. Pre-registration ("pack-first") guarantees every
-                // (baseItem, CMD) override in the operator's pack ends up in the registry
-                // — without it, only items the scanner has observed during play would get
-                // a Bedrock texture, breaking the "Java pack is always reflected on Bedrock"
-                // guarantee for items no one has picked up yet.
+                // Scan each Java pack once and merge results in declaration
+                // order: later packs override earlier ones for the same
+                // (baseItem, CMD) key. This lets a server run multiple
+                // custom-item plugins (ValhallaMMO + ItemsAdder + MMOItems)
+                // where each plugin ships its own pack — the operator lists
+                // each pack in config.javaResourcePackPaths and we present
+                // the union to Bedrock players. Pre-registration
+                // ("pack-first") guarantees every override in the merged
+                // result ends up in the registry — without it only items
+                // the scanner observes during play would get a Bedrock
+                // texture, breaking the "Java pack is always reflected on
+                // Bedrock" guarantee for items no one has picked up yet.
                 Map<JavaPackReader.CmdKey, JavaPackReader.JavaModelDefinition> javaPackEntries =
-                    Collections.emptyMap();
-                if (javaPackRoot != null) {
+                    new HashMap<>();
+                for (Path javaPackRoot : javaPackRoots) {
                     try {
-                        javaPackEntries = new JavaPackReader(
-                            javaPackRoot, javaPackFormat, getLogger(), debug).scan();
+                        Map<JavaPackReader.CmdKey, JavaPackReader.JavaModelDefinition> perPack =
+                            new JavaPackReader(javaPackRoot, javaPackFormat, getLogger(), debug).scan();
+                        // putAll: later packs overwrite earlier entries for
+                        // the same key (the documented merge order).
+                        javaPackEntries.putAll(perPack);
                     } catch (Exception ex) {
-                        getLogger().warning("[JavaPack] scan failed: "
+                        getLogger().warning("[JavaPack] scan failed for " + javaPackRoot + ": "
                             + ex.getClass().getSimpleName() + ": " + ex.getMessage());
                     }
-                    // Lang reader is loaded alongside the CMD scan because
-                    // both consume the same pack root and the resolver is
-                    // needed by the scanner upgrade path that runs right
-                    // after pre-population.
+                }
+                // Lang reader: load the first pack root only. Lang merging
+                // across packs would require deep-merging per-locale JSONs
+                // and isn't requested yet — when needed, extend
+                // JavaPackLangReader with a static merge() helper. Operators
+                // running multiple packs typically have all the translatable
+                // names in their primary pack (ValhallaMMO etc.) and other
+                // packs contribute textures, not lang keys.
+                if (!javaPackRoots.isEmpty()) {
+                    Path primary = javaPackRoots.get(0);
                     try {
                         javaPackLangReader = JavaPackLangReader.load(
-                            javaPackRoot,
+                            primary,
                             config.customItems().javaPackLocale(),
                             getLogger(),
                             debug);
@@ -667,6 +683,10 @@ public final class GeyserExtraPaper extends JavaPlugin {
                             + ex.getClass().getSimpleName() + ": " + ex.getMessage());
                         javaPackLangReader = JavaPackLangReader.empty();
                     }
+                }
+                if (javaPackRoots.size() > 1) {
+                    getLogger().info("[JavaPack] merged " + javaPackRoots.size()
+                        + " packs (" + javaPackEntries.size() + " unique CMD entries total)");
                 }
 
                 // Order matters: prepopulate the registry from the Java pack
@@ -695,7 +715,9 @@ public final class GeyserExtraPaper extends JavaPlugin {
                     if (debug) {
                         getLogger().info("Built auto BE pack: " + autoPackPath
                             + " (" + itemMappingRegistry.size() + " mappings"
-                            + (javaPackRoot != null ? ", Java pack: " + javaPackRoot : "")
+                            + (javaPackRoots.isEmpty()
+                                ? ""
+                                : ", Java packs: " + javaPackRoots.size())
                             + ")");
                     }
                 } catch (IOException e) {
@@ -912,34 +934,41 @@ public final class GeyserExtraPaper extends JavaPlugin {
     }
 
     /**
-     * Resolves the operator's Java edition resource pack root to a usable
-     * on-disk directory by delegating to {@link JavaPackResolver}.
+     * Resolves <i>every</i> configured Java resource pack into on-disk
+     * directories by delegating to {@link JavaPackResolver}. Returned in
+     * declaration order so the caller can merge entries with deterministic
+     * "later overrides earlier" semantics.
      *
-     * <p>The resolver tries three sources in priority order:
+     * <p>The resolver tries the following sources, in priority order:
      * <ol>
-     *   <li>{@code javaResourcePackPath} config pointing at an unzipped
-     *       directory (used verbatim, fastest path).</li>
-     *   <li>{@code javaResourcePackPath} config pointing at a {@code .zip}
-     *       file (extracted into the plugin's cache directory).</li>
-     *   <li>{@code server.properties}'s {@code resource-pack} URL when the
-     *       config field is blank — downloaded into the cache, SHA-1
-     *       verified against {@code resource-pack-sha1}, and extracted.</li>
+     *   <li>{@code customItems.javaResourcePackPath} (singleton, kept for
+     *       backwards compatibility) followed by every entry of
+     *       {@code customItems.javaResourcePackPaths} (the multi-pack list).
+     *       Each entry may point at an unzipped directory or a {@code .zip}
+     *       archive; ZIPs are extracted into per-pack subdirectories under
+     *       the plugin's cache folder.</li>
+     *   <li>When <i>no</i> explicit entry resolved, the
+     *       {@code server.properties}'s {@code resource-pack} URL is
+     *       auto-fetched as the single fallback source — downloaded into
+     *       the cache, SHA-1 verified against {@code resource-pack-sha1},
+     *       and extracted.</li>
      * </ol>
-     * Explicit config beats the URL by design: operators set the config
+     * Explicit config beats the URL by design: operators set the explicit
      * field specifically when they want to override the URL (e.g. point at
      * a server-local pack while still serving Java players a different
-     * pack via URL).</p>
+     * pack via URL). Mixing the URL pack into an explicit-list scan would
+     * surprise operators who specifically configured the list.</p>
      *
-     * <p>Returns {@code null} when no source resolves — the auto-pack
+     * <p>Returns an empty list when no source resolves — the auto-pack
      * builder then falls back to vanilla textures for every item.</p>
      */
-    private Path resolveJavaPackRoot() {
+    private List<Path> resolveJavaPackRoots() {
         JavaPackResolver resolver = new JavaPackResolver(
-            config.customItems().javaResourcePackPath(),
+            config.customItems().effectiveJavaResourcePackPaths(),
             getServer(),
             getDataFolder().toPath(),
             getLogger());
-        return resolver.resolve().orElse(null);
+        return resolver.resolveAll();
     }
 
     /**

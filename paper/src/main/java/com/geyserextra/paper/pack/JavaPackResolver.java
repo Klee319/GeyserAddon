@@ -15,7 +15,10 @@ import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
+import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.logging.Level;
@@ -63,26 +66,22 @@ public final class JavaPackResolver {
     /** Sidecar file storing the SHA-1 of {@link #SERVER_PACK_FILE} for re-download decisions. */
     private static final String SERVER_PACK_HASH_FILE = "server-resource-pack.sha1";
 
-    /** Where any ZIP source gets extracted. Cleared and rewritten on each resolve. */
+    /** Base directory name for per-source extract folders. One subdir per configured pack. */
     private static final String EXTRACT_DIR_NAME = "java-pack-extracted";
 
     /** Network timeouts kept short so a slow / down URL host never blocks server startup. */
     private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(15);
     private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(60);
 
-    private final String configuredPath;
+    private final List<String> configuredPaths;
     private final Server server;
     private final Path pluginDataFolder;
     private final Logger logger;
 
     /**
-     * @param configuredPath   raw value of {@code customItems.javaResourcePackPath}
-     *                          (may be {@code null} or blank)
-     * @param server            Bukkit server instance for reading
-     *                          {@code server.properties} values
-     * @param pluginDataFolder  plugin's data folder; cache lives under
-     *                          {@code <dataFolder>/cache}
-     * @param logger            plugin logger for warnings / info
+     * Convenience constructor for callers with a single configured path.
+     * Equivalent to passing {@code List.of(configuredPath)} (or an empty
+     * list when {@code configuredPath} is {@code null} / blank).
      */
     public JavaPackResolver(
         String configuredPath,
@@ -90,39 +89,119 @@ public final class JavaPackResolver {
         Path pluginDataFolder,
         Logger logger
     ) {
-        this.configuredPath = configuredPath;
+        this(toSingletonList(configuredPath), server, pluginDataFolder, logger);
+    }
+
+    /**
+     * @param configuredPaths  raw values of
+     *                          {@code customItems.javaResourcePackPath} +
+     *                          {@code customItems.javaResourcePackPaths},
+     *                          already concatenated and blank-filtered by the
+     *                          caller (see
+     *                          {@link com.geyserextra.core.config.GeyserExtraConfig.CustomItemsConfig#effectiveJavaResourcePackPaths()})
+     * @param server            Bukkit server instance for reading
+     *                          {@code server.properties} values
+     * @param pluginDataFolder  plugin's data folder; cache lives under
+     *                          {@code <dataFolder>/cache}
+     * @param logger            plugin logger for warnings / info
+     */
+    public JavaPackResolver(
+        List<String> configuredPaths,
+        Server server,
+        Path pluginDataFolder,
+        Logger logger
+    ) {
+        this.configuredPaths = configuredPaths != null
+            ? List.copyOf(configuredPaths)
+            : Collections.emptyList();
         this.server = server;
         this.pluginDataFolder = pluginDataFolder;
         this.logger = logger;
     }
 
-    /**
-     * Returns an absolute path to an unzipped Java pack root, or
-     * {@link Optional#empty()} when no source could be resolved.
-     */
-    public Optional<Path> resolve() {
-        Path explicit = resolveExplicitConfig();
-        if (explicit != null) {
-            return Optional.of(explicit);
-        }
-        Path autoFetched = resolveFromServerProperties();
-        if (autoFetched != null) {
-            return Optional.of(autoFetched);
-        }
-        return Optional.empty();
+    private static List<String> toSingletonList(String single) {
+        return (single != null && !single.isBlank())
+            ? List.of(single)
+            : Collections.emptyList();
     }
 
     /**
-     * Honours the {@code javaResourcePackPath} config field. Returns
+     * Returns the first explicit-config path that resolves, or the
+     * server.properties auto-fetch when no explicit path is configured /
+     * usable.
+     *
+     * <p>Kept for backwards compatibility with callers that don't need
+     * multi-pack merging. Prefer {@link #resolveAll()} for the merged
+     * scan pipeline introduced for multi-plugin servers.</p>
+     */
+    public Optional<Path> resolve() {
+        List<Path> all = resolveAll();
+        return all.isEmpty() ? Optional.empty() : Optional.of(all.get(0));
+    }
+
+    /**
+     * Resolves <i>every</i> configured pack, returning the absolute path of
+     * each unzipped pack root in declaration order. Used by the multi-pack
+     * scan pipeline so plugins that each ship their own resource pack
+     * (ValhallaMMO + ItemsAdder + MMOItems + …) can be merged into a single
+     * Bedrock auto-pack.
+     *
+     * <p>Resolution priority:
+     * <ol>
+     *   <li>Each entry of the configured-paths list, in declaration order.
+     *       Unresolvable entries (missing file, neither dir nor .zip,
+     *       extract failure) are logged and skipped.</li>
+     *   <li>When the list is empty <b>or</b> nothing in the list resolved,
+     *       the {@code server.properties} {@code resource-pack} URL is
+     *       auto-fetched as the single fallback source.</li>
+     * </ol>
+     * The "auto-fetch only when nothing explicit resolves" rule matches the
+     * pre-multi-pack behaviour: operators who set the explicit field meant
+     * to override the URL, and shouldn't suddenly get the URL pack merged
+     * on top.</p>
+     *
+     * <p>Returns an empty list when neither path produces a usable pack.</p>
+     */
+    public List<Path> resolveAll() {
+        List<Path> out = new ArrayList<>();
+        if (!configuredPaths.isEmpty()) {
+            int idx = 0;
+            for (String raw : configuredPaths) {
+                Path resolved = resolveExplicitConfig(raw, idx);
+                if (resolved != null) {
+                    out.add(resolved);
+                }
+                idx++;
+            }
+        }
+        if (out.isEmpty()) {
+            // Only fall back to server.properties when no explicit pack was
+            // resolved. Mixing the URL pack into an explicit-list scan would
+            // surprise operators who specifically configured the list.
+            Path autoFetched = resolveFromServerProperties();
+            if (autoFetched != null) {
+                out.add(autoFetched);
+            }
+        }
+        return List.copyOf(out);
+    }
+
+    /**
+     * Honours a single {@code javaResourcePackPath(s)} config entry. Returns
      * {@code null} when the field is blank, the resolved path is missing,
      * the path escapes the plugin data folder (for relative inputs), or
      * the file is neither a directory nor a {@code .zip}.
+     *
+     * @param raw   the raw config value (relative or absolute path, possibly .zip)
+     * @param index zero-based position in the configured list — used to give
+     *              each pack its own extract subdirectory so multiple ZIPs
+     *              don't clobber each other on disk during multi-pack scans
      */
-    private Path resolveExplicitConfig() {
-        if (configuredPath == null || configuredPath.isBlank()) {
+    private Path resolveExplicitConfig(String raw, int index) {
+        if (raw == null || raw.isBlank()) {
             return null;
         }
-        Path rawCandidate = Path.of(configuredPath);
+        Path rawCandidate = Path.of(raw);
         boolean wasRelative = !rawCandidate.isAbsolute();
         Path candidate = wasRelative
             ? pluginDataFolder.resolve(rawCandidate)
@@ -137,7 +216,7 @@ public final class JavaPackResolver {
             Path pluginRoot = pluginDataFolder.toAbsolutePath().normalize();
             if (!normalized.startsWith(pluginRoot)) {
                 logger.warning("[JavaPack] relative javaResourcePackPath escapes "
-                    + "plugin data folder: " + configuredPath
+                    + "plugin data folder: " + raw
                     + " (resolved to " + normalized + ") — ignoring.");
                 return null;
             }
@@ -148,13 +227,16 @@ public final class JavaPackResolver {
         }
 
         if (Files.isRegularFile(normalized)
-            && configuredPath.toLowerCase(Locale.ROOT).endsWith(".zip")) {
-            return extractZip(normalized, "config:" + configuredPath);
+            && raw.toLowerCase(Locale.ROOT).endsWith(".zip")) {
+            // Per-pack extract subdir keyed by list index so multi-pack
+            // scans don't share an extract root; collisions would silently
+            // erase the previous pack's files mid-scan.
+            return extractZip(normalized, "config:" + raw,
+                EXTRACT_DIR_NAME + "-config-" + index);
         }
 
         logger.warning("[JavaPack] configured javaResourcePackPath is neither a "
-            + "directory nor a .zip file: " + normalized + " — falling back to "
-            + "server.properties URL if available.");
+            + "directory nor a .zip file: " + normalized + " — skipping this entry.");
         return null;
     }
 
@@ -191,7 +273,8 @@ public final class JavaPackResolver {
             return null;
         }
 
-        return extractZip(cacheZip, "server.properties:" + url);
+        return extractZip(cacheZip, "server.properties:" + url,
+            EXTRACT_DIR_NAME + "-server");
     }
 
     /**
@@ -240,15 +323,19 @@ public final class JavaPackResolver {
     }
 
     /**
-     * Extracts {@code zipFile} into the managed extract directory and
+     * Extracts {@code zipFile} into the named extract subdirectory and
      * returns the extract root. Re-creates the directory from scratch on
      * every call so stale files from a previous pack don't linger.
+     *
+     * <p>Each call uses its own {@code subdirName} so multi-pack scans
+     * don't share an extract root (and accidentally erase each other's
+     * files mid-scan).</p>
      *
      * <p>Path-traversal entries ({@code ../} or absolute paths) are
      * silently skipped per OWASP Zip Slip guidance.</p>
      */
-    private Path extractZip(Path zipFile, String sourceLabel) {
-        Path extractDir = cacheFile(EXTRACT_DIR_NAME);
+    private Path extractZip(Path zipFile, String sourceLabel, String subdirName) {
+        Path extractDir = cacheFile(subdirName);
         try {
             deleteRecursive(extractDir);
             Files.createDirectories(extractDir);
