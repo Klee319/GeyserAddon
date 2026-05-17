@@ -2,15 +2,13 @@ package com.geyserextra.paper.listener;
 
 import com.geyserextra.paper.util.BedrockPlayerUtil;
 
-import net.kyori.adventure.text.Component;
-import net.kyori.adventure.text.format.NamedTextColor;
-
 import org.bukkit.Bukkit;
 import org.bukkit.Material;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
+import org.bukkit.event.inventory.InventoryAction;
 import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.InventoryType;
 import org.bukkit.event.player.PlayerDropItemEvent;
@@ -18,6 +16,8 @@ import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.PlayerInventory;
 import org.bukkit.plugin.Plugin;
 
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Objects;
 
 /**
@@ -101,31 +101,18 @@ public final class OffhandSwapListener implements Listener {
         inv.setItemInMainHand(offhand);
         inv.setItemInOffHand(originalMain);
         player.updateInventory();
-
-        // Why surface the hint: many items (anything that isn't a shield, totem,
-        // map, firework, book, etc.) cannot be removed from Bedrock's off-hand
-        // slot via the standard inventory UI — the client just won't react to
-        // clicks on those item types. Without an explicit reminder, a player
-        // who put a sword or block into the off-hand by accident appears stuck
-        // and assumes the plugin is broken. The action-bar message points at
-        // the working escape hatch: another sneak + drop, or /offhand.
-        if (originalMain != null && originalMain.getType() != Material.AIR
-            && !isBedrockOffhandFriendly(originalMain.getType())) {
-            player.sendActionBar(Component.text(
-                "オフハンドへ移動。元に戻すには再度スニーク+ドロップ、または /offhand")
-                .color(NamedTextColor.GRAY));
-        }
     }
 
     /**
-     * Pick-up assist for Bedrock players whose client refuses to react to
-     * inventory clicks on the off-hand slot. When the player clicks slot 45
-     * (off-hand in the default crafting view) with an empty cursor, we
-     * explicitly move the off-hand item onto the cursor and force an
-     * inventory update. For items the Bedrock UI handles natively (shield,
-     * totem, ...) this is a no-op duplicate of the default behaviour; for
-     * items it does not, this is the only way to get them out without using
-     * the {@code /offhand} command.
+     * Forces server-side handling of every "remove from off-hand" inventory
+     * action for Bedrock players, because Bedrock's native UI silently
+     * refuses to react to clicks on the off-hand slot for item types it does
+     * not consider off-hand-friendly (most weapons, blocks, food, ...). The
+     * default Bukkit click resolution does the right thing on the server
+     * side, but the Bedrock client does not visualise the resulting state
+     * change, so the player perceives the item as stuck. Re-doing the
+     * inventory mutation ourselves and then calling {@code updateInventory()}
+     * re-syncs the Bedrock client view so the action takes visible effect.
      */
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
     public void onInventoryClick(InventoryClickEvent event) {
@@ -142,42 +129,115 @@ public final class OffhandSwapListener implements Listener {
             return;
         }
 
-        ItemStack offhand = player.getInventory().getItemInOffHand();
+        PlayerInventory inv = player.getInventory();
+        ItemStack offhand = inv.getItemInOffHand();
         if (offhand == null || offhand.getType() == Material.AIR) {
             return;
         }
 
+        InventoryAction action = event.getAction();
         ItemStack cursor = event.getCursor();
         boolean cursorEmpty = cursor == null || cursor.getType() == Material.AIR;
-        if (!cursorEmpty) {
-            // Player has something on the cursor — let the default place
-            // behaviour run unchanged. We only intercept the empty-cursor
-            // pick-up case that the Bedrock client may otherwise ignore.
-            return;
-        }
 
-        event.setCancelled(true);
-        Bukkit.getScheduler().runTask(plugin, () -> {
-            if (!player.isOnline()) {
-                return;
+        switch (action) {
+            case PICKUP_ALL, PICKUP_HALF, PICKUP_ONE, PICKUP_SOME -> {
+                // Empty-cursor pick-up: move whole off-hand stack to cursor.
+                if (!cursorEmpty) {
+                    return;  // shouldn't happen with PICKUP_* but be defensive
+                }
+                event.setCancelled(true);
+                ItemStack toCursor = offhand.clone();
+                Bukkit.getScheduler().runTask(plugin, () -> {
+                    if (!player.isOnline()) return;
+                    inv.setItemInOffHand(null);
+                    player.setItemOnCursor(toCursor);
+                    player.updateInventory();
+                });
             }
-            player.getInventory().setItemInOffHand(null);
-            player.setItemOnCursor(offhand);
-            player.updateInventory();
-        });
+            case SWAP_WITH_CURSOR -> {
+                // Cursor and off-hand swap (cursor holds a different stack).
+                if (cursorEmpty) {
+                    return;  // collapse-with-empty-cursor is handled above
+                }
+                event.setCancelled(true);
+                ItemStack newOffhand = cursor.clone();
+                ItemStack toCursor = offhand.clone();
+                Bukkit.getScheduler().runTask(plugin, () -> {
+                    if (!player.isOnline()) return;
+                    inv.setItemInOffHand(newOffhand);
+                    player.setItemOnCursor(toCursor);
+                    player.updateInventory();
+                });
+            }
+            case MOVE_TO_OTHER_INVENTORY -> {
+                // Shift-click: send off-hand stack to the first slot that
+                // accepts it. If nothing accepts (inventory full), leave the
+                // item where it is so we never lose it silently.
+                event.setCancelled(true);
+                ItemStack snapshot = offhand.clone();
+                Bukkit.getScheduler().runTask(plugin, () -> {
+                    if (!player.isOnline()) return;
+                    inv.setItemInOffHand(null);
+                    Map<Integer, ItemStack> overflow = inv.addItem(snapshot);
+                    if (!overflow.isEmpty()) {
+                        // Couldn't place; restore so the player doesn't lose it.
+                        inv.setItemInOffHand(snapshot);
+                    }
+                    player.updateInventory();
+                });
+            }
+            case HOTBAR_SWAP, HOTBAR_MOVE_AND_READD -> {
+                // Number-key swap: off-hand <-> chosen hotbar slot.
+                int hotbar = event.getHotbarButton();
+                if (hotbar < 0 || hotbar > 8) {
+                    return;
+                }
+                event.setCancelled(true);
+                ItemStack snapshot = offhand.clone();
+                Bukkit.getScheduler().runTask(plugin, () -> {
+                    if (!player.isOnline()) return;
+                    ItemStack hotbarItem = inv.getItem(hotbar);
+                    inv.setItemInOffHand(hotbarItem);
+                    inv.setItem(hotbar, snapshot);
+                    player.updateInventory();
+                });
+            }
+            case DROP_ALL_SLOT, DROP_ONE_SLOT -> {
+                // Drop key on the off-hand slot: drop the off-hand item naturally.
+                event.setCancelled(true);
+                ItemStack toDrop = action == InventoryAction.DROP_ONE_SLOT
+                    ? singleItem(offhand)
+                    : offhand.clone();
+                Bukkit.getScheduler().runTask(plugin, () -> {
+                    if (!player.isOnline()) return;
+                    if (action == InventoryAction.DROP_ONE_SLOT && offhand.getAmount() > 1) {
+                        ItemStack remaining = offhand.clone();
+                        remaining.setAmount(remaining.getAmount() - 1);
+                        inv.setItemInOffHand(remaining);
+                    } else {
+                        inv.setItemInOffHand(null);
+                    }
+                    player.getWorld().dropItemNaturally(player.getLocation(), toDrop);
+                    player.updateInventory();
+                });
+            }
+            default -> {
+                // PLACE_*, NOTHING, COLLECT_TO_CURSOR, etc. — leave to default
+                // Bukkit behaviour. They generally do not strand items in the
+                // off-hand for the Bedrock player.
+            }
+        }
     }
 
     /**
-     * Whether Bedrock's native UI is known to permit dragging this item type
-     * out of the off-hand slot. Used only to decide whether the action-bar
-     * hint about the retrieval workaround is worth showing.
+     * Returns a clone of {@code stack} with amount = 1, for the DROP_ONE_SLOT
+     * action where vanilla drops a single item from the slot regardless of
+     * stack size.
      */
-    private static boolean isBedrockOffhandFriendly(Material type) {
-        return switch (type) {
-            case SHIELD, TOTEM_OF_UNDYING, FILLED_MAP, MAP,
-                FIREWORK_ROCKET, WRITABLE_BOOK, WRITTEN_BOOK -> true;
-            default -> false;
-        };
+    private static ItemStack singleItem(ItemStack stack) {
+        ItemStack one = stack.clone();
+        one.setAmount(1);
+        return one;
     }
 
     /**

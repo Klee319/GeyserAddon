@@ -749,22 +749,34 @@ public final class GeyserExtraPaper extends JavaPlugin {
     }
 
     /**
-     * Builds a human-readable display name fallback for a pack-first registration.
+     * Builds a vanilla-style display name fallback for a pack-first registration.
      *
-     * <p>Why: when {@code displayName} is null, Geyser falls back to the Bedrock
-     * identifier ({@code geyserextra:custom_diamond_sword_100}) which the
-     * Bedrock client renders as raw-id-looking text. The runtime scanner
-     * replaces this with the player's actual display name once they touch the
-     * item, but until then we want a more presentable placeholder. The output
-     * is derived from the base material so it carries no information the pack
-     * didn't already provide; the CMD suffix keeps variants distinguishable
-     * in inventory and creative menu.</p>
+     * <p>Why a fallback is needed at all: the pack-first registration path
+     * derives entries from {@code assets/&lt;ns&gt;/models/item/*.json} and
+     * {@code assets/&lt;ns&gt;/items/*.json}, which describe geometry and
+     * texture but carry no display-name information. The display name a
+     * Java player sees comes from {@link org.bukkit.inventory.meta.ItemMeta}
+     * set by the plugin that produced the {@link ItemStack} (or, in some
+     * packs, a translation key resolved against {@code assets/&lt;ns&gt;/lang/*.json}).
+     * Pack-first registration has neither in hand, so {@code displayName} is
+     * null at that moment — Geyser then falls back to the Bedrock identifier,
+     * which Bedrock renders as raw-id-looking text.</p>
+     *
+     * <p>Vanilla Java's own fallback is to display the <em>base material's</em>
+     * built-in name (a CMD diamond sword without an ItemMeta display name
+     * shows simply as "Diamond Sword"). We mirror that: the pack-first
+     * placeholder is the prettified base item name with no extra decoration,
+     * so a Bedrock player sees what a Java player would see for the same
+     * un-named item. Once the runtime scanner observes an actual ItemStack
+     * with {@link org.bukkit.inventory.meta.ItemMeta#displayName()} set
+     * (e.g. a plugin's recipe result), it upgrades the mapping to that name
+     * via {@code CustomItemScanner.scanItem}.</p>
      */
     private static String deriveFallbackDisplayName(String baseItem, int cmd) {
         String trimmed = baseItem.startsWith("minecraft:")
             ? baseItem.substring("minecraft:".length())
             : baseItem;
-        StringBuilder pretty = new StringBuilder(trimmed.length() + 8);
+        StringBuilder pretty = new StringBuilder(trimmed.length());
         boolean upcaseNext = true;
         for (int i = 0; i < trimmed.length(); i++) {
             char c = trimmed.charAt(i);
@@ -778,7 +790,7 @@ public final class GeyserExtraPaper extends JavaPlugin {
                 pretty.append(c);
             }
         }
-        return pretty + " #" + cmd;
+        return pretty.toString();
     }
 
     /**
