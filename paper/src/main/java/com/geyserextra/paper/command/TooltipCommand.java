@@ -161,7 +161,7 @@ public final class TooltipCommand implements CommandExecutor {
             for (Map.Entry<Enchantment, Integer> entry : enchantments.entrySet()) {
                 try {
                     String enchantName = TranslationUtil.renderJapanese(
-                            Component.translatable(entry.getKey().translationKey()));
+                            Component.translatable(entry.getKey()));
                     sb.append("  ").append(enchantName)
                         .append(" Lv.").append(entry.getValue()).append("\n");
                 } catch (Exception e) {
@@ -180,7 +180,7 @@ public final class TooltipCommand implements CommandExecutor {
                 for (Map.Entry<Enchantment, Integer> entry : storedEnchants.entrySet()) {
                     try {
                         String enchantName = TranslationUtil.renderJapanese(
-                                Component.translatable(entry.getKey().translationKey()));
+                                Component.translatable(entry.getKey()));
                         sb.append("  ").append(enchantName)
                             .append(" Lv.").append(entry.getValue()).append("\n");
                     } catch (Exception e) {
