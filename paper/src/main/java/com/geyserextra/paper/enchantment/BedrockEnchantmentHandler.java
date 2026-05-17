@@ -8,10 +8,12 @@ import com.comphenix.protocol.events.PacketAdapter;
 import com.comphenix.protocol.events.PacketContainer;
 import com.comphenix.protocol.events.PacketEvent;
 import com.comphenix.protocol.events.PacketListener;
+import com.geyserextra.core.api.CustomItemMapping;
 import com.geyserextra.core.config.GeyserExtraConfig.EnchantmentConfig;
 import com.geyserextra.paper.GeyserExtraPaper;
 
 import io.papermc.paper.datacomponent.DataComponentTypes;
+import io.papermc.paper.datacomponent.item.CustomModelData;
 
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
@@ -420,9 +422,23 @@ public final class BedrockEnchantmentHandler implements Listener {
         }
 
         if (wantDisplayNameFallback && !clonedMeta.hasDisplayName()) {
+            // Fallback chain for items whose server-side ItemStack lacks a display
+            // name but whose CMD says they should look custom on Bedrock:
+            //   1. ItemMappingRegistry: if a prior runtime scan saw an instance
+            //      with ItemMeta.displayName set, that text is stored here. This
+            //      is the path that recovers the Java-preview-equivalent name
+            //      (e.g. "Fire Sword") when the current ItemStack happens to
+            //      have been built without ItemMeta (recipe results that only
+            //      get a name on the final consume, etc.).
+            //   2. Base material prettified name as a last resort so we never
+            //      surface a raw "geyser_custom:..." identifier to the player.
+            String fallback = lookupRegistryDisplayName(item);
+            if (fallback == null) {
+                fallback = prettifyMaterialName(item.getType());
+            }
             // Italic-disabled to match vanilla style (display names are non-italic;
             // only the default lore-derived "renamed in anvil" italic case applies).
-            clonedMeta.displayName(Component.text(prettifyMaterialName(item.getType()))
+            clonedMeta.displayName(Component.text(fallback)
                 .decoration(net.kyori.adventure.text.format.TextDecoration.ITALIC, false));
             changed = true;
         }
@@ -463,6 +479,49 @@ public final class BedrockEnchantmentHandler implements Listener {
                 || item.hasData(DataComponentTypes.ITEM_NAME);
         } catch (Throwable t) {
             return false;
+        }
+    }
+
+    /**
+     * Looks up the item's {@code (baseItem, CMD)} pair in the registry and
+     * returns its stored display name, or {@code null} when no entry exists
+     * or the entry has no name.
+     *
+     * <p>Why: the runtime scanner records the literal {@code ItemMeta.displayName}
+     * the first time it sees an instance of a CMD item, so even when later
+     * ItemStacks of the same identity arrive without ItemMeta (recipe-result
+     * snapshots, programmatic give operations, etc.) the registry remembers
+     * the human-readable name. Falling back through this map makes the
+     * Bedrock-side display match the Java preview without having to parse
+     * Java pack lang files.</p>
+     */
+    private String lookupRegistryDisplayName(ItemStack item) {
+        if (item == null) {
+            return null;
+        }
+        try {
+            if (!item.hasData(DataComponentTypes.CUSTOM_MODEL_DATA)) {
+                return null;
+            }
+            CustomModelData cmd = item.getData(DataComponentTypes.CUSTOM_MODEL_DATA);
+            if (cmd == null || cmd.floats() == null || cmd.floats().isEmpty()) {
+                return null;
+            }
+            int cmdValue = cmd.floats().get(0).intValue();
+            if (cmdValue <= 0) {
+                return null;
+            }
+            String baseItem = item.getType().getKey().toString();
+            CustomItemMapping mapping = plugin.getItemMappingRegistry()
+                .getByCustomModelData(baseItem, cmdValue)
+                .orElse(null);
+            if (mapping == null) {
+                return null;
+            }
+            String name = mapping.displayName();
+            return name != null && !name.isBlank() ? name : null;
+        } catch (Throwable t) {
+            return null;
         }
     }
 
