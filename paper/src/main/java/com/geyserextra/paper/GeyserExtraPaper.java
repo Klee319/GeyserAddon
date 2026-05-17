@@ -87,8 +87,12 @@ public final class GeyserExtraPaper extends JavaPlugin {
     // Lazily loaded once per startup from the operator-supplied Java pack.
     // Cached so the runtime scanner and the ProtocolLib display-name fallback
     // path can both resolve TranslatableComponent display names without
-    // re-reading lang JSONs per query.
-    private JavaPackLangReader javaPackLangReader = JavaPackLangReader.empty();
+    // re-reading lang JSONs per query. Marked volatile because the write
+    // happens on the main thread inside saveRegistriesToSharedFolder() while
+    // the reads happen on ProtocolLib's packet-handling threads — without
+    // volatile, a freshly loaded reader could still appear as the empty
+    // sentinel to a packet thread that cached the field reference.
+    private volatile JavaPackLangReader javaPackLangReader = JavaPackLangReader.empty();
 
     @Override
     public void onEnable() {
@@ -740,7 +744,14 @@ public final class GeyserExtraPaper extends JavaPlugin {
     ) {
         int added = 0;
         int skipped = 0;
-        for (JavaPackReader.CmdKey key : packEntries.keySet()) {
+        // Snapshot the volatile field once per call so every mapping in this
+        // batch sees a consistent reader (the load that populated it ran
+        // before us, so the snapshot is already the final reader).
+        JavaPackLangReader langSnapshot = javaPackLangReader;
+        for (Map.Entry<JavaPackReader.CmdKey, JavaPackReader.JavaModelDefinition> entry
+            : packEntries.entrySet()) {
+            JavaPackReader.CmdKey key = entry.getKey();
+            JavaPackReader.JavaModelDefinition def = entry.getValue();
             if (itemMappingRegistry.getByCustomModelData(key.baseItem(), key.cmd()).isPresent()) {
                 skipped++;
                 continue;
@@ -755,7 +766,7 @@ public final class GeyserExtraPaper extends JavaPlugin {
                 key.baseItem(),
                 key.cmd(),
                 false,   // unbreakable unknown from pack alone
-                deriveFallbackDisplayName(key.baseItem(), key.cmd()),
+                deriveFallbackDisplayName(key, def, langSnapshot),
                 null,    // icon falls back to name via item_texture.json
                 CustomItemMapping.CREATIVE_CATEGORY_ITEMS,
                 null,    // creative group unset
@@ -771,30 +782,84 @@ public final class GeyserExtraPaper extends JavaPlugin {
     }
 
     /**
-     * Builds a vanilla-style display name fallback for a pack-first registration.
+     * Builds the best display name we can derive for a pack-first registration.
      *
-     * <p>Why a fallback is needed at all: the pack-first registration path
-     * derives entries from {@code assets/&lt;ns&gt;/models/item/*.json} and
-     * {@code assets/&lt;ns&gt;/items/*.json}, which describe geometry and
-     * texture but carry no display-name information. The display name a
-     * Java player sees comes from {@link org.bukkit.inventory.meta.ItemMeta}
-     * set by the plugin that produced the {@link ItemStack} (or, in some
-     * packs, a translation key resolved against {@code assets/&lt;ns&gt;/lang/*.json}).
-     * Pack-first registration has neither in hand, so {@code displayName} is
-     * null at that moment — Geyser then falls back to the Bedrock identifier,
-     * which Bedrock renders as raw-id-looking text.</p>
+     * <p>Resolution chain (most-authoritative first):
+     * <ol>
+     *   <li><b>Lang-resolved customary translation key</b>: Mojang's convention
+     *       places an item's display name at {@code item.<namespace>.<name>},
+     *       where {@code <name>} is the model reference's terminal path
+     *       component. When the operator's Java pack ships a lang file (and
+     *       follows the convention), the resolved text matches exactly what a
+     *       Java player sees, giving Bedrock parity with zero extra config.</li>
+     *   <li><b>Prettified base material name</b>: vanilla Java's own fallback
+     *       for an un-named CMD item — "diamond_sword" → "Diamond Sword".
+     *       Used when no lang resolution is available; mirrors the legacy
+     *       behaviour so existing operators see no regression.</li>
+     * </ol>
+     * </p>
      *
-     * <p>Vanilla Java's own fallback is to display the <em>base material's</em>
-     * built-in name (a CMD diamond sword without an ItemMeta display name
-     * shows simply as "Diamond Sword"). We mirror that: the pack-first
-     * placeholder is the prettified base item name with no extra decoration,
-     * so a Bedrock player sees what a Java player would see for the same
-     * un-named item. Once the runtime scanner observes an actual ItemStack
-     * with {@link org.bukkit.inventory.meta.ItemMeta#displayName()} set
-     * (e.g. a plugin's recipe result), it upgrades the mapping to that name
-     * via {@code CustomItemScanner.scanItem}.</p>
+     * <p>Once the runtime scanner observes an actual ItemStack with
+     * {@link org.bukkit.inventory.meta.ItemMeta#displayName()} set, it
+     * upgrades the mapping via {@code CustomItemScanner.scanItem}; this
+     * fallback is only the bootstrap placeholder.</p>
      */
-    private static String deriveFallbackDisplayName(String baseItem, int cmd) {
+    private static String deriveFallbackDisplayName(
+        JavaPackReader.CmdKey key,
+        JavaPackReader.JavaModelDefinition def,
+        JavaPackLangReader langReader
+    ) {
+        if (def != null && langReader != null && !langReader.isEmpty()) {
+            String guessed = guessItemTranslationKey(def.modelRef());
+            if (guessed != null) {
+                try {
+                    String resolved = langReader.resolve(guessed);
+                    if (resolved != null && !resolved.isBlank()) {
+                        return resolved;
+                    }
+                } catch (RuntimeException ignored) {
+                    // resolver failure → continue to material-name fallback
+                }
+            }
+        }
+        return prettifyBaseItemName(key.baseItem());
+    }
+
+    /**
+     * Guesses the Mojang-convention translation key for a model reference.
+     *
+     * <p>Examples:
+     * <ul>
+     *   <li>{@code "mymod:item/fire_sword"} → {@code "item.mymod.fire_sword"}</li>
+     *   <li>{@code "minecraft:item/diamond_sword"} → {@code "item.minecraft.diamond_sword"}</li>
+     *   <li>{@code "fire_sword"} → {@code "item.minecraft.fire_sword"} (no namespace)</li>
+     * </ul>
+     * </p>
+     *
+     * <p>Returns {@code null} when {@code modelRef} is blank or has no
+     * recoverable terminal name — the caller then falls back to the material
+     * name.</p>
+     */
+    private static String guessItemTranslationKey(String modelRef) {
+        if (modelRef == null || modelRef.isBlank()) {
+            return null;
+        }
+        int colon = modelRef.indexOf(':');
+        String namespace = colon >= 0 ? modelRef.substring(0, colon) : "minecraft";
+        String path = colon >= 0 ? modelRef.substring(colon + 1) : modelRef;
+        int slash = path.lastIndexOf('/');
+        String name = slash >= 0 ? path.substring(slash + 1) : path;
+        if (name.isBlank() || namespace.isBlank()) {
+            return null;
+        }
+        return "item." + namespace + "." + name;
+    }
+
+    /**
+     * Prettifies a {@code namespace:path} item identifier into the
+     * vanilla-style display string ("diamond_sword" → "Diamond Sword").
+     */
+    private static String prettifyBaseItemName(String baseItem) {
         String trimmed = baseItem.startsWith("minecraft:")
             ? baseItem.substring("minecraft:".length())
             : baseItem;

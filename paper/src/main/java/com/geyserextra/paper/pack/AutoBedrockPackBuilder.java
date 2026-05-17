@@ -24,18 +24,29 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
 /**
- * Builds a minimal Bedrock resource pack ZIP that maps every detected custom item
- * onto the matching vanilla BE item texture.
+ * Builds a Bedrock resource pack ZIP that mirrors the operator-supplied Java
+ * pack's custom textures onto Geyser-registered custom items.
  *
- * Why: Geyser's custom item registration assigns each mapping a new BE item ID
- * whose icon is resolved through {@code item_texture.json}. With no resource pack,
- * those IDs render as missing textures. A textureless pack that points every
- * generated icon key at the corresponding vanilla path (e.g. {@code textures/items/diamond_sword})
- * makes the BE client fall back to the bundled vanilla texture, so admins do not
- * need to author a custom pack just to make crafting/recipe-book work.
+ * <p>Why: Geyser's custom item registration assigns each mapping a new BE item
+ * ID whose icon is resolved through {@code item_texture.json}. Without a
+ * companion BE pack, those IDs render as missing textures on Bedrock clients.
+ * This builder generates a pack that bundles the PNG textures sourced from the
+ * Java pack and points the matching item_texture entries at them so a Bedrock
+ * player sees the same custom artwork a Java player does.</p>
  *
- * The pack contains only manifest.json, a placeholder icon, and item_texture.json —
- * no PNGs are bundled.
+ * <p><b>Strict policy: only items whose Java pack supplies a custom texture
+ * are written into the generated pack.</b> CMD mappings without a matching
+ * Java pack texture (vanilla-look-only entries used purely to disambiguate
+ * recipes, etc.) are intentionally omitted from {@code item_texture.json}.
+ * Including them would bloat the pack with vanilla-fallback rows and clash
+ * with the user-stated invariant that "the auto-pack contains only items the
+ * Java pack actually customised". Items skipped here still receive their
+ * Geyser identity (so naming and predicates work); only the visual falls back
+ * to Bedrock's default item icon.</p>
+ *
+ * <p>The pack contains {@code manifest.json}, a placeholder
+ * {@code pack_icon.png}, the copied PNG textures, and the strict
+ * {@code item_texture.json}.</p>
  */
 public final class AutoBedrockPackBuilder {
 
@@ -311,14 +322,20 @@ public final class AutoBedrockPackBuilder {
     }
 
     /**
+     * Builds the strict {@code item_texture.json}: only icon keys that were
+     * actually backed by a Java-pack-supplied PNG (recorded in
+     * {@code customIconToTexturePath}) end up in the output. Mappings without
+     * a custom texture are deliberately omitted — see the class Javadoc for
+     * the rationale.
+     *
      * @param customIconToTexturePath icon-key -> custom texture path (without
      *        the trailing {@code .png}) for items whose textures were copied
-     *        from the Java pack. Missing entries fall back to the vanilla
-     *        Bedrock texture for the base item.
+     *        from the Java pack. Mappings absent from this map are skipped.
      * @param logger optional logger; when non-null, warns once per icon-key
      *        collision so an operator can see when two distinct mappings
      *        collapse to the same Bedrock identity (one will lose its
-     *        texture).
+     *        texture), and reports the count of mappings dropped because no
+     *        Java-pack texture was supplied.
      */
     private static String buildItemTextureJson(
         Collection<CustomItemMapping> mappings,
@@ -331,6 +348,8 @@ public final class AutoBedrockPackBuilder {
 
         Map<String, Map<String, String>> textureData = new LinkedHashMap<>();
         Map<String, String> seenIconKeys = new LinkedHashMap<>();  // iconKey -> first mapping name that claimed it
+        int skippedNoCustomTexture = 0;
+        int skippedCollision = 0;
         for (CustomItemMapping mapping : mappings) {
             // Sanitize to the same form Extension's CustomItemsHandler uses when
             // registering the icon key. Without this transform, mapping names
@@ -338,11 +357,19 @@ public final class AutoBedrockPackBuilder {
             // produce a key here that does not match the registered icon, and
             // Bedrock would silently fail to find the texture.
             String iconKey = toBedrockIconKey(mapping.name());
+            String customPath = customIconToTexturePath.get(iconKey);
+            if (customPath == null) {
+                // Strict policy: items without a Java-pack-supplied texture are
+                // not written into the auto-generated pack. They keep their
+                // Geyser registration so naming/predicates still work; only the
+                // visual falls back to the Bedrock default icon.
+                skippedNoCustomTexture++;
+                continue;
+            }
             // Dedup: if multiple registry entries collapse to the same sanitized
-            // key, only the first wins. The loser will be missing from item_texture.json
-            // and Bedrock will fall back to its default icon. Surface this loudly
-            // so an operator can rename the offender; with a silent skip the
-            // texture-not-applied result would be invisible to diagnostics.
+            // key, only the first wins. Surface this loudly so an operator can
+            // rename the offender; with a silent skip the texture-not-applied
+            // result would be invisible to diagnostics.
             String previous = seenIconKeys.putIfAbsent(iconKey, mapping.name());
             if (previous != null) {
                 if (logger != null) {
@@ -350,17 +377,21 @@ public final class AutoBedrockPackBuilder {
                         + "' claimed by '" + previous + "', dropping later mapping '"
                         + mapping.name() + "' (texture will not be applied for the duplicate)");
                 }
+                skippedCollision++;
                 continue;
             }
-            String texturePath = customIconToTexturePath.getOrDefault(
-                iconKey,
-                vanillaTexturePathFor(mapping.baseItem())
-            );
             Map<String, String> entry = new LinkedHashMap<>();
-            entry.put("textures", texturePath);
+            entry.put("textures", customPath);
             textureData.put(iconKey, entry);
         }
         root.put("texture_data", textureData);
+
+        if (logger != null && (skippedNoCustomTexture > 0 || skippedCollision > 0)) {
+            logger.info("[AutoPack] item_texture.json (strict): wrote " + textureData.size()
+                + " entries, skipped " + skippedNoCustomTexture
+                + " mapping(s) with no Java-pack texture, " + skippedCollision
+                + " mapping(s) due to icon-key collision");
+        }
 
         return JsonUtil.toPrettyJson(root);
     }
