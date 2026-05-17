@@ -372,21 +372,27 @@ public final class BedrockEnchantmentHandler implements Listener {
         // Fast pre-filter: an item is a candidate for the slow path only if at
         // least one of the responsibilities has a reason to fire.
         //   - Lore branch needs lore enabled AND a damageable / enchanted item
-        //   - displayName branch needs either a CMD component OR an item whose
-        //     server-side identity is carried purely through ItemMeta (PDC
-        //     plugins, other plugins' renamed-but-no-CMD items). The identity
-        //     check is deferred to hasResolvedServerSideDisplayName.
-        //   - The hasItemMeta() short-circuit is intentionally cheap: it is a
-        //     boolean field probe in Paper, no allocation, so adding it to the
-        //     hot path is acceptable in exchange for never silently dropping
-        //     a PDC-only or display-named item from the injection pipeline.
+        //   - displayName branch needs a CMD component (its identity check is
+        //     deferred to hasResolvedServerSideDisplayName)
+        // Items that fail both predicates are returned untouched without
+        // paying for a getItemMeta() snapshot. Most inventory items (food,
+        // materials, blocks) hit this short-circuit.
+        //
+        // Why we DON'T include hasItemMeta() here: an earlier revision tried
+        // that to catch CMD-less PDC-based items, but it also matched vanilla
+        // enchanted books / armour with literal-text displayName missing, and
+        // pushed them through the displayName fallback which forced an
+        // English "Enchanted Book" rendering on non-English Bedrock clients
+        // (the prettifyMaterialName fallback never runs through lang
+        // resolution). PDC-only items now keep whatever Geyser would have
+        // displayed by default until the scanner-side fix gives them a
+        // proper display name in the registry.
         boolean potentiallyDamageable = item.getType().getMaxDurability() > 0;
         boolean possiblyEnchanted = !item.getEnchantments().isEmpty()
             || item.getType() == Material.ENCHANTED_BOOK;
         boolean possiblyCmd = hasCustomModelData(item);
-        boolean hasMeta = item.hasItemMeta();
         boolean loreCandidate = loreEnabled && (potentiallyDamageable || possiblyEnchanted);
-        if (!loreCandidate && !possiblyCmd && !hasMeta) {
+        if (!loreCandidate && !possiblyCmd) {
             return null;
         }
 
@@ -430,22 +436,19 @@ public final class BedrockEnchantmentHandler implements Listener {
         }
 
         // Decide whether the item also needs the fallback display-name fix.
-        // Why: a Geyser-registered custom item without a Bedrock-resolvable
-        // display name renders on Bedrock as the registered Geyser identifier
-        // (e.g. "gmdl_abc1234" or the custom_items.json `name` field). We
-        // need to inject a readable name when:
+        // Why: a CMD item without a Bedrock-resolvable display name renders
+        // on Bedrock as the registered Geyser identifier (e.g.
+        // "gmdl_abc1234"). We need to inject a readable name when:
         //   (a) The item has no ItemMeta display name at all, or
         //   (b) The item's display name is a TranslatableComponent whose key
         //       Bedrock cannot resolve — Java-side lang resolution returns
         //       readable text, but the Bedrock client only knows its own
         //       built-in translation keys, so the key would surface as-is.
-        // The condition is broadened from "possiblyCmd only" to "possiblyCmd
-        // OR hasMeta", because other-plugin items that surface in Geyser as
-        // custom items may carry their identity through PDC / a literal
-        // displayName rather than the CUSTOM_MODEL_DATA component. Items
-        // with a literal Text display name still short-circuit safely via
-        // hasResolvedServerSideDisplayName so legitimate names are kept.
-        boolean wantDisplayNameFallback = (possiblyCmd || hasMeta)
+        // Items with a literal Text display name are left alone — their NBT
+        // already carries the right label and Geyser forwards it correctly.
+        // Scoped to possiblyCmd only: see the fast pre-filter comment for
+        // why broadening to hasMeta would force-rename vanilla items.
+        boolean wantDisplayNameFallback = possiblyCmd
             && !hasResolvedServerSideDisplayName(item);
 
         boolean hasInjectedLeftover = containsInjectedLoreMarker(item);
