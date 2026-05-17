@@ -68,10 +68,22 @@ public final class BedrockEnchantmentHandler implements Listener {
      * Invisible prefix prepended to every lore line we inject. Used to strip
      * previously-injected lines on the next packet so the tooltip cannot
      * accumulate when a re-broadcast SET_SLOT carries lore that was the
-     * result of our own prior injection. Zero-width space renders nothing on
-     * either Java or Bedrock clients, so the player never sees it.
+     * result of our own prior injection.
+     *
+     * <p>Composition:
+     * <ul>
+     *   <li>{@code U+E000} — Private Use Area codepoint, guaranteed not to
+     *       collide with any operator-authored text because the Unicode
+     *       consortium reserves this range for application-specific use.</li>
+     *   <li>{@code "GE"} sentinel — distinguishes our marker from any other
+     *       application that might happen to use {@code U+E000} for its own
+     *       purposes (extremely unlikely on a Minecraft text channel).</li>
+     * </ul>
+     * Renders as nothing on either Java or Bedrock clients (PUA codepoints
+     * without a font glyph display as no-op tofu, but the surrounding lore
+     * text continues on the same line), so the player never sees it.</p>
      */
-    private static final String INJECTED_LORE_MARKER = "​";
+    private static final String INJECTED_LORE_MARKER = "GE";
 
     private final GeyserExtraPaper plugin;
     private final FloodgateApi floodgateApi;
@@ -661,6 +673,16 @@ public final class BedrockEnchantmentHandler implements Listener {
                     ? translatable.fallback()
                     : translatable.key();
             }
+            // Substitute Minecraft-style placeholders (%s, %1$s) in the
+            // resolved template with the recursively-resolved arguments.
+            // Without this step, translations that reference another
+            // value — e.g. "death.attack.player" = "%1$s was slain by %2$s"
+            // — would render as the bare template string with the
+            // placeholders intact.
+            List<String> argsAsText = collectArgumentsAsText(translatable, langReader);
+            if (!argsAsText.isEmpty()) {
+                resolved = applyMinecraftPlaceholders(resolved, argsAsText);
+            }
             current = net.kyori.adventure.text.Component.text(resolved).style(translatable.style());
         }
         List<net.kyori.adventure.text.Component> originalChildren = node.children();
@@ -672,6 +694,117 @@ public final class BedrockEnchantmentHandler implements Listener {
             newChildren.add(resolveTranslatablesInTree(child, langReader));
         }
         return current.children(newChildren);
+    }
+
+    /**
+     * Serialises each {@link net.kyori.adventure.text.TranslatableComponent}
+     * argument to plain text, recursively resolving nested TranslatableComponents
+     * so a "%s" placeholder can never leak another translation key.
+     *
+     * <p>Adventure 4.15 changed {@code arguments()} from {@code List<Component>}
+     * to {@code List<TranslationArgument>}. Both shapes are handled
+     * defensively so the class compiles against either era and degrades
+     * to an empty list rather than throwing on an API mismatch.</p>
+     */
+    private static List<String> collectArgumentsAsText(
+        net.kyori.adventure.text.TranslatableComponent translatable,
+        JavaPackLangReader langReader
+    ) {
+        List<String> out = new ArrayList<>();
+        try {
+            for (Object arg : translatable.arguments()) {
+                net.kyori.adventure.text.Component argComponent;
+                if (arg instanceof net.kyori.adventure.text.Component c) {
+                    argComponent = c;
+                } else if (arg instanceof net.kyori.adventure.translation.Translatable t) {
+                    argComponent = net.kyori.adventure.text.Component.translatable(t);
+                } else if (arg != null) {
+                    // Adventure 4.15+ TranslationArgument: probe asComponent()
+                    // reflectively so this code keeps compiling on older
+                    // Adventure builds that returned List<Component> directly.
+                    try {
+                        Object result = arg.getClass().getMethod("asComponent").invoke(arg);
+                        if (result instanceof net.kyori.adventure.text.Component c2) {
+                            argComponent = c2;
+                        } else {
+                            argComponent = net.kyori.adventure.text.Component.text(String.valueOf(arg));
+                        }
+                    } catch (Throwable inner) {
+                        argComponent = net.kyori.adventure.text.Component.text(String.valueOf(arg));
+                    }
+                } else {
+                    argComponent = net.kyori.adventure.text.Component.empty();
+                }
+                net.kyori.adventure.text.Component resolvedArg =
+                    resolveTranslatablesInTree(argComponent, langReader);
+                String plain = net.kyori.adventure.text.serializer.plain
+                    .PlainTextComponentSerializer.plainText().serialize(resolvedArg);
+                out.add(plain != null ? plain : "");
+            }
+        } catch (Throwable ignored) {
+            // Adventure API quirk → return whatever was collected so far.
+        }
+        return out;
+    }
+
+    /**
+     * Substitutes Minecraft-style {@code %s} / {@code %N$s} placeholders in
+     * {@code template} with the supplied arguments. Positional {@code %s}
+     * consumes arguments in declaration order; numbered {@code %1$s},
+     * {@code %2$s}, … look up the argument by 1-based index. {@code %%} is
+     * an escape for a literal percent. Out-of-range placeholders are left
+     * intact so a malformed template surfaces visibly rather than dropping
+     * silently.
+     */
+    private static String applyMinecraftPlaceholders(String template, List<String> args) {
+        if (template == null || template.isEmpty() || args.isEmpty()) {
+            return template;
+        }
+        StringBuilder out = new StringBuilder(template.length() + 16);
+        int positional = 0;
+        int i = 0;
+        int length = template.length();
+        while (i < length) {
+            char c = template.charAt(i);
+            if (c == '%' && i + 1 < length) {
+                char next = template.charAt(i + 1);
+                if (next == '%') {
+                    out.append('%');
+                    i += 2;
+                    continue;
+                }
+                if (next == 's') {
+                    if (positional < args.size()) {
+                        out.append(args.get(positional++));
+                    } else {
+                        out.append("%s");
+                    }
+                    i += 2;
+                    continue;
+                }
+                if (Character.isDigit(next)) {
+                    int j = i + 1;
+                    int num = 0;
+                    while (j < length && Character.isDigit(template.charAt(j))) {
+                        num = num * 10 + (template.charAt(j) - '0');
+                        j++;
+                    }
+                    if (j + 1 < length && template.charAt(j) == '$' && template.charAt(j + 1) == 's') {
+                        int idx = num - 1;
+                        if (idx >= 0 && idx < args.size()) {
+                            out.append(args.get(idx));
+                        } else {
+                            out.append(template, i, j + 2);
+                        }
+                        i = j + 2;
+                        continue;
+                    }
+                }
+            }
+            out.append(c);
+            i++;
+        }
+        return out.toString();
     }
 
     /**
