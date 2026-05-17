@@ -624,10 +624,6 @@ public final class GeyserExtraPaper extends JavaPlugin {
 
             if (config.customItems().enabled()) {
                 Path itemsPath = extensionFolder.resolve(CUSTOM_ITEMS_FILE);
-                itemMappingRegistry.save(itemsPath);
-                if (debug) {
-                    getLogger().info("Saved " + itemMappingRegistry.size() + " items.");
-                }
 
                 // Why: Geyser custom items render as missing texture without an item_texture.json
                 // entry. Generate a pack that points every mapping at the matching vanilla
@@ -671,8 +667,20 @@ public final class GeyserExtraPaper extends JavaPlugin {
                         javaPackLangReader = JavaPackLangReader.empty();
                     }
                 }
+
+                // Order matters: prepopulate the registry from the Java pack
+                // BEFORE saving custom_items.json, otherwise the Java-pack-
+                // derived entries miss the same-boot save and the Extension
+                // reads a stale file that omits everything the pack
+                // contributed. Auto-pack generation happens last so it sees
+                // the fully-populated registry.
                 if (!javaPackEntries.isEmpty()) {
                     prepopulateRegistryFromJavaPack(javaPackEntries);
+                }
+
+                itemMappingRegistry.save(itemsPath);
+                if (debug) {
+                    getLogger().info("Saved " + itemMappingRegistry.size() + " items.");
                 }
 
                 try {
