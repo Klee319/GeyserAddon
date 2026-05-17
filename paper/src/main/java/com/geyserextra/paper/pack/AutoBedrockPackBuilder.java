@@ -13,6 +13,10 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashSet;
@@ -20,6 +24,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.regex.Pattern;
 import java.util.zip.ZipEntry;
@@ -189,73 +194,165 @@ public final class AutoBedrockPackBuilder {
             Files.createDirectories(parent);
         }
 
-        // Track ZIP entry names we've already written; ZipOutputStream throws on
-        // duplicates, which would abort the whole pack build mid-write. With dedup
-        // we keep the first writer and log the collision instead of crashing.
-        Set<String> writtenEntries = new HashSet<>();
+        // Phase 1 — plan the PNG copies (without writing yet) so we know the
+        // final customIconToTexturePath before we serialize the manifest.
+        // Writing PNGs to disk only happens inside phase 3 below, against the
+        // tmp file. This separation also lets phase 2 hash the rendered
+        // item_texture.json without re-serializing on the hot write path.
+        Map<String, String> customIconToTexturePath = new LinkedHashMap<>();
+        List<TextureCopyTask> pngTasks = new ArrayList<>();
+        Set<String> plannedZipEntries = new HashSet<>();
+        int duplicateSkipCount = 0;
+        for (CustomItemMapping mapping : mappings) {
+            JavaPackReader.CmdKey key = new JavaPackReader.CmdKey(
+                mapping.baseItem(), mapping.customModelData());
+            JavaPackReader.JavaModelDefinition def = javaPackEntries.get(key);
+            if (def == null) {
+                continue;
+            }
+            String iconKey = toBedrockIconKey(mapping.name());
+            String bedrockTextureRelative = "textures/items/" + iconKey;
+            String zipEntry = bedrockTextureRelative + ".png";
+            if (!plannedZipEntries.add(zipEntry)) {
+                duplicateSkipCount++;
+                if (logger != null) {
+                    logger.warning("[AutoPack] duplicate ZIP entry skipped (mapping name "
+                        + "collides with already-written entry): " + zipEntry
+                        + " (mapping=" + mapping.name() + ", key=" + key + ")");
+                }
+                continue;
+            }
+            pngTasks.add(new TextureCopyTask(def.textureFile(), zipEntry, key.toString()));
+            customIconToTexturePath.put(iconKey, bedrockTextureRelative);
+        }
 
-        try (ZipOutputStream zos = new ZipOutputStream(Files.newOutputStream(outputZip))) {
+        // Phase 2 — render item_texture.json from the finalised iconKey map
+        // and derive a content-addressed patch version. The patch version
+        // changes whenever item_texture.json changes, which is what tells
+        // Bedrock clients "this is a new pack, drop your cached copy". Without
+        // this the manifest UUID + version pair stays constant across pack
+        // regenerations and the client silently keeps using stale textures.
+        String itemTextureJson = buildItemTextureJson(mappings, customIconToTexturePath, logger);
+        int patchVersion = patchVersionFromContent(itemTextureJson);
+        String manifestJson = buildManifestJson(patchVersion);
+
+        // Phase 3 — write everything to a sibling .tmp file, then atomic-move
+        // into place. Without the tmp + atomic move, a Bedrock client
+        // streaming the previous pack mid-regeneration would read a corrupt
+        // (truncated) ZIP because Files.newOutputStream defaults to
+        // CREATE + TRUNCATE_EXISTING. The atomic move guarantees the visible
+        // file flips from one valid ZIP to the next in a single filesystem
+        // operation; readers only ever see complete packs.
+        Path tmpZip = outputZip.resolveSibling(outputZip.getFileName() + ".tmp");
+        Set<String> writtenEntries = new HashSet<>();
+        int textureCopyCount = 0;
+        try (ZipOutputStream zos = new ZipOutputStream(Files.newOutputStream(tmpZip))) {
             putEntryUnique(zos, "manifest.json",
-                buildManifestJson().getBytes(StandardCharsets.UTF_8), writtenEntries, logger);
+                manifestJson.getBytes(StandardCharsets.UTF_8), writtenEntries, logger);
             putEntryUnique(zos, "pack_icon.png", buildPackIconPng(), writtenEntries, logger);
 
-            // Track which icon keys were satisfied by a Java pack texture so the
-            // item_texture.json builder can prefer the copied texture over the
-            // vanilla fallback for those entries. The map key is the sanitized
-            // icon key — see toBedrockIconKey() for why this normalization is
-            // required to match Extension's side.
-            Map<String, String> customIconToTexturePath = new LinkedHashMap<>();
-            int textureCopyCount = 0;
-            int duplicateSkipCount = 0;
-            for (CustomItemMapping mapping : mappings) {
-                JavaPackReader.CmdKey key = new JavaPackReader.CmdKey(
-                    mapping.baseItem(), mapping.customModelData());
-                JavaPackReader.JavaModelDefinition def = javaPackEntries.get(key);
-                if (def == null) {
-                    continue;
-                }
-                String iconKey = toBedrockIconKey(mapping.name());
-                String bedrockTextureRelative = "textures/items/" + iconKey;
-                String zipEntry = bedrockTextureRelative + ".png";
-                if (writtenEntries.contains(zipEntry)) {
-                    duplicateSkipCount++;
-                    if (logger != null) {
-                        logger.warning("[AutoPack] duplicate ZIP entry skipped (mapping name "
-                            + "collides with already-written entry): " + zipEntry
-                            + " (mapping=" + mapping.name() + ", key=" + key + ")");
-                    }
-                    continue;
-                }
+            for (TextureCopyTask task : pngTasks) {
                 try {
-                    byte[] pngBytes = Files.readAllBytes(def.textureFile());
-                    putEntryUnique(zos, zipEntry, pngBytes, writtenEntries, logger);
-                    customIconToTexturePath.put(iconKey, bedrockTextureRelative);
+                    byte[] pngBytes = Files.readAllBytes(task.source());
+                    putEntryUnique(zos, task.zipEntry(), pngBytes, writtenEntries, logger);
                     textureCopyCount++;
                     if (debug && logger != null) {
-                        logger.fine("[AutoPack] copied " + def.textureFile() + " -> " + zipEntry);
+                        logger.fine("[AutoPack] copied " + task.source() + " -> " + task.zipEntry());
                     }
                 } catch (IOException ex) {
                     if (logger != null) {
-                        logger.warning("[AutoPack] failed to copy texture for " + key
-                            + " from " + def.textureFile() + ": " + ex.getMessage());
+                        logger.warning("[AutoPack] failed to copy texture for " + task.keyLabel()
+                            + " from " + task.source() + ": " + ex.getMessage());
                     }
                 }
             }
 
             putEntryUnique(zos, "textures/item_texture.json",
-                buildItemTextureJson(mappings, customIconToTexturePath, logger)
-                    .getBytes(StandardCharsets.UTF_8),
-                writtenEntries, logger);
-
-            if (logger != null && !javaPackEntries.isEmpty()) {
-                logger.info("[AutoPack] Java pack texture copy: " + textureCopyCount
-                    + " custom textures applied, "
-                    + (mappings.size() - textureCopyCount - duplicateSkipCount)
-                    + " fell back to vanilla, "
-                    + duplicateSkipCount + " skipped due to duplicate ZIP entry name");
+                itemTextureJson.getBytes(StandardCharsets.UTF_8), writtenEntries, logger);
+        } catch (IOException ioEx) {
+            // Failed to fully write the tmp file — make sure it doesn't
+            // accumulate on disk before propagating the error.
+            try {
+                Files.deleteIfExists(tmpZip);
+            } catch (IOException cleanupEx) {
+                if (logger != null) {
+                    logger.log(Level.WARNING,
+                        "[AutoPack] failed to clean up tmp file after write error", cleanupEx);
+                }
             }
+            throw ioEx;
+        }
+
+        try {
+            Files.move(tmpZip, outputZip,
+                StandardCopyOption.REPLACE_EXISTING,
+                StandardCopyOption.ATOMIC_MOVE);
+        } catch (IOException atomicEx) {
+            // Some filesystems (e.g. cross-mount, certain Windows network
+            // shares) don't support ATOMIC_MOVE. Fall back to REPLACE_EXISTING
+            // alone — the worst case is a brief window where a concurrent
+            // reader sees the new file in a partially-readable state, which
+            // is still strictly better than the previous "truncate then
+            // append" path.
+            if (logger != null) {
+                logger.warning("[AutoPack] atomic move not supported on this filesystem ("
+                    + atomicEx.getMessage() + "); falling back to non-atomic replace");
+            }
+            Files.move(tmpZip, outputZip, StandardCopyOption.REPLACE_EXISTING);
+        }
+
+        if (logger != null && !javaPackEntries.isEmpty()) {
+            logger.info("[AutoPack] Java pack texture copy: " + textureCopyCount
+                + " custom textures applied, "
+                + (mappings.size() - textureCopyCount - duplicateSkipCount)
+                + " fell back to vanilla, "
+                + duplicateSkipCount + " skipped due to duplicate ZIP entry name");
         }
     }
+
+    /**
+     * Hashes {@code itemTextureJson} into a 0..32767 integer suitable for use
+     * as the patch component of the pack's semantic version. Bedrock treats
+     * a (UUID, version) pair as the cache key for resource packs — keeping
+     * version[2] tied to content means clients automatically download a
+     * fresh copy whenever the registry changes, instead of silently re-using
+     * a stale cached pack that no longer matches the live mappings.
+     *
+     * <p>Range is clamped to 0..32767 because some Bedrock manifest parsers
+     * treat each version component as a signed short. SHA-256 is overkill
+     * for the collision space we need but is the only reliably-available
+     * algorithm in the JDK platform, and the cost is negligible at the
+     * mappings.size() scale we handle.</p>
+     */
+    private static int patchVersionFromContent(String itemTextureJson) {
+        if (itemTextureJson == null || itemTextureJson.isEmpty()) {
+            return 0;
+        }
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256")
+                .digest(itemTextureJson.getBytes(StandardCharsets.UTF_8));
+            int value = 0;
+            for (int i = 0; i < 4 && i < digest.length; i++) {
+                value = (value << 8) | (digest[i] & 0xFF);
+            }
+            return Math.abs(value) % 32768;
+        } catch (NoSuchAlgorithmException ex) {
+            // SHA-256 is required by every JDK platform per JEP 414 / spec;
+            // this branch should be unreachable. Return 0 as a deterministic
+            // fallback rather than throwing — the pack still works without
+            // cache busting, just less efficiently.
+            return 0;
+        }
+    }
+
+    /**
+     * Planning record for a single Java-pack PNG that will be copied into the
+     * generated ZIP. Held in a list so phase 1 (planning) can complete
+     * before phase 3 (writing) begins, which is what lets us hash the final
+     * item_texture.json into the manifest version without re-walking the
+     * mapping set twice.
+     */
+    private record TextureCopyTask(Path source, String zipEntry, String keyLabel) {}
 
     /**
      * Writes a ZIP entry only if its name hasn't been used yet. Records the
@@ -302,22 +399,31 @@ public final class AutoBedrockPackBuilder {
         }
     }
 
-    private static String buildManifestJson() {
+    /**
+     * Renders the pack manifest with the given {@code patchVersion} embedded
+     * as the third component of both the header and module {@code version}
+     * tuples. The header and module versions move in lockstep because
+     * Bedrock clients accept (but warn about) a mismatch; keeping them
+     * aligned avoids the warning entirely.
+     */
+    private static String buildManifestJson(int patchVersion) {
         Map<String, Object> root = new LinkedHashMap<>();
         root.put("format_version", 2);
+
+        List<Integer> version = List.of(1, 0, patchVersion);
 
         Map<String, Object> header = new LinkedHashMap<>();
         header.put("name", PACK_NAME);
         header.put("description", PACK_DESCRIPTION);
         header.put("uuid", HEADER_UUID);
-        header.put("version", List.of(1, 0, 0));
+        header.put("version", version);
         header.put("min_engine_version", List.of(1, 16, 100));
         root.put("header", header);
 
         Map<String, Object> module = new LinkedHashMap<>();
         module.put("type", "resources");
         module.put("uuid", MODULE_UUID);
-        module.put("version", List.of(1, 0, 0));
+        module.put("version", version);
         root.put("modules", List.of(module));
 
         return JsonUtil.toPrettyJson(root);
@@ -363,6 +469,7 @@ public final class AutoBedrockPackBuilder {
         int customCount = 0;
         int vanillaFallbackCount = 0;
         int skippedCollision = 0;
+        int skippedNoVanilla = 0;
         for (CustomItemMapping mapping : mappings) {
             // Sanitize to the same form Extension's CustomItemsHandler uses when
             // registering the icon key. Without this transform, mapping names
@@ -391,6 +498,24 @@ public final class AutoBedrockPackBuilder {
                 customCount++;
             } else {
                 texturePath = vanillaTexturePathFor(mapping.baseItem());
+                if (texturePath == null) {
+                    // Modded namespace / unresolvable base item — no Bedrock
+                    // vanilla counterpart exists. Writing an entry here with
+                    // a synthesised "textures/items/mymod:sword"-style path
+                    // would surface as a missing-texture purple/black checker
+                    // on every Bedrock client. Drop the entry and warn so
+                    // the operator can supply a manual Bedrock texture if
+                    // they want a visual for this item.
+                    if (logger != null) {
+                        logger.warning("[AutoPack] no Bedrock vanilla fallback for "
+                            + mapping.baseItem() + " (iconKey=" + iconKey
+                            + "); skipping item_texture entry — operator must "
+                            + "ship a custom Bedrock pack texture or rely on "
+                            + "Geyser's default rendering for this item");
+                    }
+                    skippedNoVanilla++;
+                    continue;
+                }
                 vanillaFallbackCount++;
             }
             Map<String, String> entry = new LinkedHashMap<>();
@@ -403,7 +528,8 @@ public final class AutoBedrockPackBuilder {
             logger.info("[AutoPack] item_texture.json: wrote " + textureData.size()
                 + " entries (" + customCount + " custom, "
                 + vanillaFallbackCount + " vanilla fallback, "
-                + skippedCollision + " skipped due to icon-key collision)");
+                + skippedCollision + " skipped due to icon-key collision, "
+                + skippedNoVanilla + " skipped for missing vanilla fallback)");
         }
 
         return JsonUtil.toPrettyJson(root);
@@ -413,7 +539,9 @@ public final class AutoBedrockPackBuilder {
     private static final String VANILLA_BLOCK_TEXTURE_BASE = "textures/blocks/";
 
     /**
-     * Maps a Java-side base item identifier to the BE vanilla texture path.
+     * Maps a Java-side base item identifier to the BE vanilla texture path,
+     * or {@code null} when no Bedrock vanilla texture exists for the
+     * identifier (e.g. a modded namespace).
      *
      * <p>Bedrock's vanilla resource pack splits textures by type:
      * <ul>
@@ -427,19 +555,34 @@ public final class AutoBedrockPackBuilder {
      * that doesn't exist in Bedrock vanilla and surfaced as a missing-
      * texture purple/black checker on the client. We now consult
      * {@link Material#isBlock()} when the identifier resolves to a known
-     * Material and prefix the correct directory; non-Material identifiers
-     * (modded namespaces) fall back to {@code textures/items/} as
-     * before.</p>
+     * Material and prefix the correct directory.</p>
      *
-     * <p>Most JE/BE item names align (diamond_sword, copper_sword, arrow,
-     * snowball, …). BE clients resolve the result against the bundled
-     * vanilla resource pack when no override exists in our pack, which is
-     * the desired fallback when no Java pack custom texture is supplied.</p>
+     * <p><b>Modded namespaces</b>: a base identifier like {@code mymod:sword}
+     * has no Bedrock vanilla counterpart, and writing it into a path would
+     * produce {@code textures/items/mymod:sword} which Bedrock treats as
+     * invalid (the {@code ':'} is illegal in resource paths). For these
+     * the method returns {@code null}; the caller must drop the
+     * {@code item_texture.json} entry entirely. Operators who want a
+     * Bedrock-side visual for a modded base item must supply a custom
+     * texture via the Java pack mirror or a hand-authored Bedrock pack.</p>
      */
     private static String vanillaTexturePathFor(String baseItem) {
-        String name = baseItem.startsWith(MINECRAFT_NAMESPACE_PREFIX)
-            ? baseItem.substring(MINECRAFT_NAMESPACE_PREFIX.length())
-            : baseItem;
+        if (baseItem == null || baseItem.isBlank()) {
+            return null;
+        }
+        String name;
+        if (baseItem.startsWith(MINECRAFT_NAMESPACE_PREFIX)) {
+            name = baseItem.substring(MINECRAFT_NAMESPACE_PREFIX.length());
+        } else if (baseItem.indexOf(':') < 0) {
+            // No namespace — treat as vanilla (Bukkit's matchMaterial defaults
+            // to minecraft: when fed an unqualified name).
+            name = baseItem;
+        } else {
+            // Modded namespace (mymod:sword, etc.). Bedrock has no
+            // counterpart, so signal "no fallback" rather than synthesising
+            // an invalid path.
+            return null;
+        }
         if (isBlockBaseItem(baseItem)) {
             return VANILLA_BLOCK_TEXTURE_BASE + name;
         }
