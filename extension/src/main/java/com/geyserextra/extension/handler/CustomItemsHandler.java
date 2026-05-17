@@ -24,6 +24,7 @@ import org.geysermc.geyser.api.util.Identifier;
 
 import java.io.IOException;
 import java.io.Reader;
+import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -32,6 +33,7 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Handler for loading and registering custom items from shared configuration.
@@ -429,17 +431,46 @@ public class CustomItemsHandler {
     }
 
     /**
-     * Best-effort check: does any existing definition for the same base item already
-     * carry a {@code legacyCustomModelData} predicate matching {@code cmd}?
+     * Cached zero-arg accessor on {@link ItemRangeDispatchPredicate} that
+     * returns the wrapped CMD integer (e.g. {@code value()} in recent Geyser
+     * builds, possibly renamed in a future release). Resolved on first use
+     * via reflection so a method rename surfaces as "fall back to text match"
+     * rather than a class-load failure.
+     */
+    private static final AtomicReference<Method> RANGE_DISPATCH_VALUE_ACCESSOR =
+        new AtomicReference<>();
+
+    /**
+     * Sentinel used in {@link #RANGE_DISPATCH_VALUE_ACCESSOR} to record that
+     * the lookup ran and found nothing — saves a repeated reflection scan on
+     * every subsequent dedup check.
+     */
+    private static final Method NO_ACCESSOR_FOUND;
+    static {
+        try {
+            NO_ACCESSOR_FOUND = Object.class.getMethod("toString");
+        } catch (NoSuchMethodException e) {
+            throw new AssertionError(e);  // Object#toString always exists
+        }
+    }
+
+    /**
+     * Does any existing definition for the same base item already carry a
+     * {@code legacyCustomModelData} predicate matching {@code cmd}?
      *
-     * <p>Geyser's predicate API does not expose a public typed accessor for the wrapped
-     * CMD value, so this inspects the predicate's {@code toString()}. The predicate
-     * is looked up by name fragment ({@code legacy_custom_model_data} /
-     * {@code legacyCustomModelData} / {@code customModelData}) plus the literal CMD
-     * integer to keep false positives unlikely. If the API reformats {@code toString()}
-     * in a future release, the snapshot pre-check silently degrades to "no match" and
-     * the {@code Throwable} catch in {@link #registerItems} still suppresses the resulting
-     * collision exception.</p>
+     * <p>Two-phase match for resilience against Geyser API evolution:
+     * <ol>
+     *   <li><b>Typed match</b>: {@code instanceof ItemRangeDispatchPredicate}
+     *       plus a reflectively-resolved zero-arg int accessor (cached after
+     *       first call). This is the authoritative path — it survives any
+     *       {@code toString()} reformatting and only breaks when Geyser
+     *       renames both the public class and its accessor at the same time.</li>
+     *   <li><b>Text fallback</b>: the previous {@code toString()} scan, kept
+     *       as a safety net so the dedup still works when the typed accessor
+     *       hasn't been resolved (e.g. the API was reshuffled but the new
+     *       predicate type still surfaces the CMD integer textually).</li>
+     * </ol>
+     * </p>
      */
     private boolean hasMatchingCmdPredicate(Collection<CustomItemDefinition> defs, int cmd) {
         if (defs.isEmpty()) {
@@ -457,6 +488,16 @@ public class CustomItemsHandler {
                 continue;
             }
             for (MinecraftPredicate<? super ItemPredicateContext> predicate : predicates) {
+                // Phase 1: type-aware match.
+                if (predicate instanceof ItemRangeDispatchPredicate range) {
+                    Integer typed = extractCmdViaAccessor(range);
+                    if (typed != null && typed == cmd) {
+                        return true;
+                    }
+                    // type matched but accessor unavailable / wrong value →
+                    // fall through to text match for this predicate
+                }
+                // Phase 2: text fallback.
                 String repr = String.valueOf(predicate);
                 if (!containsCmdLiteral(repr, cmdLiteral)) {
                     continue;
@@ -471,6 +512,59 @@ public class CustomItemsHandler {
             }
         }
         return false;
+    }
+
+    /**
+     * Returns the CMD integer wrapped inside an
+     * {@link ItemRangeDispatchPredicate}, or {@code null} when no zero-arg
+     * int accessor is available on the runtime Geyser API. Caches the
+     * resolved method (or the not-found sentinel) so the reflection scan
+     * runs at most once per JVM.
+     */
+    private static Integer extractCmdViaAccessor(ItemRangeDispatchPredicate range) {
+        Method cached = RANGE_DISPATCH_VALUE_ACCESSOR.get();
+        if (cached == null) {
+            cached = resolveValueAccessor(range.getClass());
+            RANGE_DISPATCH_VALUE_ACCESSOR.compareAndSet(null, cached);
+        }
+        if (cached == NO_ACCESSOR_FOUND) {
+            return null;
+        }
+        try {
+            Object result = cached.invoke(range);
+            if (result instanceof Number n) {
+                return n.intValue();
+            }
+        } catch (Throwable ignored) {
+            // accessor present but invocation failed → fall back to text path
+        }
+        return null;
+    }
+
+    /**
+     * Looks for a zero-arg public accessor on {@code clazz} that returns the
+     * wrapped CMD integer. Tries the names most likely to be in use across
+     * Geyser versions ({@code value}, {@code customModelData},
+     * {@code legacyCustomModelData}), preferring primitive {@code int}
+     * returns. Returns {@link #NO_ACCESSOR_FOUND} when none match so the
+     * caller can short-circuit subsequent lookups.
+     */
+    private static Method resolveValueAccessor(Class<?> clazz) {
+        String[] candidateNames = {
+            "value", "customModelData", "legacyCustomModelData"
+        };
+        for (String name : candidateNames) {
+            for (Method m : clazz.getMethods()) {
+                if (m.getParameterCount() != 0) continue;
+                if (!name.equals(m.getName())) continue;
+                Class<?> ret = m.getReturnType();
+                if (ret == int.class || ret == Integer.class
+                    || Number.class.isAssignableFrom(ret)) {
+                    return m;
+                }
+            }
+        }
+        return NO_ACCESSOR_FOUND;
     }
 
     /**

@@ -583,18 +583,54 @@ public final class BedrockAnvilSimulator implements Listener {
     /**
      * Repairs durability when combining two same-type items.
      * Adds 12% max durability bonus on top of combining remaining durability.
+     *
+     * <p>Why {@code Damageable#getDamage}/{@code setDamage} rather than the
+     * legacy {@code ItemStack#getDurability}/{@code setDurability}: Paper
+     * marks the {@code ItemStack} methods as deprecated since they conflate
+     * "damage" (what is stored) with "durability" (what is remaining). The
+     * {@link org.bukkit.inventory.meta.Damageable} accessors operate on the
+     * same underlying data with modern, non-ambiguous semantics, and are what
+     * Paper recommends for code that wants to keep compiling cleanly.</p>
      */
     private ItemStack repairDurability(ItemStack result, ItemStack sacrifice) {
-        short maxDurability = result.getType().getMaxDurability();
+        int maxDurability = result.getType().getMaxDurability();
         if (maxDurability <= 0) return result;
 
-        int leftRemaining = maxDurability - result.getDurability();
-        int rightRemaining = maxDurability - sacrifice.getDurability();
+        int leftDamage = damageOf(result);
+        int rightDamage = damageOf(sacrifice);
+        int leftRemaining = maxDurability - leftDamage;
+        int rightRemaining = maxDurability - rightDamage;
         int bonus = (int) (maxDurability * 0.12);
         int totalRemaining = Math.min(maxDurability, leftRemaining + rightRemaining + bonus);
 
-        result.setDurability((short) (maxDurability - totalRemaining));
+        setDamage(result, maxDurability - totalRemaining);
         return result;
+    }
+
+    /**
+     * Reads the damage value via the modern Damageable accessor when the
+     * meta supports it, falling back to 0 (full durability) when not.
+     */
+    private static int damageOf(ItemStack stack) {
+        if (stack == null) return 0;
+        ItemMeta meta = stack.getItemMeta();
+        if (meta instanceof org.bukkit.inventory.meta.Damageable damageable) {
+            return damageable.getDamage();
+        }
+        return 0;
+    }
+
+    /**
+     * Writes the damage value via the modern Damageable accessor. No-op when
+     * the item has no meta or the meta is not damageable.
+     */
+    private static void setDamage(ItemStack stack, int damage) {
+        if (stack == null) return;
+        ItemMeta meta = stack.getItemMeta();
+        if (meta instanceof org.bukkit.inventory.meta.Damageable damageable) {
+            damageable.setDamage(Math.max(0, damage));
+            stack.setItemMeta(meta);
+        }
     }
 
     /**

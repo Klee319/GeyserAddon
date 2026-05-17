@@ -21,6 +21,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Tracks each player's currently-open top inventory type and exposes thread-safe
@@ -47,6 +48,14 @@ public final class BedrockEnchantmentTablePacketStripper implements Listener {
 
     private final GeyserExtraPaper plugin;
     private final Map<UUID, InventoryType> openTopInventoryType = new ConcurrentHashMap<>();
+    // Surface field-read failures exactly once at WARN level. Without this,
+    // a ProtocolLib accessor change in a future Paper update would silently
+    // disable the CMD-strip workaround (every field-read would throw and be
+    // demoted to fine-level), and the Bedrock client crash this workaround
+    // exists to prevent would silently come back. The flag also guards
+    // against log flooding on the happy path where one bad packet would
+    // otherwise produce thousands of identical warnings per minute.
+    private final AtomicBoolean fieldReadWarningEmitted = new AtomicBoolean(false);
 
     public BedrockEnchantmentTablePacketStripper(GeyserExtraPaper plugin) {
         this.plugin = Objects.requireNonNull(plugin, "plugin must not be null");
@@ -211,6 +220,18 @@ public final class BedrockEnchantmentTablePacketStripper implements Listener {
     }
 
     private void logFieldReadFailure(String packetName, Exception ex) {
+        // First occurrence: WARN so an operator notices a ProtocolLib API
+        // mismatch immediately. Subsequent occurrences: fine-level only,
+        // so a persistent mismatch does not flood the log.
+        if (fieldReadWarningEmitted.compareAndSet(false, true)) {
+            plugin.getLogger().warning(
+                "CMD-strip: " + packetName + " field read failed ("
+                    + ex.getClass().getSimpleName() + "): " + ex.getMessage()
+                    + " — Bedrock enchant-table crash workaround inactive for"
+                    + " subsequent packets of this type. Update ProtocolLib or"
+                    + " report a Paper/ProtocolLib mismatch.");
+            return;
+        }
         if (plugin.getGeyserExtraConfig().general().debugMode()) {
             plugin.getLogger().fine(
                 "CMD-strip: " + packetName + " field read failed ("
