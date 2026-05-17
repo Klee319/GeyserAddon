@@ -10,10 +10,12 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import java.util.stream.Stream;
 
 /**
  * Reads an unzipped Java edition resource pack and extracts {@code (baseItem,
@@ -105,6 +107,12 @@ public final class JavaPackReader {
         modernResolved = 0;
         legacyAttempted = 0;
         legacyResolved = 0;
+        // Build the basename -> path index up-front. One walk of every
+        // assets/<ns>/textures/ subtree amortises every later
+        // deep-fallback lookup to O(1). Doing this lazily on first miss
+        // would still pay the walk cost but spread it across per-CMD
+        // log lines.
+        textureBasenameIndex = buildTextureBasenameIndex(assets);
 
         boolean wantLegacy = !GeyserExtraConfig.CustomItemsConfig.JAVA_PACK_FORMAT_MODERN.equals(formatHint);
         boolean wantModern = !GeyserExtraConfig.CustomItemsConfig.JAVA_PACK_FORMAT_LEGACY.equals(formatHint);
@@ -135,6 +143,21 @@ public final class JavaPackReader {
     private int modernResolved;
     private int legacyAttempted;
     private int legacyResolved;
+
+    // Built once at the top of scan() and consulted as the last resort by
+    // resolveSingleModelRef() when both the model-JSON chain and the
+    // model-name-as-texture-path fallback fail. Maps a PNG basename (with
+    // case lowered and ".png" stripped) to the first {@link Path} found
+    // during a recursive walk of every assets/<ns>/textures/ subtree. The
+    // "first found" tie-breaker is deterministic per pack content because
+    // Files.walk visits the tree in NIO's documented order.
+    //
+    // Why first-wins: a multi-namespace pack may legitimately ship two
+    // PNGs with the same basename (e.g. a minecraft override + a custom
+    // namespace icon). Without source-of-truth in the model JSON we can't
+    // tell which is "right", so we pick deterministically rather than
+    // making the resolution outcome depend on filesystem ordering.
+    private Map<String, Path> textureBasenameIndex = Map.of();
 
     // ========================================================================
     // Legacy: models/item/<base>.json with overrides[]
@@ -502,18 +525,25 @@ public final class JavaPackReader {
      *   <li><b>Model-name-as-texture-path fallback</b>: when the model JSON
      *       is missing entirely, doesn't declare a {@code textures} map, or
      *       declares only template (#) placeholders, try the model ref's
-     *       path verbatim as a texture path (i.e. swap {@code models/} for
-     *       {@code textures/} and {@code .json} for {@code .png}). This
-     *       handles the very common 2D-icon convention where pack authors
-     *       ship just a PNG and rely on the {@code model_name == texture_name}
-     *       implicit mapping (e.g. ValhallaMMO's
-     *       {@code item/gui/merchants/services/service_*} icons).</li>
+     *       path verbatim as a texture path (swap {@code models/} for
+     *       {@code textures/} and {@code .json} for {@code .png}).
+     *       Handles the common 2D-icon convention where pack authors ship
+     *       just a PNG under {@code model_name == texture_name}.</li>
+     *   <li><b>Basename index lookup</b> (last resort): consult the
+     *       pre-built {@link #textureBasenameIndex} for any PNG with the
+     *       same final filename as {@code modelRef}, regardless of
+     *       directory. Catches packs that ship the texture under a
+     *       different {@code textures/...} subdirectory than the
+     *       {@code models/...} layout suggests, or under a different
+     *       namespace than the modelRef implies.</li>
      * </ol>
-     * Returns {@code null} when neither resolution path produces an on-disk
-     * PNG. Diagnostic logging is left to the caller so it can report the
-     * full ref chain it tried.
+     * Returns {@code null} when none of the three paths produces an
+     * on-disk PNG. When {@code debug} is on and all three paths fail,
+     * the method logs the exact filesystem paths it tried so an operator
+     * can diff against their actual pack layout.
      */
     private JavaModelDefinition resolveSingleModelRef(String baseItem, int cmd, String modelRef) {
+        // Step 1: model JSON chain → textures.layerN → PNG file
         String textureRef = resolveTextureRefFromModel(modelRef);
         if (textureRef != null) {
             Path texturePath = resolveTextureFile(textureRef);
@@ -521,6 +551,8 @@ public final class JavaPackReader {
                 return new JavaModelDefinition(baseItem, cmd, modelRef, textureRef, texturePath);
             }
         }
+
+        // Step 2: model-name-as-texture-path
         Path direct = resolveTextureFile(modelRef);
         if (direct != null) {
             if (debug) {
@@ -529,7 +561,88 @@ public final class JavaPackReader {
             }
             return new JavaModelDefinition(baseItem, cmd, modelRef, modelRef, direct);
         }
+
+        // Step 3: basename index lookup
+        String basename = extractBasename(modelRef);
+        Path indexed = basename != null ? textureBasenameIndex.get(basename) : null;
+        if (indexed != null) {
+            if (debug) {
+                logger.info("[JavaPack] " + baseItem + "#" + cmd
+                    + ": resolved via basename-index fallback (modelRef=" + modelRef
+                    + " -> " + indexed + ")");
+            }
+            return new JavaModelDefinition(baseItem, cmd, modelRef,
+                "basename:" + basename, indexed);
+        }
+
+        // All three paths failed: emit a single diagnostic line listing
+        // every filesystem path we tried so an operator can see at a
+        // glance what was missing. Only at debug=true because otherwise
+        // a pack with hundreds of missing entries would spam the log.
+        if (debug) {
+            String[] parts = splitNamespacedKey(modelRef);
+            Path expectedModel = packRoot.resolve("assets").resolve(parts[0])
+                .resolve("models").resolve(parts[1] + ".json");
+            Path expectedTexture = packRoot.resolve("assets").resolve(parts[0])
+                .resolve("textures").resolve(parts[1] + ".png");
+            logger.info("[JavaPack] " + baseItem + "#" + cmd
+                + ": all resolution paths failed for modelRef=" + modelRef
+                + " — tried model JSON at " + expectedModel
+                + " | direct texture at " + expectedTexture
+                + " | basename '" + basename + "' (no index hit)");
+        }
         return null;
+    }
+
+    /**
+     * Walks every {@code assets/<ns>/textures/} subtree once and builds a
+     * {@code basename -> first-found PNG Path} map. Empty when the walk
+     * fails (logged at WARNING) so deep-fallback lookups become no-ops
+     * rather than NPEs.
+     *
+     * <p>Why basename (not full relative path): the deep fallback runs
+     * after the relative-path attempts already missed, so by definition
+     * we do not know the right subdirectory. Basename is the only stable
+     * key left.</p>
+     */
+    private Map<String, Path> buildTextureBasenameIndex(Path assets) {
+        Map<String, Path> out = new HashMap<>();
+        try (Stream<Path> walk = Files.walk(assets)) {
+            walk.filter(Files::isRegularFile)
+                .filter(p -> p.getFileName().toString()
+                    .toLowerCase(Locale.ROOT).endsWith(".png"))
+                .forEach(p -> {
+                    String name = p.getFileName().toString();
+                    // Case-insensitive on Windows; pack refs on disk are
+                    // canonically lowercase per Mojang convention so this
+                    // lower also normalises any oddball capitalisation.
+                    String basename = name.substring(0, name.length() - ".png".length())
+                        .toLowerCase(Locale.ROOT);
+                    out.putIfAbsent(basename, p);
+                });
+        } catch (IOException ex) {
+            logger.log(Level.WARNING,
+                "[JavaPack] basename-index walk failed under " + assets
+                    + " — deep fallback disabled this scan", ex);
+        }
+        if (debug) {
+            logger.info("[JavaPack] basename index built: " + out.size()
+                + " unique PNG basenames under " + assets);
+        }
+        return Map.copyOf(out);
+    }
+
+    /**
+     * Returns the last path segment of {@code ref} (everything after the
+     * final {@code /}), lowercased so it matches keys in
+     * {@link #textureBasenameIndex}. Returns {@code null} when the input
+     * is null or blank.
+     */
+    private static String extractBasename(String ref) {
+        if (ref == null || ref.isBlank()) return null;
+        int slash = ref.lastIndexOf('/');
+        String last = slash >= 0 ? ref.substring(slash + 1) : ref;
+        return last.toLowerCase(Locale.ROOT);
     }
 
     /**
