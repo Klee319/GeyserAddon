@@ -65,25 +65,25 @@ import java.util.logging.Level;
 public final class BedrockEnchantmentHandler implements Listener {
 
     /**
-     * Invisible prefix prepended to every lore line we inject. Used to strip
+     * Visible prefix prepended to every lore line we inject. Used to strip
      * previously-injected lines on the next packet so the tooltip cannot
      * accumulate when a re-broadcast SET_SLOT carries lore that was the
      * result of our own prior injection.
      *
-     * <p>Composition:
-     * <ul>
-     *   <li>{@code U+E000} — Private Use Area codepoint, guaranteed not to
-     *       collide with any operator-authored text because the Unicode
-     *       consortium reserves this range for application-specific use.</li>
-     *   <li>{@code "GE"} sentinel — distinguishes our marker from any other
-     *       application that might happen to use {@code U+E000} for its own
-     *       purposes (extremely unlikely on a Minecraft text channel).</li>
-     * </ul>
-     * Renders as nothing on either Java or Bedrock clients (PUA codepoints
-     * without a font glyph display as no-op tofu, but the surrounding lore
-     * text continues on the same line), so the player never sees it.</p>
+     * <p>Plain ASCII tag was chosen over a Private Use Area codepoint
+     * (U+E000): the PUA approach rendered as a visible tofu glyph on
+     * Bedrock clients whose resource pack did not supply a font mapping,
+     * defeating the "invisible marker" intent. A short readable tag is
+     * unambiguous, font-independent, and lets operators see at a glance
+     * which lore lines were added by this plugin.</p>
+     *
+     * <p>Trade-off: an operator who deliberately authors a lore line
+     * starting with {@code [GE]} would see it silently stripped on the
+     * next packet pass. The literal substring is uncommon enough that
+     * this is judged an acceptable cost in exchange for the
+     * font-independent visibility guarantee.</p>
      */
-    private static final String INJECTED_LORE_MARKER = "GE";
+    private static final String INJECTED_LORE_MARKER = "[GE]";
 
     private final GeyserExtraPaper plugin;
     private final FloodgateApi floodgateApi;
@@ -384,27 +384,23 @@ public final class BedrockEnchantmentHandler implements Listener {
         // Fast pre-filter: an item is a candidate for the slow path only if at
         // least one of the responsibilities has a reason to fire.
         //   - Lore branch needs lore enabled AND a damageable / enchanted item
-        //   - displayName branch needs a CMD component (its identity check is
-        //     deferred to hasResolvedServerSideDisplayName)
+        //   - displayName branch needs a CMD component OR an item whose
+        //     identity is carried through PDC (i.e. an external-plugin
+        //     custom item that does not use CUSTOM_MODEL_DATA). The PDC
+        //     check is narrower than blanket hasItemMeta() — vanilla
+        //     enchanted books / armour with no PDC fall through and keep
+        //     their localised default name instead of being force-renamed
+        //     to "Enchanted Book" by prettifyMaterialName.
         // Items that fail both predicates are returned untouched without
         // paying for a getItemMeta() snapshot. Most inventory items (food,
         // materials, blocks) hit this short-circuit.
-        //
-        // Why we DON'T include hasItemMeta() here: an earlier revision tried
-        // that to catch CMD-less PDC-based items, but it also matched vanilla
-        // enchanted books / armour with literal-text displayName missing, and
-        // pushed them through the displayName fallback which forced an
-        // English "Enchanted Book" rendering on non-English Bedrock clients
-        // (the prettifyMaterialName fallback never runs through lang
-        // resolution). PDC-only items now keep whatever Geyser would have
-        // displayed by default until the scanner-side fix gives them a
-        // proper display name in the registry.
         boolean potentiallyDamageable = item.getType().getMaxDurability() > 0;
         boolean possiblyEnchanted = !item.getEnchantments().isEmpty()
             || item.getType() == Material.ENCHANTED_BOOK;
         boolean possiblyCmd = hasCustomModelData(item);
+        boolean hasPdcIdentity = hasPdcMeta(item);
         boolean loreCandidate = loreEnabled && (potentiallyDamageable || possiblyEnchanted);
-        if (!loreCandidate && !possiblyCmd) {
+        if (!loreCandidate && !possiblyCmd && !hasPdcIdentity) {
             return null;
         }
 
@@ -448,9 +444,10 @@ public final class BedrockEnchantmentHandler implements Listener {
         }
 
         // Decide whether the item also needs the fallback display-name fix.
-        // Why: a CMD item without a Bedrock-resolvable display name renders
-        // on Bedrock as the registered Geyser identifier (e.g.
-        // "gmdl_abc1234"). We need to inject a readable name when:
+        // Why: an item without a Bedrock-resolvable display name renders on
+        // Bedrock as the registered Geyser identifier (e.g. "gmdl_abc1234")
+        // or as nothing for PDC-only items. We need to inject a readable
+        // name when:
         //   (a) The item has no ItemMeta display name at all, or
         //   (b) The item's display name is a TranslatableComponent whose key
         //       Bedrock cannot resolve — Java-side lang resolution returns
@@ -458,9 +455,12 @@ public final class BedrockEnchantmentHandler implements Listener {
         //       built-in translation keys, so the key would surface as-is.
         // Items with a literal Text display name are left alone — their NBT
         // already carries the right label and Geyser forwards it correctly.
-        // Scoped to possiblyCmd only: see the fast pre-filter comment for
-        // why broadening to hasMeta would force-rename vanilla items.
-        boolean wantDisplayNameFallback = possiblyCmd
+        //
+        // Scope: CMD items OR PDC-bearing items (the latter catches
+        // external-plugin custom items that don't use CUSTOM_MODEL_DATA).
+        // Vanilla items with no PDC fall through and keep their localised
+        // default rendering.
+        boolean wantDisplayNameFallback = (possiblyCmd || hasPdcIdentity)
             && !hasResolvedServerSideDisplayName(item);
 
         boolean hasInjectedLeftover = containsInjectedLoreMarker(item);
@@ -500,15 +500,23 @@ public final class BedrockEnchantmentHandler implements Listener {
             //      file has it, use the resolved text directly. This is the
             //      authoritative source — it matches exactly what a Java
             //      client would render for the same item.
-            //   2. ItemMappingRegistry: prior runtime scans (recipe results
+            //   2. PDC display-name keys: external plugins (ItemsAdder /
+            //      Oraxen / MMOItems variants) often store the player-facing
+            //      name in PDC under "displayname" / "display_name" / "title"
+            //      / "label". This is what catches CMD-less PDC-only items
+            //      whose ItemMeta carries no displayName Component.
+            //   3. ItemMappingRegistry: prior runtime scans (recipe results
             //      and PrepareItemCraftEvent observations) populate this with
             //      the literal text or earlier lang-resolved name for the
             //      same (baseItem, CMD). Catches the case where the current
             //      ItemStack instance has no ItemMeta but a previous instance
             //      did.
-            //   3. Prettified base material name: last-ditch so a raw
+            //   4. Prettified base material name: last-ditch so a raw
             //      Geyser identifier never reaches the player.
             String fallback = resolveTranslatableDisplayName(item);
+            if (fallback == null) {
+                fallback = lookupPdcDisplayName(item);
+            }
             if (fallback == null) {
                 fallback = lookupRegistryDisplayName(item);
             }
@@ -848,6 +856,71 @@ public final class BedrockEnchantmentHandler implements Listener {
         } catch (Throwable t) {
             return null;
         }
+    }
+
+    /**
+     * Whether the item carries a non-empty {@link org.bukkit.persistence.PersistentDataContainer}.
+     * Used as a cheap proxy for "this is probably a custom item from another
+     * plugin" because external plugins almost always stamp at least one PDC
+     * key onto their custom items (identifier, version marker, behaviour
+     * flags). Vanilla items leave PDC empty unless an operator explicitly
+     * mutates it, so this predicate avoids force-renaming vanilla items.
+     */
+    private static boolean hasPdcMeta(ItemStack item) {
+        if (item == null) return false;
+        try {
+            if (!item.hasItemMeta()) return false;
+            ItemMeta meta = item.getItemMeta();
+            if (meta == null) return false;
+            return !meta.getPersistentDataContainer().isEmpty();
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /**
+     * Common PDC keys plugins use to store a player-facing display name.
+     * Mirrors the list in {@code CustomItemScanner.PDC_DISPLAY_NAME_KEYS}
+     * so the packet-time and scanner-time fallbacks look at the same set.
+     */
+    private static final String[] PDC_DISPLAY_NAME_KEYS = {
+        "displayname", "display_name", "title", "label"
+    };
+
+    /**
+     * Probes the item's PersistentDataContainer for a display-name string
+     * stored under one of the {@link #PDC_DISPLAY_NAME_KEYS}. Returns
+     * {@code null} when no recognised key carries one. Used as a fallback
+     * when the runtime ItemStack has no ItemMeta displayName Component — a
+     * common shape for external plugins (ItemsAdder / Oraxen / MMOItems
+     * variants) that keep the player-facing name in PDC.
+     */
+    private static String lookupPdcDisplayName(ItemStack item) {
+        if (item == null) return null;
+        try {
+            ItemMeta meta = item.getItemMeta();
+            if (meta == null) return null;
+            org.bukkit.persistence.PersistentDataContainer pdc = meta.getPersistentDataContainer();
+            if (pdc.isEmpty()) return null;
+            for (NamespacedKey key : pdc.getKeys()) {
+                String lower = key.getKey().toLowerCase(java.util.Locale.ROOT);
+                for (String candidate : PDC_DISPLAY_NAME_KEYS) {
+                    if (!lower.contains(candidate)) continue;
+                    try {
+                        String value = pdc.get(key, org.bukkit.persistence.PersistentDataType.STRING);
+                        if (value != null && !value.isBlank()) {
+                            return value;
+                        }
+                    } catch (Exception ignored) {
+                        // non-string PDC value at this key → keep searching
+                    }
+                    break;
+                }
+            }
+        } catch (Throwable ignored) {
+            // ItemMeta API mismatch → no PDC display name available
+        }
+        return null;
     }
 
     /**
