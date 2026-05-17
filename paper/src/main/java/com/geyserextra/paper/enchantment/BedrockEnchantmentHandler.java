@@ -387,16 +387,18 @@ public final class BedrockEnchantmentHandler implements Listener {
         }
 
         // Decide whether the item also needs the fallback display-name fix.
-        // Why: even when there is no lore work, a CMD item lacking an
-        // ItemMeta-set display name renders on Bedrock as the registered
-        // Geyser identifier (e.g. "gmdl_abc1234" or
-        // "geyserextra.custom_diamond_sword_100"). We supply the prettified
-        // base material name as a per-instance custom_name in the packet so
-        // Bedrock sees something readable. Items that already carry a server-
-        // side display name are left alone — the plugin that created them
-        // has chosen a label, and we mustn't override it.
+        // Why: a CMD item without a Bedrock-resolvable display name renders
+        // on Bedrock as the registered Geyser identifier (e.g.
+        // "gmdl_abc1234"). We need to inject a readable name when:
+        //   (a) The item has no ItemMeta display name at all, or
+        //   (b) The item's display name is a TranslatableComponent whose key
+        //       Bedrock cannot resolve — Java-side lang resolution returns
+        //       readable text, but the Bedrock client only knows its own
+        //       built-in translation keys, so the key would surface as-is.
+        // Items with a literal Text display name are left alone — their NBT
+        // already carries the right label and Geyser forwards it correctly.
         boolean wantDisplayNameFallback = possiblyCmd
-            && !hasServerSideDisplayName(item);
+            && !hasResolvedServerSideDisplayName(item);
 
         if (tooltipLines.isEmpty() && !wantDisplayNameFallback) {
             return null;
@@ -421,18 +423,26 @@ public final class BedrockEnchantmentHandler implements Listener {
             changed = true;
         }
 
-        if (wantDisplayNameFallback && !clonedMeta.hasDisplayName()) {
-            // Fallback chain for items whose server-side ItemStack lacks a display
-            // name but whose CMD says they should look custom on Bedrock:
-            //   1. ItemMappingRegistry: if a prior runtime scan saw an instance
-            //      with ItemMeta.displayName set, that text is stored here. This
-            //      is the path that recovers the Java-preview-equivalent name
-            //      (e.g. "Fire Sword") when the current ItemStack happens to
-            //      have been built without ItemMeta (recipe results that only
-            //      get a name on the final consume, etc.).
-            //   2. Base material prettified name as a last resort so we never
-            //      surface a raw "geyser_custom:..." identifier to the player.
-            String fallback = lookupRegistryDisplayName(item);
+        if (wantDisplayNameFallback) {
+            // Fallback chain for items whose server-side ItemStack lacks a
+            // Bedrock-renderable display name. Walked in order of preference:
+            //   1. Lang-resolved TranslatableComponent: if the ItemMeta name
+            //      is a translation key and the operator's Java pack lang
+            //      file has it, use the resolved text directly. This is the
+            //      authoritative source — it matches exactly what a Java
+            //      client would render for the same item.
+            //   2. ItemMappingRegistry: prior runtime scans (recipe results
+            //      and PrepareItemCraftEvent observations) populate this with
+            //      the literal text or earlier lang-resolved name for the
+            //      same (baseItem, CMD). Catches the case where the current
+            //      ItemStack instance has no ItemMeta but a previous instance
+            //      did.
+            //   3. Prettified base material name: last-ditch so a raw
+            //      Geyser identifier never reaches the player.
+            String fallback = resolveTranslatableDisplayName(item);
+            if (fallback == null) {
+                fallback = lookupRegistryDisplayName(item);
+            }
             if (fallback == null) {
                 fallback = prettifyMaterialName(item.getType());
             }
@@ -465,13 +475,27 @@ public final class BedrockEnchantmentHandler implements Listener {
     }
 
     /**
-     * Whether the item carries a server-side display name (ItemMeta or the
-     * 1.21.4+ {@code custom_name} component). Used to skip the Bedrock
-     * fallback-name injection so a plugin's deliberately set name wins.
+     * Whether the item carries a server-side display name that Bedrock can
+     * render correctly without further help. Returns {@code false} for
+     * TranslatableComponent display names so the packet-side injection can
+     * resolve them via the Java pack lang reader — Bedrock can't look up
+     * Java translation keys client-side, so a {@code Component.translatable}
+     * name would otherwise surface as the raw key.
+     *
+     * <p>Returns {@code true} only when the display name is plain literal
+     * text. Plugins that have deliberately chosen a literal label keep it.</p>
      */
-    private static boolean hasServerSideDisplayName(ItemStack item) {
+    private static boolean hasResolvedServerSideDisplayName(ItemStack item) {
         ItemMeta meta = item.getItemMeta();
         if (meta != null && meta.hasDisplayName()) {
+            net.kyori.adventure.text.Component name = meta.displayName();
+            // TranslatableComponent → Bedrock cannot resolve; injection wins.
+            if (name instanceof net.kyori.adventure.text.TranslatableComponent) {
+                return false;
+            }
+            // Any other Component shape (TextComponent, decorated, etc.) is
+            // assumed to be safely serializable to plain text that Bedrock
+            // displays correctly via the NBT custom_name path.
             return true;
         }
         try {
@@ -479,6 +503,31 @@ public final class BedrockEnchantmentHandler implements Listener {
                 || item.hasData(DataComponentTypes.ITEM_NAME);
         } catch (Throwable t) {
             return false;
+        }
+    }
+
+    /**
+     * Resolves the item's {@link net.kyori.adventure.text.TranslatableComponent}
+     * display name against the operator-supplied Java pack lang files.
+     *
+     * <p>Returns {@code null} when the ItemMeta name is absent, is not a
+     * translation key, or is a key the lang reader cannot resolve. Callers
+     * use the upstream fallback chain in those cases.</p>
+     */
+    private String resolveTranslatableDisplayName(ItemStack item) {
+        ItemMeta meta = item.getItemMeta();
+        if (meta == null || !meta.hasDisplayName()) {
+            return null;
+        }
+        net.kyori.adventure.text.Component name = meta.displayName();
+        if (!(name instanceof net.kyori.adventure.text.TranslatableComponent translatable)) {
+            return null;
+        }
+        try {
+            String resolved = plugin.getJavaPackLangReader().resolve(translatable.key());
+            return resolved != null && !resolved.isBlank() ? resolved : null;
+        } catch (Throwable t) {
+            return null;
         }
     }
 

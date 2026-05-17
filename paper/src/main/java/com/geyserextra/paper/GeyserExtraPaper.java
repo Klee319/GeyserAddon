@@ -15,6 +15,7 @@ import com.geyserextra.paper.recipe.CraftingRecipeHandler;
 import com.geyserextra.paper.recipe.SmithingRecipeHandler;
 import com.geyserextra.core.api.CustomItemMapping;
 import com.geyserextra.paper.pack.AutoBedrockPackBuilder;
+import com.geyserextra.paper.pack.JavaPackLangReader;
 import com.geyserextra.paper.pack.JavaPackReader;
 import com.geyserextra.paper.scanner.CustomItemScanner;
 import com.geyserextra.paper.scanner.RecipeScanner;
@@ -82,6 +83,12 @@ public final class GeyserExtraPaper extends JavaPlugin {
     // Per-player display settings persistence and display orchestration
     private PlayerSettingsManager playerSettingsManager;
     private DisplayManager displayManager;
+
+    // Lazily loaded once per startup from the operator-supplied Java pack.
+    // Cached so the runtime scanner and the ProtocolLib display-name fallback
+    // path can both resolve TranslatableComponent display names without
+    // re-reading lang JSONs per query.
+    private JavaPackLangReader javaPackLangReader = JavaPackLangReader.empty();
 
     @Override
     public void onEnable() {
@@ -644,6 +651,21 @@ public final class GeyserExtraPaper extends JavaPlugin {
                         getLogger().warning("[JavaPack] scan failed: "
                             + ex.getClass().getSimpleName() + ": " + ex.getMessage());
                     }
+                    // Lang reader is loaded alongside the CMD scan because
+                    // both consume the same pack root and the resolver is
+                    // needed by the scanner upgrade path that runs right
+                    // after pre-population.
+                    try {
+                        javaPackLangReader = JavaPackLangReader.load(
+                            javaPackRoot,
+                            config.customItems().javaPackLocale(),
+                            getLogger(),
+                            debug);
+                    } catch (Exception ex) {
+                        getLogger().warning("[JavaPackLang] load failed: "
+                            + ex.getClass().getSimpleName() + ": " + ex.getMessage());
+                        javaPackLangReader = JavaPackLangReader.empty();
+                    }
                 }
                 if (!javaPackEntries.isEmpty()) {
                     prepopulateRegistryFromJavaPack(javaPackEntries);
@@ -872,6 +894,16 @@ public final class GeyserExtraPaper extends JavaPlugin {
      */
     public PlayerSettingsManager getPlayerSettingsManager() {
         return playerSettingsManager;
+    }
+
+    /**
+     * Returns the loaded Java pack lang reader. Never {@code null}; returns
+     * {@link JavaPackLangReader#empty()} when no Java pack is configured or
+     * the pack contains no lang files. Callers can call {@code resolve(key)}
+     * unconditionally — an unresolvable key simply returns {@code null}.
+     */
+    public JavaPackLangReader getJavaPackLangReader() {
+        return javaPackLangReader != null ? javaPackLangReader : JavaPackLangReader.empty();
     }
 
     /**

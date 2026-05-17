@@ -276,6 +276,7 @@ public final class GeyserExtraConfig {
         private final String pdcWarning;
         private final String javaResourcePackPath;
         private final String javaResourcePackFormat;
+        private final String javaPackLocale;
 
         public CustomItemsConfig() {
             this.enabled = true;
@@ -286,6 +287,7 @@ public final class GeyserExtraConfig {
             this.pdcWarning = PDC_WARNING_COMPACT;
             this.javaResourcePackPath = "";
             this.javaResourcePackFormat = JAVA_PACK_FORMAT_AUTO;
+            this.javaPackLocale = "en_us";
         }
 
         public CustomItemsConfig(
@@ -310,6 +312,22 @@ public final class GeyserExtraConfig {
                 String javaResourcePackPath,
                 String javaResourcePackFormat
         ) {
+            this(enabled, mappingsFile, autoReload, reloadIntervalSeconds,
+                bedrockPacksPath, pdcWarning, javaResourcePackPath,
+                javaResourcePackFormat, "en_us");
+        }
+
+        public CustomItemsConfig(
+                boolean enabled,
+                String mappingsFile,
+                boolean autoReload,
+                int reloadIntervalSeconds,
+                String bedrockPacksPath,
+                String pdcWarning,
+                String javaResourcePackPath,
+                String javaResourcePackFormat,
+                String javaPackLocale
+        ) {
             this.enabled = enabled;
             this.mappingsFile = mappingsFile != null ? mappingsFile : "custom_items.json";
             this.autoReload = autoReload;
@@ -318,6 +336,9 @@ public final class GeyserExtraConfig {
             this.pdcWarning = normalizePdcWarning(pdcWarning);
             this.javaResourcePackPath = javaResourcePackPath != null ? javaResourcePackPath : "";
             this.javaResourcePackFormat = normalizeJavaPackFormat(javaResourcePackFormat);
+            this.javaPackLocale = (javaPackLocale != null && !javaPackLocale.isBlank())
+                ? javaPackLocale.toLowerCase()
+                : "en_us";
         }
 
         private static String normalizePdcWarning(String raw) {
@@ -424,6 +445,22 @@ public final class GeyserExtraConfig {
          */
         public String javaResourcePackFormat() {
             return javaResourcePackFormat != null ? javaResourcePackFormat : JAVA_PACK_FORMAT_AUTO;
+        }
+
+        /**
+         * Primary locale (e.g. {@code "ja_jp"}, {@code "en_us"}) used when
+         * resolving {@code TranslatableComponent} display names against the
+         * Java pack's {@code assets/<ns>/lang/<locale>.json} files. The
+         * resolver falls back to {@code en_us} when the primary locale lacks
+         * a key, matching Minecraft's client behaviour.
+         *
+         * <p>Default: {@code "en_us"}. Only meaningful when
+         * {@link #javaResourcePackPath()} is set.</p>
+         */
+        public String javaPackLocale() {
+            return javaPackLocale != null && !javaPackLocale.isBlank()
+                ? javaPackLocale.toLowerCase()
+                : "en_us";
         }
     }
 

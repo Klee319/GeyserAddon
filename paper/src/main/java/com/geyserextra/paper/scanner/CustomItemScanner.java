@@ -442,11 +442,30 @@ public final class CustomItemScanner {
 
     private String extractDisplayName(ItemStack itemStack) {
         ItemMeta meta = itemStack.getItemMeta();
-        if (meta != null && meta.hasDisplayName() && meta.displayName() != null) {
-            return net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText()
-                .serialize(meta.displayName());
+        if (meta == null || !meta.hasDisplayName() || meta.displayName() == null) {
+            return null;
         }
-        return null;
+        net.kyori.adventure.text.Component name = meta.displayName();
+
+        // Resolve TranslatableComponent against the operator's Java pack lang
+        // file so the registry stores the human-readable name (e.g. "Fire Sword")
+        // rather than the bare translation key. Without this, plugins that set
+        // display names via Component.translatable("item.mymod.fire_sword")
+        // leave us storing "item.mymod.fire_sword" — which Bedrock has no way
+        // to render and which would leak through every fallback chain we have.
+        if (name instanceof net.kyori.adventure.text.TranslatableComponent translatable) {
+            String resolved = plugin.getJavaPackLangReader().resolve(translatable.key());
+            if (resolved != null && !resolved.isBlank()) {
+                return resolved;
+            }
+            // Lang file doesn't contain the key — fall through to the plain
+            // serializer below. The result will be the raw key string, which
+            // is still better than nothing for diagnostic purposes and at
+            // least lets later upgrade paths recognise the entry.
+        }
+
+        return net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText()
+            .serialize(name);
     }
 
     private boolean isUnbreakable(ItemStack itemStack) {
