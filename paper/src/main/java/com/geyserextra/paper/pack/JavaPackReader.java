@@ -298,59 +298,171 @@ public final class JavaPackReader {
                 }
                 continue;
             }
-            String modelRef = extractModelRef(innerModelObj, baseItem + "#" + cmd);
-            if (modelRef == null || modelRef.isBlank()) {
+            String contextLabel = baseItem + "#" + cmd;
+            List<String> modelRefs = new ArrayList<>();
+            collectModelRefs(innerModelObj, contextLabel, modelRefs, 0);
+            if (modelRefs.isEmpty()) {
                 continue;
             }
-            String textureRef = resolveTextureRefFromModel(modelRef);
-            if (textureRef == null) {
+
+            // Try each candidate model ref in declaration order and accept
+            // the first one whose chain resolves to an actual on-disk PNG.
+            // Why iterate rather than take the first: composite / condition /
+            // select wrappers expose several refs and only some may resolve
+            // (e.g. a condition's on_true branch may reference a vanilla
+            // model with no override while on_false has the custom texture
+            // we want).
+            JavaModelDefinition resolved = null;
+            for (String modelRef : modelRefs) {
+                if (modelRef == null || modelRef.isBlank()) continue;
+                String textureRef = resolveTextureRefFromModel(modelRef);
+                if (textureRef == null) continue;
+                Path texturePath = resolveTextureFile(textureRef);
+                if (texturePath == null) continue;
+                resolved = new JavaModelDefinition(baseItem, cmd, modelRef, textureRef, texturePath);
+                break;
+            }
+            if (resolved == null) {
                 if (debug) {
                     logger.fine("[JavaPack] no texture resolved for modern entry "
-                        + baseItem + " CMD=" + cmd + " -> " + modelRef);
+                        + contextLabel + " (" + modelRefs.size() + " model ref(s) tried)");
                 }
                 continue;
             }
 
-            Path texturePath = resolveTextureFile(textureRef);
-            if (texturePath == null) {
-                continue;
-            }
-
             CmdKey key = new CmdKey(baseItem, cmd);
-            out.put(key, new JavaModelDefinition(baseItem, cmd, modelRef, textureRef, texturePath));
+            out.put(key, resolved);
             if (debug) {
-                logger.fine("[JavaPack-modern] " + key + " -> " + texturePath);
+                logger.fine("[JavaPack-modern] " + key + " -> " + resolved.textureFile());
+            }
+        }
+    }
+
+    /** Recursion depth cap for {@link #collectModelRefs} to defend against pathological pack structures. */
+    private static final int MODEL_REF_RECURSION_LIMIT = 12;
+
+    /**
+     * Recursively collects every model reference embedded in a 1.21.4+
+     * modern item-definition {@code model} block.
+     *
+     * <p>Supported wrappers (Mojang model types, namespaced or bare):
+     * <ul>
+     *   <li>{@code "model"} — leaf, takes the {@code model} string.</li>
+     *   <li>{@code "condition"} — visits {@code on_false} first (the
+     *       default branch for most boolean conditions) then {@code on_true};
+     *       lets us pick up whichever branch ships the custom texture.</li>
+     *   <li>{@code "composite"} — visits every entry of {@code models[]};
+     *       composite layers stack textures so any layer can carry the
+     *       custom artwork we want.</li>
+     *   <li>{@code "select"} — visits {@code fallback} first, then every
+     *       {@code cases[].model}.</li>
+     *   <li>{@code "range_dispatch"} — visits {@code fallback} first, then
+     *       every {@code entries[].model}. Nested under the top-level
+     *       range_dispatch this becomes a tiered CMD.</li>
+     *   <li>Bare string — treated as a direct model reference.</li>
+     *   <li>Map with {@code model} field but no explicit {@code type} —
+     *       treated as a leaf model reference for backward compatibility.</li>
+     * </ul>
+     * Unknown types are logged once at debug and skipped — callers fall
+     * back through the other collected refs.</p>
+     *
+     * <p>Refs are appended to {@code out} in declaration order so the
+     * caller can iterate "preferred → fallback".</p>
+     */
+    private void collectModelRefs(Object obj, String contextLabel, List<String> out, int depth) {
+        if (obj == null) return;
+        if (depth >= MODEL_REF_RECURSION_LIMIT) {
+            if (debug) {
+                logger.fine("[JavaPack] model-ref recursion depth limit hit for "
+                    + contextLabel + " — remaining branches skipped");
+            }
+            return;
+        }
+        if (obj instanceof String s) {
+            if (!s.isBlank()) {
+                out.add(s);
+            }
+            return;
+        }
+        if (!(obj instanceof Map<?, ?> map)) {
+            return;
+        }
+
+        Object typeObj = map.get("type");
+        String type = typeObj == null ? null : String.valueOf(typeObj);
+        String typeKey = type == null ? null : stripNamespace(type);
+
+        if (typeKey == null || "model".equals(typeKey)) {
+            // Either a typeless wrapper (legacy/loose shape) or an explicit
+            // {type:"model", model:"<ref>"} leaf.
+            Object modelRef = map.get("model");
+            if (modelRef instanceof String s && !s.isBlank()) {
+                out.add(s);
+            } else if (modelRef != null) {
+                // Non-string nested object — keep walking in case it's
+                // another wrapper rather than the expected leaf.
+                collectModelRefs(modelRef, contextLabel, out, depth + 1);
+            }
+            return;
+        }
+
+        switch (typeKey) {
+            case "condition" -> {
+                collectModelRefs(map.get("on_false"), contextLabel, out, depth + 1);
+                collectModelRefs(map.get("on_true"), contextLabel, out, depth + 1);
+            }
+            case "composite" -> {
+                Object models = map.get("models");
+                if (models instanceof List<?> list) {
+                    for (Object sub : list) {
+                        collectModelRefs(sub, contextLabel, out, depth + 1);
+                    }
+                }
+            }
+            case "select" -> {
+                collectModelRefs(map.get("fallback"), contextLabel, out, depth + 1);
+                Object cases = map.get("cases");
+                if (cases instanceof List<?> caseList) {
+                    for (Object c : caseList) {
+                        if (c instanceof Map<?, ?> caseMap) {
+                            collectModelRefs(caseMap.get("model"), contextLabel, out, depth + 1);
+                        }
+                    }
+                }
+            }
+            case "range_dispatch" -> {
+                collectModelRefs(map.get("fallback"), contextLabel, out, depth + 1);
+                Object entries = map.get("entries");
+                if (entries instanceof List<?> entryList) {
+                    for (Object e : entryList) {
+                        if (e instanceof Map<?, ?> entryMap) {
+                            collectModelRefs(entryMap.get("model"), contextLabel, out, depth + 1);
+                        }
+                    }
+                }
+            }
+            default -> {
+                // Unknown wrapper type. Drop to debug so a pack with a brand-new
+                // model type (added in a future Minecraft release) doesn't spam
+                // warnings for every CMD entry that uses it. The caller's "any
+                // ref resolves?" loop will simply not find a texture and skip
+                // the entry, which is the desired conservative behaviour.
+                if (debug) {
+                    logger.fine("[JavaPack] unsupported model type '" + type
+                        + "' for " + contextLabel + " — branch skipped");
+                }
             }
         }
     }
 
     /**
-     * Extracts a model reference from the modern {@code entry.model} object.
-     *
-     * <p>Supports the common {@code {type: "model", model: "<ref>"}} shape and
-     * the bare string form. Other model types such as {@code "select"},
-     * {@code "composite"}, {@code "condition"} carry their model references in
-     * nested arrays/maps that this reader does not unpack — they are logged
-     * as unsupported so operators understand why those items receive no
-     * custom texture.</p>
+     * Strips the {@code minecraft:} (or other) namespace prefix from a model
+     * type string so the switch above can match on the bare local name. A
+     * {@code null} input returns {@code null}.
      */
-    private String extractModelRef(Object obj, String contextLabel) {
-        if (obj instanceof String s) {
-            return s;
-        }
-        if (obj instanceof Map<?, ?> map) {
-            Object inner = map.get("model");
-            if (inner instanceof String s) {
-                return s;
-            }
-            Object type = map.get("type");
-            if (type instanceof String typeStr) {
-                logger.warning("[JavaPack] unsupported model type '" + typeStr
-                    + "' for " + contextLabel + " — texture extraction skipped."
-                    + " (Supported: \"model\", or bare string reference.)");
-            }
-        }
-        return null;
+    private static String stripNamespace(String type) {
+        int colon = type.indexOf(':');
+        return colon >= 0 ? type.substring(colon + 1) : type;
     }
 
     // ========================================================================
