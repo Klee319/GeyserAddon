@@ -14,6 +14,8 @@ import github.scarsz.discordsrv.dependencies.jda.api.entities.MessageEmbed;
 import github.scarsz.discordsrv.dependencies.jda.api.entities.TextChannel;
 import github.scarsz.discordsrv.util.WebhookUtil;
 
+import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
+
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
@@ -161,7 +163,13 @@ public final class DiscordSRVSkinHook implements Listener {
             return;
         }
 
-        String displayName = player.getDisplayName();
+        // Why PlainTextComponentSerializer: Paper deprecated Player#getDisplayName()
+        // (legacy String) in favour of Player#displayName() returning an Adventure
+        // Component. WebhookUtil expects a plain String, so we serialize the
+        // Component back to plain text, dropping decorations that webhook chat
+        // can't render anyway.
+        String displayName = PlainTextComponentSerializer.plainText()
+            .serialize(player.displayName());
         String message = event.getProcessedMessage();
 
         WebhookUtil.deliverMessage(textChannel, displayName, skinUrl, message,

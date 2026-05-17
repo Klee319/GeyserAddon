@@ -5,6 +5,7 @@ import com.geyserextra.paper.GeyserExtraPaper;
 import org.bukkit.Bukkit;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.Recipe;
+import org.bukkit.inventory.RecipeChoice;
 import org.bukkit.inventory.ShapedRecipe;
 import org.bukkit.inventory.ShapelessRecipe;
 import org.bukkit.inventory.FurnaceRecipe;
@@ -66,41 +67,46 @@ public final class RecipeScanner {
                 discovered++;
             }
 
-            // Scan recipe ingredients for shaped recipes
+            // Scan recipe ingredients for shaped recipes.
+            // Why getChoiceMap rather than getIngredientMap: the legacy
+            // ItemStack-only map is deprecated; getChoiceMap returns the same
+            // ingredients in the modern RecipeChoice form, which is the only
+            // shape capable of expressing ExactChoice (the one that can carry
+            // CMD-bearing custom items).
             if (recipe instanceof ShapedRecipe shapedRecipe) {
-                for (ItemStack ingredient : shapedRecipe.getIngredientMap().values()) {
-                    if (ingredient != null && scanItemIfNew(ingredient, scannedItems)) {
-                        discovered++;
-                    }
+                for (RecipeChoice choice : shapedRecipe.getChoiceMap().values()) {
+                    discovered += scanChoice(choice, scannedItems);
                 }
             }
 
-            // Scan recipe ingredients for shapeless recipes
+            // Scan recipe ingredients for shapeless recipes (same reasoning).
             if (recipe instanceof ShapelessRecipe shapelessRecipe) {
-                for (ItemStack ingredient : shapelessRecipe.getIngredientList()) {
-                    if (ingredient != null && scanItemIfNew(ingredient, scannedItems)) {
-                        discovered++;
-                    }
+                for (RecipeChoice choice : shapelessRecipe.getChoiceList()) {
+                    discovered += scanChoice(choice, scannedItems);
                 }
             }
 
-            // Scan furnace-type recipe inputs
+            // Scan furnace-type recipe inputs via getInputChoice (modern
+            // RecipeChoice form). Why: CookingRecipe#getInput is deprecated
+            // because it can only express a single ItemStack, while the actual
+            // recipe internally stores a RecipeChoice that may carry multiple
+            // accepted items.
             if (recipe instanceof FurnaceRecipe furnaceRecipe) {
-                scanItemIfNew(furnaceRecipe.getInput(), scannedItems);
+                discovered += scanChoice(furnaceRecipe.getInputChoice(), scannedItems);
             }
             if (recipe instanceof BlastingRecipe blastingRecipe) {
-                scanItemIfNew(blastingRecipe.getInput(), scannedItems);
+                discovered += scanChoice(blastingRecipe.getInputChoice(), scannedItems);
             }
             if (recipe instanceof SmokingRecipe smokingRecipe) {
-                scanItemIfNew(smokingRecipe.getInput(), scannedItems);
+                discovered += scanChoice(smokingRecipe.getInputChoice(), scannedItems);
             }
             if (recipe instanceof CampfireRecipe campfireRecipe) {
-                scanItemIfNew(campfireRecipe.getInput(), scannedItems);
+                discovered += scanChoice(campfireRecipe.getInputChoice(), scannedItems);
             }
 
-            // Scan stonecutting recipe input
+            // Scan stonecutting recipe input via getInputChoice (same reasoning).
             if (recipe instanceof StonecuttingRecipe stonecuttingRecipe) {
-                scanItemIfNew(stonecuttingRecipe.getInput(), scannedItems);
+                discovered += scanChoice(stonecuttingRecipe.getInputChoice(), scannedItems);
             }
 
             // Scan smithing recipes
@@ -114,6 +120,57 @@ public final class RecipeScanner {
         }
 
         return discovered;
+    }
+
+    /**
+     * Scans every concrete ItemStack carried by a {@link RecipeChoice} and
+     * returns how many newly-discovered custom items the scan recorded.
+     *
+     * <p>Only {@link RecipeChoice.ExactChoice} can carry CMD-bearing custom
+     * items — {@link RecipeChoice.MaterialChoice} stores vanilla materials
+     * only (no CustomModelData / displayName / lore), so it has no custom
+     * items to discover and is skipped to avoid unnecessary work. Future
+     * {@code RecipeChoice} subtypes fall through to {@code getItemStack()} as
+     * a best-effort representative scan.</p>
+     *
+     * <p>{@code @SuppressWarnings("deprecation")}: {@code RecipeChoice#getItemStack()}
+     * is marked deprecated in current Paper but is the only public way to
+     * obtain a representative ItemStack from a generic RecipeChoice when the
+     * concrete subtype is unknown. A future Paper release may publish a typed
+     * accessor; until then we silence the warning at method level so the
+     * class-wide deprecation guard is not loosened.</p>
+     */
+    @SuppressWarnings("deprecation")
+    private int scanChoice(RecipeChoice choice, Set<String> scannedItems) {
+        if (choice == null) {
+            return 0;
+        }
+        int found = 0;
+        if (choice instanceof RecipeChoice.ExactChoice exact) {
+            for (ItemStack item : exact.getChoices()) {
+                if (item != null && scanItemIfNew(item, scannedItems)) {
+                    found++;
+                }
+            }
+            return found;
+        }
+        if (choice instanceof RecipeChoice.MaterialChoice) {
+            // vanilla materials only — no custom items possible
+            return 0;
+        }
+        // Unknown RecipeChoice subtype: probe its representative ItemStack.
+        // getItemStack() is the only guaranteed accessor on the interface.
+        try {
+            ItemStack representative = choice.getItemStack();
+            if (representative != null && scanItemIfNew(representative, scannedItems)) {
+                found++;
+            }
+        } catch (Throwable ignored) {
+            // some choice implementations may not support getItemStack();
+            // skip silently — at worst we miss a single custom item that the
+            // legacy ItemStack-only path would also have failed to expose.
+        }
+        return found;
     }
 
     /**

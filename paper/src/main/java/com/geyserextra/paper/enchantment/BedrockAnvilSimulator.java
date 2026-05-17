@@ -273,7 +273,16 @@ public final class BedrockAnvilSimulator implements Listener {
      * Why needed: because we cancel the InventoryOpenEvent before the sneak
      * state is known, we must manually re-open the vanilla anvil when the
      * delayed check reveals the player should NOT use the simulated UI.
+     *
+     * <p>{@code @SuppressWarnings("deprecation")} on HumanEntity#openAnvil:
+     * Paper marked the {@code openAnvil(Location, boolean)} overload
+     * deprecated but has not published a public replacement that opens a
+     * vanilla anvil container at a specific block location with the same
+     * force-open semantics. Until a typed builder lands, the deprecated call
+     * remains the only way to achieve the required behaviour. The method is
+     * not marked {@code [removal]}.</p>
      */
+    @SuppressWarnings("deprecation")
     private void reopenVanillaAnvil(Player player, org.bukkit.Location anvilLocation) {
         // Why set bypass flag: opening a vanilla anvil triggers onInventoryOpen again.
         // The flag prevents re-cancellation and infinite recursion.
@@ -676,7 +685,15 @@ public final class BedrockAnvilSimulator implements Listener {
     /**
      * Returns a rarity-based cost multiplier for an enchantment.
      * Treasure and curse enchantments cost more.
+     *
+     * <p>{@code @SuppressWarnings("deprecation")} on Enchantment#isTreasure
+     * and #isCursed: Paper deprecated these in favour of a Tag-based check
+     * ({@code EnchantmentTags.TREASURE.isTagged(...)}, etc.), but the tag
+     * keys are not yet exposed in the public API surface for non-NMS code.
+     * Keep the deprecated accessor calls until the Tag-based path is
+     * documented; the methods are not {@code [removal]}-tagged.</p>
      */
+    @SuppressWarnings("deprecation")
     private int getEnchantmentRarityMultiplier(Enchantment enchantment) {
         if (enchantment.isTreasure()) return 4;
         if (enchantment.isCursed()) return 8;

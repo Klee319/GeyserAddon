@@ -29,7 +29,17 @@ import java.util.regex.Pattern;
  *
  * This scanner extracts texture data from player head items and skull blocks
  * to enable Bedrock players to see custom skull textures via Geyser.
+ *
+ * <p><b>{@code @SuppressWarnings("deprecation")}</b>: Paper has been
+ * shuffling skull-owner accessors across releases — {@code getPlayerProfile()}
+ * was deprecated in favour of {@code getOwnerProfile()}, which was then
+ * itself deprecated, and {@code org.bukkit.profile.PlayerProfile} is also
+ * marked deprecated even though it is the only documented replacement. Until
+ * the API surface stabilises we keep the current call sites and silence the
+ * noise at class level. None of the calls are {@code [removal]}-tagged, and
+ * the same Paper bridge has worked across every 1.21.x release.</p>
  */
+@SuppressWarnings("deprecation")
 public final class SkullScanner {
 
     /**
@@ -120,7 +130,7 @@ public final class SkullScanner {
             return Optional.empty();
         }
 
-        PlayerProfile profile = skull.getPlayerProfile();
+        PlayerProfile profile = asPaperProfile(skull.getOwnerProfile());
         if (profile == null) {
             return Optional.empty();
         }
@@ -153,7 +163,7 @@ public final class SkullScanner {
                 continue;
             }
 
-            PlayerProfile profile = skull.getPlayerProfile();
+            PlayerProfile profile = asPaperProfile(skull.getOwnerProfile());
             if (profile == null) {
                 continue;
             }
@@ -184,7 +194,7 @@ public final class SkullScanner {
      * @return Optional containing the skull data if texture found
      */
     private Optional<SkullData> extractTextureFromMeta(SkullMeta skullMeta) {
-        PlayerProfile profile = skullMeta.getPlayerProfile();
+        PlayerProfile profile = asPaperProfile(skullMeta.getOwnerProfile());
         if (profile == null) {
             if (plugin.getGeyserExtraConfig().general().debugMode()) {
                 plugin.getLogger().info("[SkullDebug] PlayerProfile is null");
@@ -198,6 +208,25 @@ public final class SkullScanner {
         }
 
         return extractTextureFromProfile(profile);
+    }
+
+    /**
+     * Bridges Bukkit's {@link org.bukkit.profile.PlayerProfile} (returned by
+     * the modern {@code getOwnerProfile()} accessors) to the Paper-specific
+     * {@link PlayerProfile} this scanner needs for {@code getProperties()}.
+     *
+     * <p>Why the cast works: every Paper implementation of
+     * {@code org.bukkit.profile.PlayerProfile} also implements
+     * {@code com.destroystokyo.paper.profile.PlayerProfile}. A future Paper
+     * release that breaks this contract would surface as a {@code null}
+     * return here, which the callers already treat as "no profile" — no
+     * extra failure mode is introduced.</p>
+     */
+    private static PlayerProfile asPaperProfile(org.bukkit.profile.PlayerProfile profile) {
+        if (profile instanceof PlayerProfile paperProfile) {
+            return paperProfile;
+        }
+        return null;
     }
 
     /**

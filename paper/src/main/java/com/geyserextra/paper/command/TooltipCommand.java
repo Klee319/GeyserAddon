@@ -3,6 +3,9 @@ package com.geyserextra.paper.command;
 import com.geyserextra.paper.util.BedrockPlayerUtil;
 import com.geyserextra.paper.util.TranslationUtil;
 
+import io.papermc.paper.datacomponent.DataComponentTypes;
+import io.papermc.paper.datacomponent.item.CustomModelData;
+
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 
@@ -149,9 +152,24 @@ public final class TooltipCommand implements CommandExecutor {
             }
         }
 
-        // Custom Model Data (if any) — useful for identifying custom items
-        if (meta != null && meta.hasCustomModelData()) {
-            sb.append("カスタムモデル: ").append(meta.getCustomModelData()).append("\n");
+        // Custom Model Data (if any) — useful for identifying custom items.
+        // Why hasData/getData(CUSTOM_MODEL_DATA) rather than ItemMeta#hasCustomModelData:
+        // Paper deprecated the ItemMeta accessor in favour of the DataComponentTypes
+        // API, which models the modern 1.21.4+ CMD payload (multiple floats + flags
+        // + strings + colors) rather than the legacy single-int shape. We only
+        // display the first float as an int for parity with the legacy display.
+        try {
+            if (item.hasData(DataComponentTypes.CUSTOM_MODEL_DATA)) {
+                CustomModelData cmd = item.getData(DataComponentTypes.CUSTOM_MODEL_DATA);
+                if (cmd != null && cmd.floats() != null && !cmd.floats().isEmpty()) {
+                    sb.append("カスタムモデル: ")
+                        .append(cmd.floats().get(0).intValue())
+                        .append("\n");
+                }
+            }
+        } catch (Throwable ignored) {
+            // Paper API mismatch (very old runtime) — skip the line rather than
+            // failing the entire tooltip render.
         }
 
         // Enchantments (if any) — with safe rendering

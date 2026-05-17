@@ -12,6 +12,13 @@ dependencies {
     compileOnly("com.google.code.gson:gson:2.10.1")
 }
 
+// Surface every deprecated / marked-for-removal API call at build time so
+// Geyser/Adventure deprecation sweeps cannot accumulate silently. See the
+// matching note in paper/build.gradle.kts.
+tasks.withType<JavaCompile>().configureEach {
+    options.compilerArgs.addAll(listOf("-Xlint:deprecation", "-Xlint:removal"))
+}
+
 // Zip the invisible glow frames resource pack and include in JAR resources
 // Why exclude *.py: Build scripts (create_images.py) are development tools,
 // not part of the Bedrock resource pack. Including them may cause pack parsing issues.

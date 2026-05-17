@@ -15,6 +15,16 @@ dependencies {
     compileOnly("com.discordsrv:discordsrv:1.30.0")
 }
 
+// Surface every deprecated / marked-for-removal API call at build time so
+// the same Paper / Adventure / Geyser deprecation sweep that flagged
+// AnvilInventory.setRepairCost and Enchantment.translationKey() does not
+// silently re-accumulate. Without these flags, javac collapses the list to
+// a "...some files use deprecated APIs" note and only the first couple of
+// warnings ever surface, hiding the rest behind whichever pair javac picked.
+tasks.withType<JavaCompile>().configureEach {
+    options.compilerArgs.addAll(listOf("-Xlint:deprecation", "-Xlint:removal"))
+}
+
 tasks.shadowJar {
     archiveClassifier.set("")
     archiveBaseName.set("geyserExtra")

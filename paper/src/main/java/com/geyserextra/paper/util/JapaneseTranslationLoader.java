@@ -241,9 +241,19 @@ public final class JapaneseTranslationLoader {
      * (quoting mechanism). Minecraft translations contain literal single quotes (e.g.,
      * "Jack o'Lantern") that must be escaped by doubling them (' -> '').
      *
+     * <p>{@code @SuppressWarnings("deprecation")}: Adventure 4.18 marked
+     * {@code TranslationRegistry} (and its {@code create}/{@code defaultLocale}/
+     * {@code register} entry points) deprecated in favour of
+     * {@code TranslationStore}. Paper's bundled Adventure still ships the
+     * legacy registry as a working concrete type, and the {@code TranslationStore}
+     * migration requires a Renderer setup that is still being stabilised
+     * across Adventure releases. The legacy registry works end-to-end today
+     * and is not {@code [removal]}-tagged.</p>
+     *
      * @param translations map of translation key to translated value
      * @param logger       logger for progress reporting
      */
+    @SuppressWarnings("deprecation")
     private static void registerTranslations(Map<String, String> translations, Logger logger) {
         TranslationRegistry registry = TranslationRegistry.create(
                 Key.key("geyserextra", "ja_jp"));

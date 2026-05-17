@@ -265,7 +265,17 @@ public final class OffhandInteractionListener implements Listener {
      *
      * Why: clicking a chest/furnace/etc. should open its UI, not trigger
      * offhand item usage.
+     *
+     * <p>{@code @SuppressWarnings("deprecation")} on Material#isInteractable():
+     * Paper deprecated the {@code Material} accessor in favour of a
+     * BlockType-based API that is still being stabilised. Reproducing the
+     * vanilla "interactable" set by hand (every chest variant, every door,
+     * every furnace, beacons, repeaters, ...) would be a much larger
+     * undertaking with the same observable behaviour, so we intentionally
+     * keep the deprecated call until Paper publishes a stable replacement.
+     * The method is not marked {@code [removal]} as of Paper 1.21.x.</p>
      */
+    @SuppressWarnings("deprecation")
     private boolean isInteractableBlockClick(PlayerInteractEvent event, Player player) {
         Block clickedBlock = event.getClickedBlock();
         return clickedBlock != null
