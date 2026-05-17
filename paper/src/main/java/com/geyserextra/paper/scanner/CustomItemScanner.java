@@ -442,30 +442,146 @@ public final class CustomItemScanner {
 
     private String extractDisplayName(ItemStack itemStack) {
         ItemMeta meta = itemStack.getItemMeta();
-        if (meta == null || !meta.hasDisplayName() || meta.displayName() == null) {
+        if (meta != null && meta.hasDisplayName() && meta.displayName() != null) {
+            net.kyori.adventure.text.Component name = meta.displayName();
+
+            // Resolve TranslatableComponent against the operator's Java pack lang
+            // file so the registry stores the human-readable name (e.g. "Fire Sword")
+            // rather than the bare translation key. Without this, plugins that set
+            // display names via Component.translatable("item.mymod.fire_sword")
+            // leave us storing "item.mymod.fire_sword" — which Bedrock has no way
+            // to render and which would leak through every fallback chain we have.
+            if (name instanceof net.kyori.adventure.text.TranslatableComponent translatable) {
+                String resolved = plugin.getJavaPackLangReader().resolve(translatable.key());
+                if (resolved != null && !resolved.isBlank()) {
+                    return resolved;
+                }
+                // Lang file doesn't contain the key — fall through to the plain
+                // serializer below. The result will be the raw key string, which
+                // is still better than nothing for diagnostic purposes and at
+                // least lets later upgrade paths recognise the entry.
+            }
+
+            String plain = net.kyori.adventure.text.serializer.plain
+                .PlainTextComponentSerializer.plainText().serialize(name);
+            if (plain != null && !plain.isBlank()) {
+                return plain;
+            }
+        }
+
+        // ItemMeta has no displayName Component. Two more shots before
+        // giving up — without them the registry stores null, Geyser sees
+        // a null displayName, and the Bedrock client falls back to the
+        // raw Geyser identifier (e.g. "gmdl_abc1234") which is what the
+        // user reported as "items show their internal ID instead of a
+        // readable name".
+        //
+        // Order matters: PDC first because plugins that store display
+        // names in PDC (ItemsAdder, Oraxen, MMOItems variants) carry the
+        // intended human-readable string there. Vanilla lang fallback is
+        // a last resort that at least localises the base material name.
+        String pdcName = extractDisplayNameFromPDC(itemStack.getItemMeta());
+        if (pdcName != null && !pdcName.isBlank()) {
+            return pdcName;
+        }
+
+        return resolveVanillaMaterialName(itemStack.getType());
+    }
+
+    /**
+     * Common PDC keys plugins use to store a player-facing display name.
+     * Plain {@code name} / {@code id} variants are excluded here because
+     * they are usually internal identifiers; {@link #extractItemIdFromPDC}
+     * already consumes them. Order is preference-first.
+     */
+    private static final String[] PDC_DISPLAY_NAME_KEYS = {
+        "displayname", "display_name", "title", "label"
+    };
+
+    /**
+     * Probes the item's PersistentDataContainer for a display-name string.
+     * Returns {@code null} when no recognised key carries one. The search
+     * is intentionally narrow (compared to {@link #extractItemIdFromPDC})
+     * so we don't accidentally surface an internal ID as a display name.
+     */
+    private String extractDisplayNameFromPDC(ItemMeta meta) {
+        if (meta == null) {
             return null;
         }
-        net.kyori.adventure.text.Component name = meta.displayName();
+        PersistentDataContainer pdc = meta.getPersistentDataContainer();
+        if (pdc.isEmpty()) {
+            return null;
+        }
+        for (NamespacedKey key : pdc.getKeys()) {
+            String lower = key.getKey().toLowerCase(Locale.ROOT);
+            for (String candidate : PDC_DISPLAY_NAME_KEYS) {
+                if (!lower.contains(candidate)) continue;
+                try {
+                    String value = pdc.get(key, PersistentDataType.STRING);
+                    if (value != null && !value.isBlank()) {
+                        return value;
+                    }
+                } catch (Exception ignored) {
+                    // Non-string PDC value at this key → keep searching.
+                }
+                break;
+            }
+        }
+        return null;
+    }
 
-        // Resolve TranslatableComponent against the operator's Java pack lang
-        // file so the registry stores the human-readable name (e.g. "Fire Sword")
-        // rather than the bare translation key. Without this, plugins that set
-        // display names via Component.translatable("item.mymod.fire_sword")
-        // leave us storing "item.mymod.fire_sword" — which Bedrock has no way
-        // to render and which would leak through every fallback chain we have.
-        if (name instanceof net.kyori.adventure.text.TranslatableComponent translatable) {
-            String resolved = plugin.getJavaPackLangReader().resolve(translatable.key());
+    /**
+     * Resolves the base material's vanilla display name via the operator's
+     * Java pack lang file when present (so a Japanese-locale pack returns
+     * "ダイヤモンドの剣" for {@code minecraft:diamond_sword}), falling back
+     * to a prettified material identifier ("Diamond Sword") when no lang
+     * file is configured. Used as the last-ditch display name when the
+     * item has neither ItemMeta displayName nor a recognised PDC display
+     * key — at least the Bedrock player sees a sensible material name
+     * instead of a raw Geyser identifier.
+     */
+    private String resolveVanillaMaterialName(Material material) {
+        if (material == null) {
+            return "Unknown";
+        }
+        String key = material.getKey().getKey();
+        com.geyserextra.paper.pack.JavaPackLangReader langReader = plugin.getJavaPackLangReader();
+        if (langReader != null && !langReader.isEmpty()) {
+            String itemKey = "item.minecraft." + key;
+            String resolved = langReader.resolve(itemKey);
             if (resolved != null && !resolved.isBlank()) {
                 return resolved;
             }
-            // Lang file doesn't contain the key — fall through to the plain
-            // serializer below. The result will be the raw key string, which
-            // is still better than nothing for diagnostic purposes and at
-            // least lets later upgrade paths recognise the entry.
+            if (material.isBlock()) {
+                String blockKey = "block.minecraft." + key;
+                resolved = langReader.resolve(blockKey);
+                if (resolved != null && !resolved.isBlank()) {
+                    return resolved;
+                }
+            }
         }
+        return prettifyMaterialKey(key);
+    }
 
-        return net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText()
-            .serialize(name);
+    private static String prettifyMaterialKey(String raw) {
+        if (raw == null || raw.isEmpty()) {
+            return "Unknown";
+        }
+        StringBuilder pretty = new StringBuilder(raw.length());
+        boolean upcaseNext = true;
+        for (int i = 0; i < raw.length(); i++) {
+            char c = raw.charAt(i);
+            if (c == '_' || c == '/' || c == ':') {
+                pretty.append(' ');
+                upcaseNext = true;
+            } else if (upcaseNext) {
+                pretty.append(Character.toUpperCase(c));
+                upcaseNext = false;
+            } else {
+                pretty.append(c);
+            }
+        }
+        return pretty.toString();
     }
 
     private boolean isUnbreakable(ItemStack itemStack) {
