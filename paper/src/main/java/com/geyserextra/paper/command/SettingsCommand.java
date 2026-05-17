@@ -91,17 +91,21 @@ public final class SettingsCommand implements CommandExecutor {
             .toggle("チャンク境界表示", current.isChunkBoundaryDisplay())
             .dropdown("エンティティ情報表示", ENTITY_OPTIONS,
                 toEntityIndex(current.getEntityDisplay()))
+            .toggle("アイテムLore注入(耐久値・オーバーエンチャント)",
+                current.isLoreTooltipEnabled())
             .validResultHandler(response -> {
                 EnvironmentDisplayMode biomeMode = fromEnvironmentIndex(response.asDropdown(0));
                 EnvironmentDisplayMode lightMode = fromEnvironmentIndex(response.asDropdown(1));
                 boolean chunkBoundary = response.asToggle(2);
                 EntityDisplayMode entityMode = fromEntityIndex(response.asDropdown(3));
+                boolean loreTooltip = response.asToggle(4);
 
                 PlayerSettings newSettings = current
                     .withBiomeDisplay(biomeMode)
                     .withLightLevelDisplay(lightMode)
                     .withChunkBoundaryDisplay(chunkBoundary)
-                    .withEntityDisplay(entityMode);
+                    .withEntityDisplay(entityMode)
+                    .withLoreTooltipEnabled(loreTooltip);
 
                 // Why runTask: Form response handlers execute on the Netty I/O thread,
                 // but settings persistence and player messaging must happen on the

@@ -733,7 +733,7 @@ public final class GeyserExtraPaper extends JavaPlugin {
                 key.baseItem(),
                 key.cmd(),
                 false,   // unbreakable unknown from pack alone
-                null,    // display name unknown from pack alone
+                deriveFallbackDisplayName(key.baseItem(), key.cmd()),
                 null,    // icon falls back to name via item_texture.json
                 CustomItemMapping.CREATIVE_CATEGORY_ITEMS,
                 null,    // creative group unset
@@ -746,6 +746,39 @@ public final class GeyserExtraPaper extends JavaPlugin {
             getLogger().info("[JavaPack] pre-registration: " + added
                 + " items added from pack, " + skipped + " already in registry");
         }
+    }
+
+    /**
+     * Builds a human-readable display name fallback for a pack-first registration.
+     *
+     * <p>Why: when {@code displayName} is null, Geyser falls back to the Bedrock
+     * identifier ({@code geyserextra:custom_diamond_sword_100}) which the
+     * Bedrock client renders as raw-id-looking text. The runtime scanner
+     * replaces this with the player's actual display name once they touch the
+     * item, but until then we want a more presentable placeholder. The output
+     * is derived from the base material so it carries no information the pack
+     * didn't already provide; the CMD suffix keeps variants distinguishable
+     * in inventory and creative menu.</p>
+     */
+    private static String deriveFallbackDisplayName(String baseItem, int cmd) {
+        String trimmed = baseItem.startsWith("minecraft:")
+            ? baseItem.substring("minecraft:".length())
+            : baseItem;
+        StringBuilder pretty = new StringBuilder(trimmed.length() + 8);
+        boolean upcaseNext = true;
+        for (int i = 0; i < trimmed.length(); i++) {
+            char c = trimmed.charAt(i);
+            if (c == '_' || c == ':' || c == '/') {
+                pretty.append(' ');
+                upcaseNext = true;
+            } else if (upcaseNext) {
+                pretty.append(Character.toUpperCase(c));
+                upcaseNext = false;
+            } else {
+                pretty.append(c);
+            }
+        }
+        return pretty + " #" + cmd;
     }
 
     /**
@@ -816,6 +849,17 @@ public final class GeyserExtraPaper extends JavaPlugin {
      */
     public GeyserExtraConfig getGeyserExtraConfig() {
         return config;
+    }
+
+    /**
+     * Returns the per-player settings manager so other components (e.g. the
+     * Bedrock enchantment lore injector) can honour individual player
+     * preferences such as the lore-tooltip toggle.
+     *
+     * @return the manager, or {@code null} if the plugin failed to initialise it
+     */
+    public PlayerSettingsManager getPlayerSettingsManager() {
+        return playerSettingsManager;
     }
 
     /**

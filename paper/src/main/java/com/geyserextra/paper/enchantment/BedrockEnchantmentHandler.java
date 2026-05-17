@@ -215,6 +215,11 @@ public final class BedrockEnchantmentHandler implements Listener {
             }
         }
 
+        // Per-player opt-out for the durability / over-enchant lore lines.
+        // Toggled via /ga menu, stored on PlayerSettings.
+        if (!isLoreTooltipEnabledFor(playerId)) {
+            return;
+        }
         ItemStack modified = injectEnchantmentLore(item);
         if (modified != null) {
             packet.getItemModifier().write(0, modified);
@@ -248,6 +253,7 @@ public final class BedrockEnchantmentHandler implements Listener {
 
         boolean isEnchantingTableWindow = playerId != null
             && stripper.isEnchantmentTableWindow(playerId, packet);
+        boolean loreInjectionAllowed = isLoreTooltipEnabledFor(playerId);
 
         // Lazy allocation: only create modifiedList when first modification is found
         List<ItemStack> modifiedList = null;
@@ -259,7 +265,7 @@ public final class BedrockEnchantmentHandler implements Listener {
             if (i == 0 && isEnchantingTableWindow) {
                 output = stripper.stripCustomModelData(item);
             }
-            if (output == null) {
+            if (output == null && loreInjectionAllowed) {
                 output = injectEnchantmentLore(item);
             }
 
@@ -984,6 +990,29 @@ public final class BedrockEnchantmentHandler implements Listener {
     private boolean isBedrockPlayer(Player player) {
         UUID uuid = getPlayerUuidSafely(player);
         return uuid != null && floodgateApi != null && floodgateApi.isFloodgatePlayer(uuid);
+    }
+
+    /**
+     * Whether the given Bedrock player has opted in to receiving the lore-tooltip
+     * injection (durability / over-enchant lines). Defaults to true when the
+     * settings manager is unavailable or the player has no recorded preference
+     * yet, matching the pre-toggle behaviour.
+     */
+    private boolean isLoreTooltipEnabledFor(UUID playerId) {
+        if (playerId == null) {
+            return true;
+        }
+        com.geyserextra.paper.settings.PlayerSettingsManager manager = plugin.getPlayerSettingsManager();
+        if (manager == null) {
+            return true;
+        }
+        com.geyserextra.paper.settings.PlayerSettings settings;
+        try {
+            settings = manager.getSettings(playerId);
+        } catch (Throwable t) {
+            return true;
+        }
+        return settings == null || settings.isLoreTooltipEnabled();
     }
 
     // ========================================================================
