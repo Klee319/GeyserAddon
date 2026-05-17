@@ -12,18 +12,21 @@ import org.bukkit.event.inventory.InventoryAction;
 import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.InventoryType;
 import org.bukkit.event.player.PlayerDropItemEvent;
+import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.PlayerInventory;
 import org.bukkit.plugin.Plugin;
 
-import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Swaps the main-hand and off-hand stacks for a Bedrock player when they
- * press the drop key while sneaking, mirroring the Java F-key behaviour
- * without requiring the {@code /offhand} command.
+ * press the drop key while sneaking, and re-applies off-hand inventory
+ * mutations the Bedrock client refuses to visualise.
  *
  * <p>Why this trigger: Bedrock has no native off-hand swap gesture. Sneak +
  * drop is rarely a deliberate "drop while sneaking" action (sneak already
@@ -38,10 +41,27 @@ import java.util.Objects;
  * <p>Trade-off: a Bedrock player can no longer drop items while sneaking.
  * They must un-sneak briefly to drop. The {@code /offhand} command remains
  * available for players who prefer not to use the gesture.</p>
+ *
+ * <p><b>Concurrency model:</b> every mutation runs on the next tick to keep
+ * Bukkit inventory writes on the primary thread. A per-player pending-op
+ * flag ({@link #pendingOffhandOps}) prevents a second event from queueing
+ * another mutation against stale inventory state — without this guard, two
+ * fast clicks on the off-hand slot could schedule two next-tick jobs that
+ * both observe the pre-first-click state and write conflicting amounts,
+ * yielding duplicated or lost items.</p>
  */
 public final class OffhandSwapListener implements Listener {
 
     private final Plugin plugin;
+
+    /**
+     * Players whose off-hand mutation has been scheduled but not yet executed.
+     * A click that arrives while the flag is set is ignored — the queued
+     * mutation will run first and the player can issue a fresh click after
+     * the next tick. Cleared when the next-tick task finishes (success or
+     * skip) and when the player disconnects.
+     */
+    private final Set<UUID> pendingOffhandOps = ConcurrentHashMap.newKeySet();
 
     public OffhandSwapListener(Plugin plugin) {
         this.plugin = Objects.requireNonNull(plugin, "plugin must not be null");
@@ -65,6 +85,12 @@ public final class OffhandSwapListener implements Listener {
         if (!player.isSneaking()) {
             return;
         }
+        if (!tryAcquireOp(player)) {
+            // A previous gesture is still in flight; the in-flight mutation
+            // already represents the player's intent, so dropping the extra
+            // request keeps state consistent.
+            return;
+        }
 
         ItemStack droppedItem = event.getItemDrop().getItemStack().clone();
         // Remove the dropped Item entity so it does not actually appear on the
@@ -79,12 +105,7 @@ public final class OffhandSwapListener implements Listener {
         // back what was actually removed.
         event.getItemDrop().remove();
 
-        Bukkit.getScheduler().runTask(plugin, () -> {
-            if (!player.isOnline()) {
-                return;
-            }
-            swapMainHandWithOffhand(player, droppedItem);
-        });
+        schedule(player, () -> swapMainHandWithOffhand(player, droppedItem));
     }
 
     /**
@@ -131,24 +152,26 @@ public final class OffhandSwapListener implements Listener {
 
         PlayerInventory inv = player.getInventory();
         ItemStack offhand = inv.getItemInOffHand();
-        if (offhand == null || offhand.getType() == Material.AIR) {
+        ItemStack cursor = event.getCursor();
+        boolean cursorEmpty = isEmpty(cursor);
+        boolean offhandEmpty = isEmpty(offhand);
+
+        // No-op clicks: cursor empty + offhand empty has nothing to mutate.
+        if (cursorEmpty && offhandEmpty) {
             return;
         }
 
         InventoryAction action = event.getAction();
-        ItemStack cursor = event.getCursor();
-        boolean cursorEmpty = cursor == null || cursor.getType() == Material.AIR;
-
         switch (action) {
             case PICKUP_ALL, PICKUP_HALF, PICKUP_ONE, PICKUP_SOME -> {
                 // Empty-cursor pick-up: move whole off-hand stack to cursor.
-                if (!cursorEmpty) {
-                    return;  // shouldn't happen with PICKUP_* but be defensive
+                if (!cursorEmpty || offhandEmpty) {
+                    return;
                 }
+                if (!tryAcquireOp(player)) return;
                 event.setCancelled(true);
                 ItemStack toCursor = offhand.clone();
-                Bukkit.getScheduler().runTask(plugin, () -> {
-                    if (!player.isOnline()) return;
+                schedule(player, () -> {
                     inv.setItemInOffHand(null);
                     player.setItemOnCursor(toCursor);
                     player.updateInventory();
@@ -156,16 +179,47 @@ public final class OffhandSwapListener implements Listener {
             }
             case SWAP_WITH_CURSOR -> {
                 // Cursor and off-hand swap (cursor holds a different stack).
-                if (cursorEmpty) {
-                    return;  // collapse-with-empty-cursor is handled above
+                if (cursorEmpty || offhandEmpty) {
+                    return;
                 }
+                if (!tryAcquireOp(player)) return;
                 event.setCancelled(true);
                 ItemStack newOffhand = cursor.clone();
                 ItemStack toCursor = offhand.clone();
-                Bukkit.getScheduler().runTask(plugin, () -> {
-                    if (!player.isOnline()) return;
+                schedule(player, () -> {
                     inv.setItemInOffHand(newOffhand);
                     player.setItemOnCursor(toCursor);
+                    player.updateInventory();
+                });
+            }
+            case PLACE_ALL, PLACE_ONE, PLACE_SOME -> {
+                // Cursor → off-hand placement. Bedrock's UI does not refresh
+                // when the client deemed the placement invalid, so we recompute
+                // the merged state server-side and push it back.
+                if (cursorEmpty) {
+                    return;
+                }
+                int requested = switch (action) {
+                    case PLACE_ONE -> 1;
+                    case PLACE_ALL, PLACE_SOME -> cursor.getAmount();
+                    default -> 0;
+                };
+                if (requested <= 0) return;
+
+                PlacementResult plan = planPlacement(cursor, offhand, requested);
+                if (plan == null) {
+                    // Nothing legal to place (e.g. dissimilar full-stack offhand
+                    // with no room). Let Bukkit handle / cancel naturally.
+                    return;
+                }
+
+                if (!tryAcquireOp(player)) return;
+                event.setCancelled(true);
+                final ItemStack newOffhandFinal = plan.newOffhand();
+                final ItemStack newCursorFinal = plan.newCursor();
+                schedule(player, () -> {
+                    inv.setItemInOffHand(newOffhandFinal);
+                    player.setItemOnCursor(newCursorFinal);
                     player.updateInventory();
                 });
             }
@@ -173,10 +227,11 @@ public final class OffhandSwapListener implements Listener {
                 // Shift-click: send off-hand stack to the first slot that
                 // accepts it. If nothing accepts (inventory full), leave the
                 // item where it is so we never lose it silently.
+                if (offhandEmpty) return;
+                if (!tryAcquireOp(player)) return;
                 event.setCancelled(true);
                 ItemStack snapshot = offhand.clone();
-                Bukkit.getScheduler().runTask(plugin, () -> {
-                    if (!player.isOnline()) return;
+                schedule(player, () -> {
                     inv.setItemInOffHand(null);
                     Map<Integer, ItemStack> overflow = inv.addItem(snapshot);
                     if (!overflow.isEmpty()) {
@@ -192,10 +247,13 @@ public final class OffhandSwapListener implements Listener {
                 if (hotbar < 0 || hotbar > 8) {
                     return;
                 }
+                if (offhandEmpty && isEmpty(inv.getItem(hotbar))) {
+                    return;
+                }
+                if (!tryAcquireOp(player)) return;
                 event.setCancelled(true);
-                ItemStack snapshot = offhand.clone();
-                Bukkit.getScheduler().runTask(plugin, () -> {
-                    if (!player.isOnline()) return;
+                ItemStack snapshot = offhandEmpty ? null : offhand.clone();
+                schedule(player, () -> {
                     ItemStack hotbarItem = inv.getItem(hotbar);
                     inv.setItemInOffHand(hotbarItem);
                     inv.setItem(hotbar, snapshot);
@@ -204,15 +262,18 @@ public final class OffhandSwapListener implements Listener {
             }
             case DROP_ALL_SLOT, DROP_ONE_SLOT -> {
                 // Drop key on the off-hand slot: drop the off-hand item naturally.
+                if (offhandEmpty) return;
+                if (!tryAcquireOp(player)) return;
                 event.setCancelled(true);
-                ItemStack toDrop = action == InventoryAction.DROP_ONE_SLOT
+                final ItemStack toDrop = action == InventoryAction.DROP_ONE_SLOT
                     ? singleItem(offhand)
                     : offhand.clone();
-                Bukkit.getScheduler().runTask(plugin, () -> {
-                    if (!player.isOnline()) return;
-                    if (action == InventoryAction.DROP_ONE_SLOT && offhand.getAmount() > 1) {
+                final InventoryAction finalAction = action;
+                final int currentAmount = offhand.getAmount();
+                schedule(player, () -> {
+                    if (finalAction == InventoryAction.DROP_ONE_SLOT && currentAmount > 1) {
                         ItemStack remaining = offhand.clone();
-                        remaining.setAmount(remaining.getAmount() - 1);
+                        remaining.setAmount(currentAmount - 1);
                         inv.setItemInOffHand(remaining);
                     } else {
                         inv.setItemInOffHand(null);
@@ -221,12 +282,59 @@ public final class OffhandSwapListener implements Listener {
                     player.updateInventory();
                 });
             }
+            case COLLECT_TO_CURSOR -> {
+                // Double-click: vanilla collects matching items into the cursor.
+                // We let Bukkit handle this — its default scanner already walks
+                // the whole inventory, and we have no Bedrock-specific issue
+                // here that warrants a re-do.
+            }
             default -> {
-                // PLACE_*, NOTHING, COLLECT_TO_CURSOR, etc. — leave to default
-                // Bukkit behaviour. They generally do not strand items in the
+                // NOTHING and any future-added enum values fall through to
+                // default Bukkit behaviour. They do not strand items in the
                 // off-hand for the Bedrock player.
             }
         }
+    }
+
+    /**
+     * Releases any per-player op lock when the player disconnects, so the
+     * pending-flag set never accumulates stale UUIDs.
+     */
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onPlayerQuit(PlayerQuitEvent event) {
+        pendingOffhandOps.remove(event.getPlayer().getUniqueId());
+    }
+
+    /**
+     * Returns true and reserves the lock, or false if the player already has
+     * a pending op queued. Callers that get {@code false} must skip without
+     * cancelling the event — Bukkit's default resolution is at least
+     * consistent, while a half-applied mutation is not.
+     */
+    private boolean tryAcquireOp(Player player) {
+        return pendingOffhandOps.add(player.getUniqueId());
+    }
+
+    /**
+     * Schedules {@code task} for the next tick, automatically releasing the
+     * per-player lock on completion regardless of whether the task ran or the
+     * player went offline first.
+     */
+    private void schedule(Player player, Runnable task) {
+        UUID uuid = player.getUniqueId();
+        Bukkit.getScheduler().runTask(plugin, () -> {
+            try {
+                if (player.isOnline()) {
+                    task.run();
+                }
+            } finally {
+                pendingOffhandOps.remove(uuid);
+            }
+        });
+    }
+
+    private static boolean isEmpty(ItemStack stack) {
+        return stack == null || stack.getType() == Material.AIR || stack.getAmount() <= 0;
     }
 
     /**
@@ -238,6 +346,70 @@ public final class OffhandSwapListener implements Listener {
         ItemStack one = stack.clone();
         one.setAmount(1);
         return one;
+    }
+
+    /**
+     * Computes the (newOffhand, newCursor) pair for a cursor → off-hand
+     * placement. Returns {@code null} when nothing can legally be placed.
+     *
+     * <p>Three sub-cases:
+     * <ol>
+     *   <li>Empty off-hand: move up to {@code requested} (capped to stack
+     *       size) of cursor into off-hand.</li>
+     *   <li>Off-hand similar to cursor: top up off-hand by min(requested,
+     *       remaining space), and trim cursor accordingly.</li>
+     *   <li>Off-hand dissimilar: treated as a SWAP only when {@code requested}
+     *       covers the whole cursor stack (otherwise vanilla would refuse).</li>
+     * </ol>
+     * </p>
+     */
+    private static PlacementResult planPlacement(
+        ItemStack cursor,
+        ItemStack offhand,
+        int requested
+    ) {
+        int maxStackSize = cursor.getMaxStackSize();
+        if (maxStackSize <= 0) {
+            maxStackSize = 64;
+        }
+        int cursorAmount = cursor.getAmount();
+        int amountToPlace = Math.min(Math.max(1, requested), cursorAmount);
+
+        if (isEmpty(offhand)) {
+            int placed = Math.min(amountToPlace, maxStackSize);
+            if (placed <= 0) return null;
+            ItemStack newOffhand = cursor.clone();
+            newOffhand.setAmount(placed);
+            int leftover = cursorAmount - placed;
+            ItemStack newCursor = leftover > 0 ? cursor.clone() : null;
+            if (newCursor != null) {
+                newCursor.setAmount(leftover);
+            }
+            return new PlacementResult(newOffhand, newCursor);
+        }
+
+        if (offhand.isSimilar(cursor)) {
+            int existing = offhand.getAmount();
+            int space = Math.max(0, maxStackSize - existing);
+            if (space <= 0) return null;
+            int placed = Math.min(amountToPlace, space);
+            if (placed <= 0) return null;
+            ItemStack newOffhand = offhand.clone();
+            newOffhand.setAmount(existing + placed);
+            int leftover = cursorAmount - placed;
+            ItemStack newCursor = leftover > 0 ? cursor.clone() : null;
+            if (newCursor != null) {
+                newCursor.setAmount(leftover);
+            }
+            return new PlacementResult(newOffhand, newCursor);
+        }
+
+        // Dissimilar off-hand contents: vanilla refuses partial placement, so
+        // only honour the request when the whole cursor stack is being moved.
+        if (amountToPlace != cursorAmount) {
+            return null;
+        }
+        return new PlacementResult(cursor.clone(), offhand.clone());
     }
 
     /**
@@ -276,4 +448,7 @@ public final class OffhandSwapListener implements Listener {
         }
         return droppedItem.clone();
     }
+
+    /** Result of a cursor → off-hand placement plan. */
+    private record PlacementResult(ItemStack newOffhand, ItemStack newCursor) {}
 }
