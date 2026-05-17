@@ -25,27 +25,31 @@ import java.util.zip.ZipOutputStream;
 
 /**
  * Builds a Bedrock resource pack ZIP that mirrors the operator-supplied Java
- * pack's custom textures onto Geyser-registered custom items.
+ * pack's custom textures onto Geyser-registered custom items, with a vanilla
+ * texture fallback for everything else.
  *
  * <p>Why: Geyser's custom item registration assigns each mapping a new BE item
  * ID whose icon is resolved through {@code item_texture.json}. Without a
- * companion BE pack, those IDs render as missing textures on Bedrock clients.
- * This builder generates a pack that bundles the PNG textures sourced from the
- * Java pack and points the matching item_texture entries at them so a Bedrock
- * player sees the same custom artwork a Java player does.</p>
+ * companion BE pack — or with an entry-less one — those IDs render as missing
+ * (transparent) textures on Bedrock clients.</p>
  *
- * <p><b>Strict policy: only items whose Java pack supplies a custom texture
- * are written into the generated pack.</b> CMD mappings without a matching
- * Java pack texture (vanilla-look-only entries used purely to disambiguate
- * recipes, etc.) are intentionally omitted from {@code item_texture.json}.
- * Including them would bloat the pack with vanilla-fallback rows and clash
- * with the user-stated invariant that "the auto-pack contains only items the
- * Java pack actually customised". Items skipped here still receive their
- * Geyser identity (so naming and predicates work); only the visual falls back
- * to Bedrock's default item icon.</p>
+ * <p><b>Texture resolution per mapping:</b>
+ * <ul>
+ *   <li>Java pack supplies a custom PNG → copy it under
+ *       {@code textures/items/&lt;iconKey&gt;.png} and point the
+ *       {@code item_texture.json} entry at that path. Bedrock sees the
+ *       same artwork a Java player does.</li>
+ *   <li>Java pack supplies no PNG for this mapping (or no Java pack at all)
+ *       → write a vanilla fallback entry pointing at the base material's
+ *       built-in Bedrock texture path ({@code textures/items/&lt;baseName&gt;}).
+ *       Bedrock falls back to its bundled vanilla artwork rather than
+ *       rendering a transparent slot, matching what a Java player without
+ *       the pack would see.</li>
+ * </ul>
+ * </p>
  *
  * <p>The pack contains {@code manifest.json}, a placeholder
- * {@code pack_icon.png}, the copied PNG textures, and the strict
+ * {@code pack_icon.png}, any copied PNG textures, and the
  * {@code item_texture.json}.</p>
  */
 public final class AutoBedrockPackBuilder {
@@ -322,20 +326,26 @@ public final class AutoBedrockPackBuilder {
     }
 
     /**
-     * Builds the strict {@code item_texture.json}: only icon keys that were
-     * actually backed by a Java-pack-supplied PNG (recorded in
-     * {@code customIconToTexturePath}) end up in the output. Mappings without
-     * a custom texture are deliberately omitted — see the class Javadoc for
-     * the rationale.
+     * Builds the {@code item_texture.json}: every registered mapping gets an
+     * entry, pointed at either the operator-supplied Java pack PNG (when
+     * present in {@code customIconToTexturePath}) or the base material's
+     * built-in Bedrock texture path as a vanilla fallback.
+     *
+     * <p>Why the vanilla fallback rather than a strict opt-out: skipping
+     * mappings without a custom PNG would leave the matching Bedrock item ID
+     * texture-less, and the Bedrock client renders that as a transparent
+     * slot. Falling back to the base material's texture keeps the item
+     * visible — exactly what a Java player without the resource pack would
+     * see — while still letting the Java pack override individual items.</p>
      *
      * @param customIconToTexturePath icon-key -> custom texture path (without
      *        the trailing {@code .png}) for items whose textures were copied
-     *        from the Java pack. Mappings absent from this map are skipped.
+     *        from the Java pack. Missing entries fall back to the vanilla
+     *        Bedrock texture for the base item.
      * @param logger optional logger; when non-null, warns once per icon-key
      *        collision so an operator can see when two distinct mappings
      *        collapse to the same Bedrock identity (one will lose its
-     *        texture), and reports the count of mappings dropped because no
-     *        Java-pack texture was supplied.
+     *        texture).
      */
     private static String buildItemTextureJson(
         Collection<CustomItemMapping> mappings,
@@ -348,7 +358,8 @@ public final class AutoBedrockPackBuilder {
 
         Map<String, Map<String, String>> textureData = new LinkedHashMap<>();
         Map<String, String> seenIconKeys = new LinkedHashMap<>();  // iconKey -> first mapping name that claimed it
-        int skippedNoCustomTexture = 0;
+        int customCount = 0;
+        int vanillaFallbackCount = 0;
         int skippedCollision = 0;
         for (CustomItemMapping mapping : mappings) {
             // Sanitize to the same form Extension's CustomItemsHandler uses when
@@ -357,15 +368,6 @@ public final class AutoBedrockPackBuilder {
             // produce a key here that does not match the registered icon, and
             // Bedrock would silently fail to find the texture.
             String iconKey = toBedrockIconKey(mapping.name());
-            String customPath = customIconToTexturePath.get(iconKey);
-            if (customPath == null) {
-                // Strict policy: items without a Java-pack-supplied texture are
-                // not written into the auto-generated pack. They keep their
-                // Geyser registration so naming/predicates still work; only the
-                // visual falls back to the Bedrock default icon.
-                skippedNoCustomTexture++;
-                continue;
-            }
             // Dedup: if multiple registry entries collapse to the same sanitized
             // key, only the first wins. Surface this loudly so an operator can
             // rename the offender; with a silent skip the texture-not-applied
@@ -380,17 +382,26 @@ public final class AutoBedrockPackBuilder {
                 skippedCollision++;
                 continue;
             }
+            String customPath = customIconToTexturePath.get(iconKey);
+            String texturePath;
+            if (customPath != null) {
+                texturePath = customPath;
+                customCount++;
+            } else {
+                texturePath = vanillaTexturePathFor(mapping.baseItem());
+                vanillaFallbackCount++;
+            }
             Map<String, String> entry = new LinkedHashMap<>();
-            entry.put("textures", customPath);
+            entry.put("textures", texturePath);
             textureData.put(iconKey, entry);
         }
         root.put("texture_data", textureData);
 
-        if (logger != null && (skippedNoCustomTexture > 0 || skippedCollision > 0)) {
-            logger.info("[AutoPack] item_texture.json (strict): wrote " + textureData.size()
-                + " entries, skipped " + skippedNoCustomTexture
-                + " mapping(s) with no Java-pack texture, " + skippedCollision
-                + " mapping(s) due to icon-key collision");
+        if (logger != null && textureData.size() > 0) {
+            logger.info("[AutoPack] item_texture.json: wrote " + textureData.size()
+                + " entries (" + customCount + " custom, "
+                + vanillaFallbackCount + " vanilla fallback, "
+                + skippedCollision + " skipped due to icon-key collision)");
         }
 
         return JsonUtil.toPrettyJson(root);
