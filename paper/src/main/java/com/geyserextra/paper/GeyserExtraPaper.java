@@ -17,6 +17,7 @@ import com.geyserextra.core.api.CustomItemMapping;
 import com.geyserextra.paper.pack.AutoBedrockPackBuilder;
 import com.geyserextra.paper.pack.JavaPackLangReader;
 import com.geyserextra.paper.pack.JavaPackReader;
+import com.geyserextra.paper.pack.JavaPackResolver;
 import com.geyserextra.paper.scanner.CustomItemScanner;
 import com.geyserextra.paper.scanner.RecipeScanner;
 import com.geyserextra.paper.scanner.SkullScanner;
@@ -911,52 +912,34 @@ public final class GeyserExtraPaper extends JavaPlugin {
     }
 
     /**
-     * Resolves the configured Java edition resource pack root path.
+     * Resolves the operator's Java edition resource pack root to a usable
+     * on-disk directory by delegating to {@link JavaPackResolver}.
      *
-     * <p>Returns {@code null} when the path is unset, blank, missing on disk,
-     * not a directory, or escapes the plugin data folder via {@code ..}
-     * traversal — in those cases the auto-pack builder skips the Java pack
-     * scan and falls back to vanilla textures for every item.</p>
+     * <p>The resolver tries three sources in priority order:
+     * <ol>
+     *   <li>{@code javaResourcePackPath} config pointing at an unzipped
+     *       directory (used verbatim, fastest path).</li>
+     *   <li>{@code javaResourcePackPath} config pointing at a {@code .zip}
+     *       file (extracted into the plugin's cache directory).</li>
+     *   <li>{@code server.properties}'s {@code resource-pack} URL when the
+     *       config field is blank — downloaded into the cache, SHA-1
+     *       verified against {@code resource-pack-sha1}, and extracted.</li>
+     * </ol>
+     * Explicit config beats the URL by design: operators set the config
+     * field specifically when they want to override the URL (e.g. point at
+     * a server-local pack while still serving Java players a different
+     * pack via URL).</p>
      *
-     * <p>Relative paths are interpreted against this plugin's data folder
-     * (e.g. {@code plugins/GeyserExtra/}) and must resolve to a location
-     * within that folder after normalization. Absolute paths are accepted
-     * verbatim — operators choosing an absolute path are trusted to know
-     * where they pointed.</p>
+     * <p>Returns {@code null} when no source resolves — the auto-pack
+     * builder then falls back to vanilla textures for every item.</p>
      */
     private Path resolveJavaPackRoot() {
-        String configured = config.customItems().javaResourcePackPath();
-        if (configured == null || configured.isBlank()) {
-            return null;
-        }
-        Path rawCandidate = Path.of(configured);
-        boolean wasRelative = !rawCandidate.isAbsolute();
-        Path candidate = wasRelative
-            ? getDataFolder().toPath().resolve(rawCandidate)
-            : rawCandidate;
-        Path normalized = candidate.toAbsolutePath().normalize();
-
-        // Why: a relative path like "../../etc" would silently escape the
-        // plugin data folder once resolved + normalized. Reject any relative
-        // configuration that escapes, while still letting absolute paths
-        // through unchanged (an operator setting an absolute path is making
-        // an explicit choice).
-        if (wasRelative) {
-            Path pluginRoot = getDataFolder().toPath().toAbsolutePath().normalize();
-            if (!normalized.startsWith(pluginRoot)) {
-                getLogger().warning(
-                    "[JavaPack] relative javaResourcePackPath escapes plugin data folder: "
-                        + configured + " (resolved to " + normalized + ") — ignoring.");
-                return null;
-            }
-        }
-
-        if (!Files.isDirectory(normalized)) {
-            getLogger().warning("[JavaPack] configured java pack path is not a directory: "
-                + normalized + " — falling back to vanilla textures.");
-            return null;
-        }
-        return normalized;
+        JavaPackResolver resolver = new JavaPackResolver(
+            config.customItems().javaResourcePackPath(),
+            getServer(),
+            getDataFolder().toPath(),
+            getLogger());
+        return resolver.resolve().orElse(null);
     }
 
     /**
