@@ -250,13 +250,21 @@ public final class BedrockAttachableWriter {
             } else {
                 // Per-face UV form lets us pin the sample region to the full
                 // texture extent regardless of PNG resolution.
-                Map<String, Object> faceUv = new LinkedHashMap<>();
-                faceUv.put("uv", List.of(0, 0));
-                faceUv.put("uv_size", List.of(textureWidth, textureHeight));
-                // The flat quad only has one visible face (north). Set the
-                // other faces to omit (Bedrock simply doesn't render them).
+                //
+                // For a {@code size: [16, 16, 0]} flat quad both the north
+                // (-Z) and south (+Z) faces are non-degenerate; depending on
+                // the camera angle the player may see either, so declaring
+                // both keeps the icon visible from every viewpoint and
+                // matches the simple-UV form's rendering behaviour. Faces
+                // with zero area (east/west/up/down for a 0-depth quad) are
+                // intentionally omitted — Bedrock skips them anyway.
                 Map<String, Object> uvMap = new LinkedHashMap<>();
-                uvMap.put("north", faceUv);
+                for (String face : List.of("north", "south")) {
+                    Map<String, Object> faceUv = new LinkedHashMap<>();
+                    faceUv.put("uv", List.of(0, 0));
+                    faceUv.put("uv_size", List.of(textureWidth, textureHeight));
+                    uvMap.put(face, faceUv);
+                }
                 flatQuad.put("uv", uvMap);
             }
             cubes = List.of(flatQuad);

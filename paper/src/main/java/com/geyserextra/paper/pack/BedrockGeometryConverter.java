@@ -187,7 +187,14 @@ public final class BedrockGeometryConverter {
         List<Map<String, Object>> cubes = new ArrayList<>(geometry.elements().size());
         for (JavaModelGeometry.Element element : geometry.elements()) {
             if (element == null) continue;
-            cubes.add(convertSingleElement(element, tw, th, logger));
+            Map<String, Object> cube = convertSingleElement(element, tw, th, logger);
+            // convertSingleElement returns null when the source element has no
+            // usable faces — Mojang treats such elements as invisible, so
+            // omitting the cube here is the only way to preserve that visual
+            // semantic on the Bedrock side.
+            if (cube != null) {
+                cubes.add(cube);
+            }
         }
         return cubes;
     }
@@ -201,43 +208,74 @@ public final class BedrockGeometryConverter {
         float[] from = element.from();
         float[] to = element.to();
 
+        // Java's renderer accepts {@code from > to} on any axis and treats it
+        // as a swap, so we normalise to (min, max) per axis here. Without the
+        // normalisation, an artist mistake (or a model that intentionally
+        // flips an axis) would clamp to a zero-size cube and render as an
+        // invisible sliver. {@code Math.min} / {@code Math.max} preserves
+        // Bedrock's "origin is the smallest-XYZ corner" invariant.
+        float fx = Math.min(from[0], to[0]);
+        float fy = Math.min(from[1], to[1]);
+        float fz = Math.min(from[2], to[2]);
+        float tx = Math.max(from[0], to[0]);
+        float ty = Math.max(from[1], to[1]);
+        float tz = Math.max(from[2], to[2]);
+
         // Java cube corner (negative-Z) maps to Bedrock origin (negative-Z).
         // The Z reverse — taking (java.from.z - 8) rather than (8 - java.to.z)
         // — keeps the cube on the same side of the held-item bone that Java's
         // own renderer puts it on. We verified this empirically against
         // ValhallaMMO weapons; if a future model shows the cube on the wrong
         // side, only this offset and convertElementRotation below need touching.
-        float originX = from[0] - 8f;
-        float originY = from[1];
-        float originZ = from[2] - 8f;
+        float originX = fx - 8f;
+        float originY = fy;
+        float originZ = fz - 8f;
 
-        // Sizes can theoretically be negative when an artist swaps from/to;
-        // clamp to non-negative because Bedrock cubes reject negative dims.
-        float sizeX = Math.max(0f, to[0] - from[0]);
-        float sizeY = Math.max(0f, to[1] - from[1]);
-        float sizeZ = Math.max(0f, to[2] - from[2]);
+        float sizeX = tx - fx;
+        float sizeY = ty - fy;
+        float sizeZ = tz - fz;
+
+        Map<String, JavaModelGeometry.Face> faces = element.faces();
+
+        // Phase 6 (Codex-flagged correctness): Mojang requires a non-empty
+        // {@code faces} object for a cube to be visible — an element with
+        // {@code faces:{}} or no parseable face entries renders as invisible
+        // in Java. Mirroring this, we omit the cube entirely (return null)
+        // rather than falling back to a cube-level UV that would render all
+        // six faces. The caller (convertElementsToCubes) filters nulls out
+        // of the final list.
+        if (faces == null || faces.isEmpty()) {
+            if (logger != null) {
+                logger.warning("[BedrockGeometry] element from " + java.util.Arrays.toString(from)
+                    + " to " + java.util.Arrays.toString(to)
+                    + " has no faces declared — skipping cube so it remains "
+                    + "invisible (matches Java semantics). If you intended this "
+                    + "cube to be visible, add a `faces` object to the Java model.");
+            }
+            return null;
+        }
+
+        Map<String, Object> faceUvs = buildPerFaceUvMap(faces, textureWidth, textureHeight, logger);
+        if (faceUvs.isEmpty()) {
+            // Every face was either rotated (skipped at convert time), zero-area,
+            // or otherwise unrenderable. Omit the cube rather than promoting to
+            // cube-level UV — promoting would make the cube fully visible and
+            // contradict the operator's intent of having no usable faces.
+            if (logger != null) {
+                logger.warning("[BedrockGeometry] element from " + java.util.Arrays.toString(from)
+                    + " to " + java.util.Arrays.toString(to)
+                    + " produced no renderable Bedrock faces — skipping cube. "
+                    + "Common causes: every face had non-zero rotation, every "
+                    + "UV had zero width or height, or the texture mapping was "
+                    + "otherwise malformed.");
+            }
+            return null;
+        }
 
         Map<String, Object> cube = new LinkedHashMap<>();
         cube.put("origin", List.of(originX, originY, originZ));
         cube.put("size", List.of(sizeX, sizeY, sizeZ));
-
-        // Phase 6: emit per-face UV when the element declares any face.
-        // Cubes without face data fall back to the simple "uv: [0, 0]" form
-        // so Bedrock can still render them (vs. omitting cube.uv which makes
-        // the cube invisible).
-        Map<String, JavaModelGeometry.Face> faces = element.faces();
-        if (faces != null && !faces.isEmpty()) {
-            Map<String, Object> faceUvs = buildPerFaceUvMap(faces, textureWidth, textureHeight, logger);
-            if (!faceUvs.isEmpty()) {
-                cube.put("uv", faceUvs);
-            } else {
-                // Every face failed to convert (malformed UV across the board);
-                // degrade to a single-cube UV so the cube is at least visible.
-                cube.put("uv", List.of(0, 0));
-            }
-        } else {
-            cube.put("uv", List.of(0, 0));
-        }
+        cube.put("uv", faceUvs);
 
         JavaModelGeometry.ElementRotation rot = element.rotation();
         if (rot != null) {
@@ -296,6 +334,25 @@ public final class BedrockGeometryConverter {
         int textureHeight,
         Logger logger
     ) {
+        // Phase 6 (Codex-flagged correctness): Bedrock per-face UV format
+        // 1.16.0 has no native equivalent for Java's 0/90/180/270 per-face
+        // texture rotation. Rather than silently render the face with the
+        // texture in the wrong orientation, we skip the face entirely so the
+        // operator sees a visibly missing face — a stronger signal that the
+        // model needs updating than a misrotated texture which they might
+        // not notice. The accompanying WARN log lets them locate the
+        // affected face quickly.
+        if (face.rotation() != 0) {
+            if (logger != null) {
+                logger.warning("[BedrockGeometry] face " + faceName + " has Java rotation "
+                    + face.rotation() + "° which Bedrock per-face UV cannot express — "
+                    + "the face will not be rendered on Bedrock. To restore visibility, "
+                    + "pre-rotate the texture in the source PNG and set the model face "
+                    + "rotation to 0.");
+            }
+            return null;
+        }
+
         // Default UV when not specified: [0, 0, 16, 16] (whole texture).
         // This matches Mojang's runtime default for missing-UV faces on items.
         float u1, v1, u2, v2;
@@ -322,26 +379,17 @@ public final class BedrockGeometryConverter {
         float bedrockUSize = (u2 - u1) * scaleX;
         float bedrockVSize = (v2 - v1) * scaleY;
 
-        // Zero-area UV — common when the operator copied a face from an empty
-        // element. Omit so Bedrock doesn't render a degenerate face that
-        // shows up as a 1-pixel artefact.
-        if (bedrockUSize == 0f && bedrockVSize == 0f) {
+        // Phase 6 (Codex-flagged): zero area on EITHER axis means the face
+        // can't physically render — a UV strip of {@code N x 0} or {@code 0 x N}
+        // is still degenerate. Previously we only caught the {@code 0 x 0} case
+        // which let narrow strip artefacts through.
+        if (bedrockUSize == 0f || bedrockVSize == 0f) {
             return null;
         }
 
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("uv", List.of(bedrockU, bedrockV));
         out.put("uv_size", List.of(bedrockUSize, bedrockVSize));
-
-        // Java's per-face texture rotation has no native Bedrock equivalent
-        // in the per-face UV form. Log at FINE so debug-enabled operators see
-        // affected faces but the live server isn't spammed.
-        if (face.rotation() != 0 && logger != null) {
-            logger.fine("[BedrockGeometry] face " + faceName + " has Java rotation "
-                + face.rotation() + "° which Bedrock per-face UV cannot express — "
-                + "the texture will appear unrotated on this face. "
-                + "Affects only this face; other faces of the same cube are unaffected.");
-        }
         return out;
     }
 
