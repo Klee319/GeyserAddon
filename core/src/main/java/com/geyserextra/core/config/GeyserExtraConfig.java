@@ -165,6 +165,18 @@ public final class GeyserExtraConfig {
             } catch (IOException e) {
                 LOGGER.log(Level.WARNING, "Failed to load configuration from " + path + ", using defaults", e);
                 return new GeyserExtraConfig();
+            } catch (RuntimeException e) {
+                // Gson/JsonUtil typically throws RuntimeException (JsonParseException,
+                // JsonSyntaxException, or IllegalArgumentException from a value-object
+                // canonical constructor) on malformed JSON. Without this catch, a single
+                // bad entry in dynamicResourcePackUrls or any other nested record could
+                // escape to onEnable and crash the entire plugin. Falling back to
+                // defaults keeps the server bootable; the operator sees the warning
+                // and can repair the config without losing service.
+                LOGGER.log(Level.WARNING, "Configuration at " + path
+                    + " is malformed (" + e.getClass().getSimpleName() + "): "
+                    + e.getMessage() + " — falling back to defaults", e);
+                return new GeyserExtraConfig();
             }
         }
 
@@ -402,9 +414,14 @@ public final class GeyserExtraConfig {
                 ? javaPackLocale.toLowerCase()
                 : "en_us";
             this.pdcEnabled = pdcEnabled;
+            // Late-filter invalid entries. DynamicResourcePackEntry's compact
+            // constructor is intentionally lenient (accepts null/blank url)
+            // so a malformed JSON does not throw mid-Gson-deserialisation and
+            // crash plugin enable; instead we drop the bad entries here where
+            // we can fail closed for that entry alone.
             this.dynamicResourcePackUrls = dynamicResourcePackUrls != null
                 ? List.copyOf(dynamicResourcePackUrls.stream()
-                    .filter(e -> e != null && e.url() != null && !e.url().isBlank())
+                    .filter(e -> e != null && e.hasValidUrl())
                     .toList())
                 : Collections.emptyList();
             this.attachableGeneration = attachableGeneration != null
@@ -634,7 +651,7 @@ public final class GeyserExtraConfig {
             }
             List<DynamicResourcePackEntry> out = new ArrayList<>(raw.size());
             for (DynamicResourcePackEntry entry : raw) {
-                if (entry == null || entry.url() == null || entry.url().isBlank()) {
+                if (entry == null || !entry.hasValidUrl()) {
                     continue;
                 }
                 out.add(entry);
@@ -660,20 +677,39 @@ public final class GeyserExtraConfig {
      * <ul>
      *   <li>{@code off} — write nothing extra. Resulting auto-pack ZIP is
      *       bit-for-bit identical to the pre-feature build. Emergency rollback.</li>
-     *   <li>{@code offsets_only} — write attachable + a flat-quad geometry that
-     *       only encodes the Java {@code display} transform (firstperson_righthand
-     *       / thirdperson_righthand). 3D Blockbench {@code elements} are ignored.</li>
+     *   <li>{@code offsets_only} (<b>default</b>) — write attachable + a flat-quad
+     *       geometry that only encodes the Java {@code display} transform
+     *       (firstperson_righthand / thirdperson_righthand). 3D Blockbench
+     *       {@code elements} are ignored. Held-item angle/position match Java;
+     *       the shape is a flat 2D quad of the icon texture.</li>
      *   <li>{@code full} — write attachable + full 3D geometry derived from
-     *       Java {@code elements}. Default.</li>
+     *       Java {@code elements}. Opt-in (not default) because the per-cube UV
+     *       mapping is currently a single {@code [0, 0]} pair, so most
+     *       multi-face Blockbench models will sample wrong texels on each face
+     *       compared to Java. Use when you have validated the visual output
+     *       per item, or when the Bedrock-side mismatch is acceptable.</li>
      * </ul>
+     *
+     * <p><b>Default change history:</b> the {@code offsets_only} default was
+     * chosen after a dual-agent review flagged that {@code full} as the default
+     * (a) breaks byte-stability of the generated ZIP for existing operators
+     * even without any config change, and (b) ships untested axis-sign defaults
+     * with discarded per-face UV. {@code offsets_only} resolves both concerns:
+     * held-item pose matches Java, the 2D texture is correct because it reuses
+     * the existing flat-quad path, and operators can still opt in to {@code full}
+     * when they want experimental 3D rendering.</p>
      */
     public static final class AttachableGenerationConfig {
 
         /** Disable attachable generation (zip identical to pre-feature). */
         public static final String MODE_OFF = "off";
-        /** Write attachable with flat-quad geometry + display transform animation. */
+        /** Write attachable with flat-quad geometry + display transform animation. Default. */
         public static final String MODE_OFFSETS_ONLY = "offsets_only";
-        /** Write attachable with full 3D geometry from Java elements + display transform. */
+        /**
+         * Write attachable with full 3D geometry from Java elements + display
+         * transform. <b>Not the default</b> — opt-in only because of the
+         * known per-face UV limitation documented in the class javadoc.
+         */
         public static final String MODE_FULL = "full";
 
         private final String mode;
@@ -681,7 +717,7 @@ public final class GeyserExtraConfig {
         private final boolean debugDumpArtifacts;
 
         public AttachableGenerationConfig() {
-            this(MODE_FULL, false, false);
+            this(MODE_OFFSETS_ONLY, false, false);
         }
 
         public AttachableGenerationConfig(String mode,
@@ -694,12 +730,12 @@ public final class GeyserExtraConfig {
 
         private static String normalizeMode(String raw) {
             if (raw == null || raw.isBlank()) {
-                return MODE_FULL;
+                return MODE_OFFSETS_ONLY;
             }
             String lower = raw.toLowerCase(java.util.Locale.ROOT);
             return switch (lower) {
                 case MODE_OFF, MODE_OFFSETS_ONLY, MODE_FULL -> lower;
-                default -> MODE_FULL;
+                default -> MODE_OFFSETS_ONLY;
             };
         }
 
@@ -708,7 +744,7 @@ public final class GeyserExtraConfig {
          * {@link #MODE_FULL}. Always normalised to one of these values.
          */
         public String mode() {
-            return mode != null ? mode : MODE_FULL;
+            return mode != null ? mode : MODE_OFFSETS_ONLY;
         }
 
         /**

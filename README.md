@@ -52,12 +52,12 @@ CustomModelDataを持つアイテムを自動検出し、Bedrockプレイヤー�
 
 **3D カスタムモデルと手持ち時の見え方:**
 
-GeyserExtra は Java の `display` ブロックと Blockbench `elements` を Bedrock 用 attachable / geometry / animation JSON に自動変換します（既定有効）。プレイヤーが手に持った時の角度・位置・形状が Java と一致するように生成されます。
+GeyserExtra は Java の `display` ブロックと Blockbench `elements` を Bedrock 用 attachable / geometry / animation JSON に自動変換します。プレイヤーが手に持った時の角度・位置・形状が Java に近づくように生成されます。
 
 - `customItems.attachableGeneration.mode`:
-  - `full` (**既定**) — display transform + elements 3D 形状を Bedrock 側に反映
-  - `offsets_only` — display transform のみ反映、3D 形状は 1 枚 quad
-  - `off` — attachable 生成を完全に無効化（既存リリースとバイナリ完全一致）
+  - `offsets_only` (**既定**) — display transform を反映、3D 形状は 1 枚 quad で 2D アイコンを Java と同じ角度・位置で持つ。手持ち姿勢は Java と一致、形状はインベントリと同じフラットアイコン。
+  - `full` — `elements` 由来の 3D 形状も反映（opt-in）。**注意:** per-face UV は Bedrock 側で単一 UV ペアに集約するため、多面 Blockbench モデルでは各面のテクスチャ位置が Java と異なるケースが多い。手元検証推奨。
+  - `off` — attachable 生成を完全に無効化。pre-feature 版とバイナリ完全一致（緊急ロールバック）。
 - `customItems.attachableGeneration.force_first_person_only` — `hold_third_person` アニメを書き出さない緊急回避フラグ
 - `customItems.attachableGeneration.debug_dump_artifacts` — 生成 JSON を `<plugin>/debug/auto_pack/` に複製保存（将来拡張用、現状は未使用）
 
@@ -67,7 +67,7 @@ GeyserExtra は Java の `display` ブロックと Blockbench `elements` を Bed
 - ブロックモデル（非 `item/`）は対象外
 - マテリアル指定は `entity_alphatest` 固定
 - `display.head` / `display.ground` / `display.fixed` は未対応（手持ち時の slot のみ）
-- per-face UV は Bedrock 側で単一 UV pair に集約
+- `mode=full` の per-face UV は Bedrock 側で単一 UV pair に集約（Java と異なるテクスチャ位置のリスクあり）
 
 完全な 3D 表現や複雑な multi-layer テクスチャが必要な場合は、別途 [Kas-tle/java2bedrock](https://github.com/Kas-tle/java2bedrock.sh) などの外部コンバータの出力を `plugins/Geyser-Spigot/packs/` に配置することで自動パックを上書きできます。
 
@@ -78,8 +78,11 @@ GeyserExtra は Java の `display` ブロックと Blockbench `elements` を Bed
 - 既定で有効（`customItems.pdcEnabled = true`）
 - ロールバックは `customItems.pdcEnabled = false`
 - 安定識別子の抽出順序: 著名プラグイン namespace 完全一致 → キー名ヒント (`item_id`, `custom_id`, `identifier` 等) → 該当なしは登録対象外
+- **PDC 値の型制約:** 識別子抽出は `PersistentDataType.STRING` のみ対応。プラグインが BYTE_ARRAY や独自シリアライザで保存しているケースは検出されず登録対象外 (silently null)。大多数のプラグイン (Oraxen, ItemsAdder, MMOItems 等) は STRING を使用するため通常は影響なし。
 
 **API 制約による注意:** Geyser v2 API には「特定 PDC キー一致」predicate が無いため、`hasComponent("minecraft:custom_data")` を採用しています。**同じベースマテリアル（例: stick）を共有する複数の PDC アイテムは、Bedrock 側でアイコン/3D モデルが最初に登録された定義に集約されます。** ただし `display.Name` (アイテム名) は Geyser の標準機能で個別に転送されるため、Bedrock のレシピブック / ホバー時には個別の名前で区別可能です。
+
+衝突が発生している場合は extension の起動ログに `[CustomItems] PDC collision on minecraft:<base>: N PDC-identified items share this base material...` という WARN 行が 1 件出力されるので、`custom_items.json` を確認して衝突状態を把握できます。
 
 ### 動的 URL リソースパック対応
 
@@ -97,11 +100,15 @@ GeyserExtra は Java の `display` ブロックと Blockbench `elements` を Bed
 ```
 
 - 複数 URL を列挙可能（順序保持、URL 由来パックは local パックを上書き）
-- SHA-1 指定あり → 厳密ハッシュ検証、不一致時はキャッシュ無効化 + skip
+- SHA-1 指定あり → 厳密ハッシュ検証、不一致時は既存キャッシュを保護したまま skip（stale-if-error）
 - SHA-1 未指定 → 24 時間 TTL ベースのキャッシュ
-- HTTP 失敗 / 不正 ZIP / SHA-1 mismatch は WARN ログ + 該当エントリのみ skip、他は継続
+- HTTP 失敗 / 不正 ZIP / SHA-1 mismatch は WARN ログ + 該当エントリのみ skip。前回成功時のキャッシュがあれば継続利用、他エントリは並行処理。
+- **ダウンロードは `.partial` 経由 + atomic move:** HTTP エラーや SHA-1 不一致でも既存 cache は破壊されず、TTL 期間内の poisoned cache を回避。
+- **メインスレッド非ブロック化:** Server tick 上 (`onEnable` / `onDisable`) からの呼び出しはキャッシュのみ参照、HTTP fetch は行わない。`onEnable` 後 2 秒の非同期タスクで初回 fetch + auto-pack 再生成。`customItems.autoReload=true` のときは定期非同期タスクで cache 更新を継続。
 
 **自動検出について:** VillagerBucket のように内部で URL を保持しているプラグインから自動取得する API は現状存在しないため、運用者が当該プラグインの config 等から URL を確認して上記設定に書き写してください。将来 `JavaResourcePackProvider` SPI 経由での自動連携 (interface 宣言済み、本体結線は次フェーズ) を予定しています。
+
+**Release note (V5):** server.properties の `resource-pack-sha1` 検証で hash mismatch が発生した場合の挙動が変更されました。以前は無限再ダウンロードループに陥っていましたが、現在は警告ログ 1 行を出して当該エントリを skip し、既存の有効キャッシュがあればそれを継続利用します。
 
 **マッピング名の決定（優先順）:**
 1. PersistentDataContainer の `item_id` 等のキー（複数の標準名に対応）

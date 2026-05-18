@@ -583,6 +583,30 @@ public final class GeyserExtraPaper extends JavaPlugin {
             );
         }
 
+        // V3: one-shot async refresh after onEnable so dynamic URL packs get
+        // fetched and merged into the auto-pack even on the first boot when
+        // no cache exists yet. The primary-thread startup save (which now
+        // refuses HTTP) leaves URL packs un-fetched; this kickoff fills them
+        // in without blocking the tick loop.
+        //
+        // Why an async one-shot in addition to the periodic timer above:
+        // operators with autoReload=false would otherwise see URL packs
+        // missing until a manual reload or full restart with a warm cache.
+        // This one-shot keeps the first-install path working out of the box.
+        if (!config.customItems().effectiveDynamicResourcePackUrls().isEmpty()) {
+            getServer().getScheduler().runTaskLaterAsynchronously(
+                this,
+                () -> {
+                    try {
+                        saveRegistriesToSharedFolder();
+                    } catch (Throwable t) {
+                        getLogger().warning("[JavaPack] async dynamic-pack refresh failed: "
+                            + t.getClass().getSimpleName() + ": " + t.getMessage());
+                    }
+                },
+                40L  // 2 seconds after enable, lets other plugins finish their own scans first
+            );
+        }
     }
 
     /**
@@ -964,6 +988,12 @@ public final class GeyserExtraPaper extends JavaPlugin {
      * builder then falls back to vanilla textures for every item.</p>
      */
     private List<Path> resolveJavaPackRoots() {
+        // V3: when called on the primary thread (onEnable startup scans,
+        // onDisable shutdown save), disallow network so a slow remote pack URL
+        // can't stall the server tick loop. The periodic async save task runs
+        // off the primary thread and gets full network access — that path is
+        // what actually keeps the URL caches fresh.
+        boolean allowNetwork = !getServer().isPrimaryThread();
         JavaPackResolver resolver = new JavaPackResolver(
             config.customItems().effectiveJavaResourcePackPaths(),
             // Phase 2: dynamic URL packs declared in config. Empty list (the
@@ -971,7 +1001,8 @@ public final class GeyserExtraPaper extends JavaPlugin {
             config.customItems().effectiveDynamicResourcePackUrls(),
             getServer(),
             getDataFolder().toPath(),
-            getLogger());
+            getLogger(),
+            allowNetwork);
         return resolver.resolveAll();
     }
 

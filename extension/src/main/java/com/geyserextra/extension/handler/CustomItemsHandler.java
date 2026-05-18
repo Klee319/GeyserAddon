@@ -318,6 +318,17 @@ public class CustomItemsHandler {
         }
         Map<Identifier, Collection<CustomItemDefinition>> existing = snapshotExistingDefinitions(event);
 
+        // Phase 1 / V4: pre-flight detection of PDC same-base collisions. The
+        // Geyser v2 API has no "specific PDC key value" predicate, so multiple
+        // PDC items sharing the same base material all register with the same
+        // hasComponent("minecraft:custom_data") predicate. Bedrock then uses
+        // the first registered definition for every same-base PDC item; the
+        // others render with the wrong icon/3D model (display name is still
+        // correct because Geyser transfers it from the Java NBT).
+        // Without this scan the silent collapse is invisible to operators;
+        // logging it once per base material gives them a clear trail.
+        warnAboutPdcSameBaseCollisions();
+
         int registered = 0;
         int skippedDuplicate = 0;
         int failed = 0;
@@ -396,6 +407,43 @@ public class CustomItemsHandler {
 
         extension.logger().info("=== Registration Complete: " + registered + " registered, "
             + skippedDuplicate + " duplicate-skipped, " + failed + " failed ===");
+    }
+
+    /**
+     * Walks the loaded {@link ItemMapping}s and emits one WARN line per base
+     * material that has more than one PDC-identified mapping (a "PDC same-base
+     * collision"). Bedrock will render all of them using whichever entry Geyser
+     * accepts first because the {@code hasComponent("minecraft:custom_data")}
+     * predicate matches every PDC-carrying item on that material. The collision
+     * is documented in the README; this warning surfaces the affected items at
+     * registration time so the operator can investigate without having to
+     * cross-reference logs by hand.
+     */
+    private void warnAboutPdcSameBaseCollisions() {
+        Map<String, List<String>> pdcByBase = new java.util.LinkedHashMap<>();
+        for (ItemMapping mapping : itemMappings) {
+            if (mapping.isNonVanilla() || mapping.baseItem() == null) {
+                continue;
+            }
+            if (!mapping.hasPdcIdentifier()) {
+                continue;
+            }
+            pdcByBase
+                .computeIfAbsent(mapping.baseItem(), k -> new ArrayList<>())
+                .add(mapping.name() + " (pdc=" + mapping.pdcIdentifier() + ")");
+        }
+        for (Map.Entry<String, List<String>> entry : pdcByBase.entrySet()) {
+            List<String> names = entry.getValue();
+            if (names.size() <= 1) {
+                continue;
+            }
+            extension.logger().warning(
+                "[CustomItems] PDC collision on " + entry.getKey() + ": "
+                    + names.size() + " PDC-identified items share this base material. "
+                    + "Bedrock will render all of them as the first registered definition "
+                    + "(API limitation: Geyser v2 has no PDC-value predicate). "
+                    + "Affected entries: " + String.join(", ", names));
+        }
     }
 
     /**

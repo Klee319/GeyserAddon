@@ -672,10 +672,16 @@ public final class CustomItemScanner {
      * {@link #extractStableIdFromPDC(ItemStack)} so the registry key for a
      * given item is deterministic even if the plugin writes multiple unrelated
      * PDC keys to the same {@code ItemMeta}.
+     *
+     * <p>{@code "skript"} is intentionally excluded: it is a scripting plugin,
+     * not an item-management plugin, and ships items with arbitrary PDC values
+     * that are usually script state, not stable item identifiers. Treating any
+     * {@code skript:*} key as an item ID would surface those internal values
+     * as Bedrock mapping names.</p>
      */
     private static final String[] PREFERRED_PDC_NAMESPACES = {
         "oraxen", "itemsadder", "mythicmobs", "mythiccrucible",
-        "mmoitems", "mmocore", "ecoitems", "nexo", "skript"
+        "mmoitems", "mmocore", "ecoitems", "nexo"
     };
 
     /**

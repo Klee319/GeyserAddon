@@ -770,7 +770,15 @@ public final class JavaPackReader {
                 break;
             }
             Object elementsObj = modelJson.get("elements");
-            if (elementsObj instanceof List<?> rawList && !rawList.isEmpty()) {
+            if (elementsObj instanceof List<?> rawList) {
+                // S4: an explicit empty array (elements: []) is Mojang's way
+                // of saying "I override the parent's geometry with nothing".
+                // We honour that by stopping the parent walk here and returning
+                // null so callers fall back to the 2D path rather than picking
+                // up an inherited 3D shape the operator explicitly removed.
+                if (rawList.isEmpty()) {
+                    return null;
+                }
                 List<JavaModelGeometry.Element> parsed = new ArrayList<>(rawList.size());
                 for (Object item : rawList) {
                     if (!(item instanceof Map<?, ?> elementMap)) continue;
@@ -782,6 +790,11 @@ public final class JavaPackReader {
                 if (!parsed.isEmpty()) {
                     return new JavaModelGeometry(parsed);
                 }
+                // List was non-empty but every entry failed to parse — treat
+                // as malformed and stop walking rather than silently inheriting
+                // the parent's elements (which would not match what the
+                // operator wrote).
+                return null;
             }
             Object parent = modelJson.get("parent");
             if (!(parent instanceof String parentRef) || parentRef.isBlank()) {

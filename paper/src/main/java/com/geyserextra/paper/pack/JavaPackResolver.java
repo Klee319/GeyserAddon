@@ -91,6 +91,16 @@ public final class JavaPackResolver {
     private final Server server;
     private final Path pluginDataFolder;
     private final Logger logger;
+    /**
+     * When {@code false}, dynamic URL entries and the server.properties
+     * fallback are restricted to existing cache hits: no HTTP request is
+     * issued and missing-cache entries are skipped silently. When {@code true},
+     * full download/refresh behaviour is permitted. Use {@code false} from
+     * the primary thread to avoid stalling startup/shutdown on a slow remote;
+     * the periodic async save task uses {@code true} so cached entries stay
+     * fresh.
+     */
+    private final boolean allowNetwork;
 
     /**
      * Convenience constructor for callers with a single configured path.
@@ -104,14 +114,15 @@ public final class JavaPackResolver {
         Logger logger
     ) {
         this(toSingletonList(configuredPath), Collections.emptyList(),
-             server, pluginDataFolder, logger);
+             server, pluginDataFolder, logger, true);
     }
 
     /**
      * Backward-compatible 4-arg constructor (pre-Phase-2 shape). Delegates to
-     * the new canonical 5-arg constructor with an empty dynamic-URL list, so
-     * call sites that haven't been updated continue to work and resolve only
-     * configured paths + the server.properties fallback.
+     * the canonical constructor with an empty dynamic-URL list and
+     * {@code allowNetwork=true}, so call sites that haven't been updated
+     * continue to work and resolve only configured paths + the server.properties
+     * fallback (with network permitted).
      */
     public JavaPackResolver(
         List<String> configuredPaths,
@@ -120,11 +131,29 @@ public final class JavaPackResolver {
         Logger logger
     ) {
         this(configuredPaths, Collections.emptyList(),
-             server, pluginDataFolder, logger);
+             server, pluginDataFolder, logger, true);
     }
 
     /**
-     * Canonical constructor including the Phase 2 dynamic URL list.
+     * Backward-compatible 5-arg constructor (pre-V3 shape). Delegates to the
+     * canonical 6-arg constructor with {@code allowNetwork=true} so call sites
+     * that don't yet route through the primary-thread check keep working with
+     * full network behaviour.
+     */
+    public JavaPackResolver(
+        List<String> configuredPaths,
+        List<DynamicResourcePackEntry> dynamicUrlEntries,
+        Server server,
+        Path pluginDataFolder,
+        Logger logger
+    ) {
+        this(configuredPaths, dynamicUrlEntries,
+             server, pluginDataFolder, logger, true);
+    }
+
+    /**
+     * Canonical constructor including the Phase 2 dynamic URL list and the
+     * Phase-V3 {@code allowNetwork} flag.
      *
      * @param configuredPaths     raw values of
      *                            {@code customItems.javaResourcePackPath} +
@@ -142,13 +171,18 @@ public final class JavaPackResolver {
      * @param pluginDataFolder    plugin's data folder; cache lives under
      *                            {@code <dataFolder>/cache}
      * @param logger              plugin logger for warnings / info
+     * @param allowNetwork        when {@code false}, no HTTP request is issued;
+     *                            URL/server.properties entries reuse cache or
+     *                            skip. Used to keep primary-thread invocations
+     *                            non-blocking.
      */
     public JavaPackResolver(
         List<String> configuredPaths,
         List<DynamicResourcePackEntry> dynamicUrlEntries,
         Server server,
         Path pluginDataFolder,
-        Logger logger
+        Logger logger,
+        boolean allowNetwork
     ) {
         this.configuredPaths = configuredPaths != null
             ? List.copyOf(configuredPaths)
@@ -159,6 +193,7 @@ public final class JavaPackResolver {
         this.server = server;
         this.pluginDataFolder = pluginDataFolder;
         this.logger = logger;
+        this.allowNetwork = allowNetwork;
     }
 
     private static List<String> toSingletonList(String single) {
@@ -400,26 +435,77 @@ public final class JavaPackResolver {
     ) {
         Path cacheZip = cacheFile(cacheZipName);
         Path hashSidecar = cacheFile(cacheHashName);
+        Path partial = cacheZip.resolveSibling(cacheZip.getFileName().toString() + ".partial");
 
         try {
             Files.createDirectories(cacheZip.getParent());
             if (needsDownload(cacheZip, hashSidecar, expectedSha1, ttlMillis)) {
+                // V3 primary-thread guard: when network is disallowed (because
+                // we're on the main server thread), do not issue an HTTP
+                // request. Serve any existing cache via the stale path below;
+                // otherwise return null so the periodic async task can refresh
+                // the cache later without blocking startup/shutdown here.
+                if (!allowNetwork) {
+                    if (Files.isRegularFile(cacheZip)) {
+                        logger.fine("[JavaPack] network disabled on primary thread; "
+                            + "serving previous cache for " + sourceLabel);
+                        return extractZip(cacheZip, sourceLabel + " (no-network)", extractSubdir);
+                    }
+                    logger.info("[JavaPack] network disabled on primary thread; "
+                        + "skipping " + sourceLabel + " until next async refresh");
+                    return null;
+                }
                 logger.info("[JavaPack] downloading resource pack from " + url);
-                downloadTo(url, cacheZip);
-                String actualHash = computeSha1(cacheZip);
-                // Hash mismatch: refuse to use a pack that doesn't match what
-                // the operator (or server.properties) asserted. Clearing the
-                // cache file forces a re-download next cycle; in the meantime
-                // we return null so the rest of the pipeline continues
-                // without this pack.
+
+                // Phase: download into a .partial sibling first so a half-written
+                // body never replaces the previous good cache file. Without this,
+                // HttpResponse.BodyHandlers.ofFile streams the response body to
+                // the target *before* the status code is checked, which means a
+                // non-2xx error page would have already overwritten cacheZip and
+                // poisoned the 24h TTL cache for dynamic URLs.
+                try {
+                    downloadTo(url, partial);
+                } catch (IOException downloadEx) {
+                    // Clean up the half-written .partial; keep cacheZip untouched
+                    // so the resolver can still serve the previous good copy on
+                    // the next cycle (stale-if-error semantics).
+                    deleteQuietly(partial);
+                    throw downloadEx;
+                }
+
+                String actualHash;
+                try {
+                    actualHash = computeSha1(partial);
+                } catch (IOException hashEx) {
+                    deleteQuietly(partial);
+                    throw hashEx;
+                }
+
+                // Hash mismatch: refuse to promote the .partial. The previous
+                // good cacheZip is preserved; next resolve cycle will retry.
                 if (expectedSha1 != null && !expectedSha1.isBlank()
                     && !actualHash.equalsIgnoreCase(expectedSha1)) {
                     logger.warning("[JavaPack] SHA-1 mismatch for " + url
                         + " (expected=" + expectedSha1 + ", actual=" + actualHash
-                        + ") — pack will be skipped; cache invalidated.");
-                    Files.deleteIfExists(cacheZip);
-                    Files.deleteIfExists(hashSidecar);
-                    return null;
+                        + ") — discarding download; previous cache (if any) kept.");
+                    deleteQuietly(partial);
+                    return Files.isRegularFile(cacheZip)
+                        ? extractZip(cacheZip, sourceLabel + " (mismatch fallback)", extractSubdir)
+                        : null;
+                }
+
+                // Atomic promote: move .partial to cacheZip, write the sidecar
+                // last. If the move fails, cacheZip is unchanged.
+                try {
+                    Files.move(partial, cacheZip,
+                        StandardCopyOption.REPLACE_EXISTING,
+                        StandardCopyOption.ATOMIC_MOVE);
+                } catch (IOException atomicEx) {
+                    // Some filesystems (cross-mount, certain Windows network shares)
+                    // refuse ATOMIC_MOVE. Fall back to REPLACE_EXISTING — at this
+                    // point the .partial has already been validated, so a non-atomic
+                    // replacement is still safe.
+                    Files.move(partial, cacheZip, StandardCopyOption.REPLACE_EXISTING);
                 }
                 Files.writeString(hashSidecar, actualHash, StandardCharsets.US_ASCII);
                 logger.info("[JavaPack] cached " + sourceLabel + " ("
@@ -429,12 +515,34 @@ public final class JavaPackResolver {
                     + " (no fresh download needed)");
             }
         } catch (IOException ex) {
+            // .partial was deleted in the inner catches; ensure no leftover.
+            deleteQuietly(partial);
             logger.warning("[JavaPack] resource pack fetch failed for " + url + ": "
                 + ex.getClass().getSimpleName() + ": " + ex.getMessage());
+            // Stale-if-error: if a previous cacheZip still exists, serve it so
+            // a transient network failure does not blank-out the pack.
+            if (Files.isRegularFile(cacheZip)) {
+                logger.info("[JavaPack] serving previous cached pack " + sourceLabel
+                    + " due to refresh error");
+                return extractZip(cacheZip, sourceLabel + " (stale-if-error)", extractSubdir);
+            }
             return null;
         }
 
         return extractZip(cacheZip, sourceLabel, extractSubdir);
+    }
+
+    /**
+     * Deletes {@code path} if it exists, swallowing only {@link IOException}.
+     * Used to clean up half-written {@code .partial} files without masking
+     * the underlying refresh error that triggered the cleanup.
+     */
+    private static void deleteQuietly(Path path) {
+        try {
+            Files.deleteIfExists(path);
+        } catch (IOException ignored) {
+            // best-effort cleanup; the real error is already being reported
+        }
     }
 
     /**
