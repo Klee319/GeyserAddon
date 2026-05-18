@@ -313,6 +313,36 @@ public final class AutoBedrockPackBuilder {
             Files.createDirectories(parent);
         }
 
+        // Codex round-4 fix (I1): pre-read every armor PNG ONCE here so the
+        // hash (Phase 2) and the zip write (Phase 3) consume the same byte
+        // buffer. Two independent Files.readAllBytes calls would otherwise
+        // open a window where the hash-time read fails (transient AV lock,
+        // Windows sharing violation, etc.) while the write-time read
+        // succeeds — flipping the zip contents without flipping the patch
+        // version. Failed reads here drop the armor texture from BOTH the
+        // hash and the zip in lockstep, keeping (UUID, version) honest.
+        Map<String, byte[]> armorTextureBytes = new LinkedHashMap<>();
+        if (armorTextureCopies != null && !armorTextureCopies.isEmpty()) {
+            for (Map.Entry<String, Path> entry : armorTextureCopies.entrySet()) {
+                String iconKey = entry.getKey();
+                Path source = entry.getValue();
+                if (source == null) {
+                    continue;
+                }
+                try {
+                    armorTextureBytes.put(iconKey, Files.readAllBytes(source));
+                } catch (IOException ex) {
+                    if (logger != null) {
+                        logger.warning("[AutoPack] failed to read armor texture "
+                            + source + " for iconKey " + iconKey + ": "
+                            + ex.getClass().getSimpleName() + ": " + ex.getMessage()
+                            + " — armor attachable AND PNG copy will be skipped for "
+                            + "this mapping (Bedrock falls back to vanilla armor).");
+                    }
+                }
+            }
+        }
+
         // Phase 1 - plan the PNG copies (without writing yet) so we know the
         // final customIconToTexturePath before we serialize the manifest.
         // Writing PNGs to disk only happens inside phase 3 below, against the
@@ -366,9 +396,12 @@ public final class AutoBedrockPackBuilder {
             // falls back to vanilla armor rendering for the base material.
             boolean armorEnabled = mapping.hasArmor()
                 && armorConfig != null && armorConfig.enabled();
+            // Gate on the pre-read bytes map (Codex I1 fix), not the raw
+            // path map, so an entry whose source PNG failed to read here
+            // produces neither an armor attachable nor a PNG zip entry —
+            // hash and zip stay in lockstep.
             boolean armorTextureResolved = armorEnabled
-                && armorTextureCopies != null
-                && armorTextureCopies.containsKey(iconKey);
+                && armorTextureBytes.containsKey(iconKey);
 
             // Phase 7a emission split (Codex G2 + H2 fixes):
             //   armor texture resolved          → emit armor attachable, skip held-item
@@ -447,14 +480,14 @@ public final class AutoBedrockPackBuilder {
         // pair stays constant across pack regenerations and the client
         // silently keeps using stale textures or stale attachables.
         String itemTextureJson = buildItemTextureJson(mappings, customIconToTexturePath, logger, debug);
-        // Codex round-2/3 fix (G1 + H1): armor texture iconKeys AND the
-        // underlying PNG bytes both participate in the patch-version hash.
-        // iconKey-only hashing covered add/remove/rename but missed
-        // "same iconKey, different PNG bytes" updates; reading the source
-        // file bytes here closes that gap so any operator edit to an
-        // equipment texture flips the Bedrock pack version.
+        // Codex round-2/3/4 fix (G1 + H1 + I1): armor texture iconKeys AND
+        // the pre-read PNG bytes both participate in the patch-version
+        // hash. The pre-read happens at the top of this method so the same
+        // byte buffer drives both the hash here and the zip write below;
+        // any read failure already dropped the entry from armorTextureBytes
+        // so the hash and zip stay in lockstep.
         int patchVersion = patchVersionFromContent(itemTextureJson, attachableArtifacts,
-            effectiveEntityCopies.keySet(), armorTextureCopies);
+            effectiveEntityCopies.keySet(), armorTextureBytes);
         String manifestJson = buildManifestJson(patchVersion);
 
         // Phase 3 — write everything to a sibling .tmp file, then atomic-move
@@ -518,24 +551,16 @@ public final class AutoBedrockPackBuilder {
                 }
             }
 
-            // Phase 7a: copy armor textures (resolved from Java equipment
-            // JSON by the caller) into the Bedrock zip at the path the
-            // armor attachable already references.
-            if (armorTextureCopies != null) {
-                for (Map.Entry<String, Path> armorCopy : armorTextureCopies.entrySet()) {
-                    String iconKey = armorCopy.getKey();
-                    Path source = armorCopy.getValue();
-                    String zipEntry = BedrockAttachableWriter.armorTextureEntryPath(iconKey);
-                    try {
-                        byte[] pngBytes = Files.readAllBytes(source);
-                        putEntryUnique(zos, zipEntry, pngBytes, writtenEntries, logger);
-                    } catch (IOException ex) {
-                        if (logger != null) {
-                            logger.warning("[AutoPack] failed to copy armor texture "
-                                + source + " -> " + zipEntry + ": " + ex.getMessage());
-                        }
-                    }
-                }
+            // Phase 7a: copy armor textures from the pre-read bytes buffer
+            // (populated at the top of build()) so the hash above and the
+            // zip write here consume the SAME byte sequence. Entries whose
+            // source PNG failed to read at planning time were already
+            // dropped from armorTextureBytes, ensuring hash and zip cannot
+            // disagree on what's present in the pack.
+            for (Map.Entry<String, byte[]> armorCopy : armorTextureBytes.entrySet()) {
+                String iconKey = armorCopy.getKey();
+                String zipEntry = BedrockAttachableWriter.armorTextureEntryPath(iconKey);
+                putEntryUnique(zos, zipEntry, armorCopy.getValue(), writtenEntries, logger);
             }
         } catch (IOException ioEx) {
             // Failed to fully write the tmp file — make sure it doesn't
@@ -609,13 +634,13 @@ public final class AutoBedrockPackBuilder {
         String itemTextureJson,
         Map<String, String> attachableArtifacts,
         java.util.Set<String> entityCopyPaths,
-        Map<String, Path> armorTextureCopies
+        Map<String, byte[]> armorTextureBytes
     ) {
         boolean nothingToHash =
             (itemTextureJson == null || itemTextureJson.isEmpty())
             && (attachableArtifacts == null || attachableArtifacts.isEmpty())
             && (entityCopyPaths == null || entityCopyPaths.isEmpty())
-            && (armorTextureCopies == null || armorTextureCopies.isEmpty());
+            && (armorTextureBytes == null || armorTextureBytes.isEmpty());
         if (nothingToHash) {
             return 0;
         }
@@ -651,35 +676,25 @@ public final class AutoBedrockPackBuilder {
                     md.update((byte) 0);
                 }
             }
-            // Phase 7a (Codex H1 fix): armor texture iconKeys AND PNG bytes
-            // both flow into the hash. iconKey alone catches add/remove/
-            // rename but misses "same iconKey, different bytes" edits where
-            // the operator updates the PNG in-place; mixing the actual file
-            // bytes flips the patch version on any real change. Reading
-            // bytes here is acceptable I/O — armor PNGs are typically a few
-            // KB each — and it doesn't duplicate the later write because
-            // both happen inside one auto-pack rebuild that's already a
-            // disk-heavy operation.
-            if (armorTextureCopies != null && !armorTextureCopies.isEmpty()) {
-                List<String> sorted = new ArrayList<>(armorTextureCopies.keySet());
+            // Phase 7a (Codex I1 fix): armor texture iconKeys AND pre-read
+            // PNG bytes both flow into the hash. The bytes are passed in
+            // from the build() caller after a single readAllBytes pass at
+            // the top of the build pipeline, so the same buffer drives the
+            // hash here and the zip write below. Entries whose source PNG
+            // failed to read were already dropped from the map at planning
+            // time, ensuring hash and zip stay in lockstep — no silent
+            // path-only fallback that could let zip bytes change without
+            // flipping the manifest patch version.
+            if (armorTextureBytes != null && !armorTextureBytes.isEmpty()) {
+                List<String> sorted = new ArrayList<>(armorTextureBytes.keySet());
                 java.util.Collections.sort(sorted);
                 for (String iconKey : sorted) {
                     md.update("armor:".getBytes(StandardCharsets.UTF_8));
                     md.update(iconKey.getBytes(StandardCharsets.UTF_8));
                     md.update((byte) 0);
-                    Path source = armorTextureCopies.get(iconKey);
-                    if (source != null) {
-                        try {
-                            md.update(Files.readAllBytes(source));
-                        } catch (IOException ignored) {
-                            // Best-effort: the source PNG may be unreadable
-                            // here even though scanArmorTextureCopies found
-                            // it. Fall back to path-only hashing for this
-                            // entry so the version still flips when the
-                            // path itself changes, just not when the
-                            // bytes are silently rotated under us.
-                            md.update(source.toString().getBytes(StandardCharsets.UTF_8));
-                        }
+                    byte[] bytes = armorTextureBytes.get(iconKey);
+                    if (bytes != null) {
+                        md.update(bytes);
                     }
                     md.update((byte) 0);
                 }
