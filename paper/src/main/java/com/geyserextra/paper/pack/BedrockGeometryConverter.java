@@ -5,6 +5,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.logging.Logger;
 
 /**
  * Pure functions that convert Java edition transform / geometry values into
@@ -119,19 +120,84 @@ public final class BedrockGeometryConverter {
      * items that lack elements and avoids the per-face UV format which has
      * inconsistent support across Bedrock client versions.</p>
      */
+    /**
+     * Phase 4 compatibility overload: produces cubes with the simple
+     * {@code uv: [0, 0]} cube-level form, ignoring any per-face UV the
+     * elements may carry. Used by call sites that don't yet route through
+     * the texture-dimension-aware Phase 6 path.
+     */
     public static List<Map<String, Object>> convertElementsToCubes(JavaModelGeometry geometry) {
+        return convertElementsToCubes(geometry, 16, 16, null);
+    }
+
+    /**
+     * Phase 6 entry point: produces cubes with per-face UV when the source
+     * elements declare any face. UV coordinates from Java's 0..16 abstract
+     * grid are scaled to Bedrock pixel space using {@code textureWidth} and
+     * {@code textureHeight} (which must match the {@code texture_width} /
+     * {@code texture_height} the geometry descriptor declares).
+     *
+     * <p>Empty input → empty output, so callers can plug the result straight
+     * into the {@code bones[0].cubes} array of a Bedrock geometry JSON
+     * without further guards.</p>
+     *
+     * <p>Coordinate mapping (item models, 0..16 range):</p>
+     * <ul>
+     *   <li>Bedrock cube origin (lower-X / lower-Y / lower-Z corner):
+     *       {@code (java.from.x - 8, java.from.y, java.from.z - 8)}.
+     *       The {@code -8} on X centres the model around the bone pivot;
+     *       Z is shifted by {@code -8} so the cube sits in the same depth
+     *       slice as Bedrock's standard held-item rendering.</li>
+     *   <li>Bedrock cube size: {@code java.to - java.from} per axis;
+     *       clamped non-negative.</li>
+     *   <li>Element rotation: {@code axis} maps to matching Bedrock cube
+     *       rotation slot; Y and Z signs are flipped to match the same
+     *       handedness convention as display transforms.</li>
+     *   <li>Per-face UV: {@code java.uv = [u1, v1, u2, v2]} (0..16 abstract)
+     *       becomes Bedrock {@code uv: [u1·sx, v1·sy], uv_size: [(u2-u1)·sx, (v2-v1)·sy]}
+     *       where {@code sx = textureWidth/16} and {@code sy = textureHeight/16}.
+     *       Missing UV defaults to the whole 0..16 square (matches Mojang's
+     *       runtime default for items).</li>
+     * </ul>
+     *
+     * <p><b>Known limitations</b> (logged at FINE, not failure):</p>
+     * <ul>
+     *   <li>Java per-face texture rotation (0/90/180/270) has no native
+     *       Bedrock equivalent — non-zero rotations produce a WARN-equivalent
+     *       fine log and the texture appears unrotated on the affected face.</li>
+     *   <li>Faces referencing different textures via {@code texture}
+     *       ({@code #layer0} vs {@code #blade}) are all rendered with the
+     *       attachable's single default texture. Multi-texture support
+     *       requires Bedrock {@code material_instances} which is a separate
+     *       phase. Per-face texture variable references are read but
+     *       currently ignored at conversion time.</li>
+     * </ul>
+     */
+    public static List<Map<String, Object>> convertElementsToCubes(
+        JavaModelGeometry geometry,
+        int textureWidth,
+        int textureHeight,
+        Logger logger
+    ) {
         if (geometry == null || !geometry.hasElements()) {
             return List.of();
         }
+        int tw = textureWidth > 0 ? textureWidth : 16;
+        int th = textureHeight > 0 ? textureHeight : 16;
         List<Map<String, Object>> cubes = new ArrayList<>(geometry.elements().size());
         for (JavaModelGeometry.Element element : geometry.elements()) {
             if (element == null) continue;
-            cubes.add(convertSingleElement(element));
+            cubes.add(convertSingleElement(element, tw, th, logger));
         }
         return cubes;
     }
 
-    private static Map<String, Object> convertSingleElement(JavaModelGeometry.Element element) {
+    private static Map<String, Object> convertSingleElement(
+        JavaModelGeometry.Element element,
+        int textureWidth,
+        int textureHeight,
+        Logger logger
+    ) {
         float[] from = element.from();
         float[] to = element.to();
 
@@ -154,7 +220,24 @@ public final class BedrockGeometryConverter {
         Map<String, Object> cube = new LinkedHashMap<>();
         cube.put("origin", List.of(originX, originY, originZ));
         cube.put("size", List.of(sizeX, sizeY, sizeZ));
-        cube.put("uv", List.of(0, 0));
+
+        // Phase 6: emit per-face UV when the element declares any face.
+        // Cubes without face data fall back to the simple "uv: [0, 0]" form
+        // so Bedrock can still render them (vs. omitting cube.uv which makes
+        // the cube invisible).
+        Map<String, JavaModelGeometry.Face> faces = element.faces();
+        if (faces != null && !faces.isEmpty()) {
+            Map<String, Object> faceUvs = buildPerFaceUvMap(faces, textureWidth, textureHeight, logger);
+            if (!faceUvs.isEmpty()) {
+                cube.put("uv", faceUvs);
+            } else {
+                // Every face failed to convert (malformed UV across the board);
+                // degrade to a single-cube UV so the cube is at least visible.
+                cube.put("uv", List.of(0, 0));
+            }
+        } else {
+            cube.put("uv", List.of(0, 0));
+        }
 
         JavaModelGeometry.ElementRotation rot = element.rotation();
         if (rot != null) {
@@ -164,6 +247,102 @@ public final class BedrockGeometryConverter {
             cube.put("pivot", List.of(pivot[0], pivot[1], pivot[2]));
         }
         return cube;
+    }
+
+    /**
+     * Builds the {@code cube.uv} object in Bedrock geometry 1.16.0 per-face
+     * form. Each entry has shape {@code {"uv": [u, v], "uv_size": [w, h]}}
+     * in pixel space relative to the geometry descriptor's
+     * {@code texture_width} / {@code texture_height}.
+     *
+     * <p>Faces missing from the input map are intentionally omitted from the
+     * output — Bedrock interprets a missing face as "do not render this
+     * face", which exactly matches Java's behaviour when a face is omitted
+     * from the {@code faces} object.</p>
+     */
+    private static Map<String, Object> buildPerFaceUvMap(
+        Map<String, JavaModelGeometry.Face> faces,
+        int textureWidth,
+        int textureHeight,
+        Logger logger
+    ) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        // Iterate in stable order so the rendered JSON (and downstream
+        // patchVersion hash) is deterministic.
+        for (String faceName : List.of("north", "south", "east", "west", "up", "down")) {
+            JavaModelGeometry.Face face = faces.get(faceName);
+            if (face == null) {
+                continue;
+            }
+            Map<String, Object> bedrockFace = convertFace(face, faceName, textureWidth, textureHeight, logger);
+            if (bedrockFace != null) {
+                out.put(faceName, bedrockFace);
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Converts a single Java face into a Bedrock per-face UV entry.
+     * Returns {@code null} when the result would be a zero-area UV region
+     * (degenerate, would render as a single pixel artefact); callers omit
+     * such faces so they simply don't render rather than producing visible
+     * speckles.
+     */
+    private static Map<String, Object> convertFace(
+        JavaModelGeometry.Face face,
+        String faceName,
+        int textureWidth,
+        int textureHeight,
+        Logger logger
+    ) {
+        // Default UV when not specified: [0, 0, 16, 16] (whole texture).
+        // This matches Mojang's runtime default for missing-UV faces on items.
+        float u1, v1, u2, v2;
+        if (face.hasUv()) {
+            float[] uv = face.uv();
+            u1 = uv[0];
+            v1 = uv[1];
+            u2 = uv[2];
+            v2 = uv[3];
+        } else {
+            u1 = 0; v1 = 0; u2 = 16; v2 = 16;
+        }
+
+        // Scale Java's 0..16 abstract space to Bedrock pixel space.
+        // For a 16x16 texture, scale = 1.0 (identity). For 32x32, scale = 2.0.
+        float scaleX = textureWidth / 16f;
+        float scaleY = textureHeight / 16f;
+
+        float bedrockU = u1 * scaleX;
+        float bedrockV = v1 * scaleY;
+        // uv_size may be negative — Bedrock interprets that as a flipped texture
+        // on that face, which matches Java's behaviour for u1 > u2 / v1 > v2.
+        // We deliberately do NOT clamp these to positive.
+        float bedrockUSize = (u2 - u1) * scaleX;
+        float bedrockVSize = (v2 - v1) * scaleY;
+
+        // Zero-area UV — common when the operator copied a face from an empty
+        // element. Omit so Bedrock doesn't render a degenerate face that
+        // shows up as a 1-pixel artefact.
+        if (bedrockUSize == 0f && bedrockVSize == 0f) {
+            return null;
+        }
+
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("uv", List.of(bedrockU, bedrockV));
+        out.put("uv_size", List.of(bedrockUSize, bedrockVSize));
+
+        // Java's per-face texture rotation has no native Bedrock equivalent
+        // in the per-face UV form. Log at FINE so debug-enabled operators see
+        // affected faces but the live server isn't spammed.
+        if (face.rotation() != 0 && logger != null) {
+            logger.fine("[BedrockGeometry] face " + faceName + " has Java rotation "
+                + face.rotation() + "° which Bedrock per-face UV cannot express — "
+                + "the texture will appear unrotated on this face. "
+                + "Affects only this face; other faces of the same cube are unaffected.");
+        }
+        return out;
     }
 
     private static float[] convertElementRotation(JavaModelGeometry.ElementRotation rotation) {

@@ -7,6 +7,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.logging.Logger;
 
 /**
  * Generates the three JSON artifacts ({@code attachables/*.json},
@@ -61,12 +62,51 @@ public final class BedrockAttachableWriter {
      * @param config    the {@code customItems.attachableGeneration} settings
      * @return path -> JSON content map (empty when nothing should be written)
      */
+    /**
+     * Backward-compatible 5-arg overload (pre-Phase-6). Uses 16x16 as the
+     * texture dimensions for UV scaling, which is correct for the default
+     * vanilla item texture size but understates UV coordinates on
+     * higher-resolution operator-supplied PNGs.
+     */
     public static Map<String, String> buildArtifacts(
         String iconKey,
         JavaModelDisplay display,
         JavaModelGeometry geometry,
         String textureRelativePath,
         AttachableGenerationConfig config
+    ) {
+        return buildArtifacts(iconKey, display, geometry, textureRelativePath, 16, 16, config, null);
+    }
+
+    /**
+     * Phase 6 entry point. Takes the actual PNG dimensions of the icon
+     * texture so the geometry descriptor declares matching {@code texture_width}
+     * and {@code texture_height}, and so per-face UVs scale correctly for
+     * non-16x16 textures (the high-res operator-pack case).
+     *
+     * @param iconKey               sanitised Bedrock icon key (also the
+     *                               {@code bedrock_identifier} suffix)
+     * @param display                Java {@code display} block; may be {@code null}
+     * @param geometry               Java {@code elements} block; may be {@code null}
+     * @param textureRelativePath    existing {@code textures/items/<iconKey>} path
+     *                               written by {@code AutoBedrockPackBuilder}
+     * @param textureWidth           actual PNG width in pixels (>0); used as
+     *                               the geometry descriptor's {@code texture_width}
+     *                               and as the X scale factor for per-face UV
+     * @param textureHeight          actual PNG height in pixels (>0)
+     * @param config                 attachable generation policy
+     * @param logger                 optional logger for FINE-level diagnostics
+     * @return path → JSON content map (empty when nothing should be written)
+     */
+    public static Map<String, String> buildArtifacts(
+        String iconKey,
+        JavaModelDisplay display,
+        JavaModelGeometry geometry,
+        String textureRelativePath,
+        int textureWidth,
+        int textureHeight,
+        AttachableGenerationConfig config,
+        Logger logger
     ) {
         if (iconKey == null || iconKey.isBlank()) {
             return Map.of();
@@ -85,9 +125,14 @@ public final class BedrockAttachableWriter {
             return Map.of();
         }
 
-        // Phase 4: full mode + non-empty elements → emit real 3D cubes.
-        // offsets_only or empty elements → fall back to the flat-quad
-        // geometry from Phase 3.
+        // Defensive clamp: a corrupt or unreadable PNG should not produce
+        // a zero-sized texture coordinate space which would make every face
+        // sample uv (0,0) only. Fall back to vanilla 16x16.
+        int safeTw = textureWidth > 0 ? textureWidth : 16;
+        int safeTh = textureHeight > 0 ? textureHeight : 16;
+
+        // full mode + non-empty elements → emit real 3D cubes with per-face UV.
+        // offsets_only or empty elements → fall back to the flat-quad geometry.
         boolean useFullGeometry = AttachableGenerationConfig.MODE_FULL.equals(mode)
             && geometry != null
             && geometry.hasElements();
@@ -96,7 +141,8 @@ public final class BedrockAttachableWriter {
         out.put(attachableEntryPath(iconKey),
                 JsonUtil.toPrettyJson(buildAttachableJson(iconKey, textureRelativePath, config)));
         out.put(geometryEntryPath(iconKey),
-                JsonUtil.toPrettyJson(buildGeometryJson(iconKey, useFullGeometry ? geometry : null)));
+                JsonUtil.toPrettyJson(buildGeometryJson(
+                    iconKey, useFullGeometry ? geometry : null, safeTw, safeTh, logger)));
         out.put(animationEntryPath(iconKey),
                 JsonUtil.toPrettyJson(buildAnimationJson(iconKey, display, config)));
         return out;
@@ -166,27 +212,53 @@ public final class BedrockAttachableWriter {
             "minecraft:attachable", Map.of("description", description));
     }
 
-    private static Map<String, Object> buildGeometryJson(String iconKey, JavaModelGeometry fullGeometry) {
+    private static Map<String, Object> buildGeometryJson(
+        String iconKey,
+        JavaModelGeometry fullGeometry,
+        int textureWidth,
+        int textureHeight,
+        Logger logger
+    ) {
         // Phase 3 baseline: a single 16x16 quad in the XY plane, hinged at
-        // the bone pivot. Phase 4: when fullGeometry is non-null we use the
-        // converter's element-derived cubes instead, giving Bedrock a true 3D
-        // representation of the Java model.
+        // the bone pivot. Phase 4/6: when fullGeometry is non-null we use the
+        // converter's element-derived cubes with per-face UV scaled to the
+        // actual texture dimensions, giving Bedrock a Java-accurate 3D
+        // representation of the model.
         Map<String, Object> descriptor = new LinkedHashMap<>();
         descriptor.put("identifier", "geometry." + NAMESPACE + "." + iconKey);
-        descriptor.put("texture_width", 16);
-        descriptor.put("texture_height", 16);
+        descriptor.put("texture_width", textureWidth);
+        descriptor.put("texture_height", textureHeight);
         descriptor.put("visible_bounds_width", 2);
         descriptor.put("visible_bounds_height", 2);
         descriptor.put("visible_bounds_offset", List.of(0, 0.5, 0));
 
         List<Map<String, Object>> cubes;
         if (fullGeometry != null && fullGeometry.hasElements()) {
-            cubes = BedrockGeometryConverter.convertElementsToCubes(fullGeometry);
+            cubes = BedrockGeometryConverter.convertElementsToCubes(
+                fullGeometry, textureWidth, textureHeight, logger);
         } else {
+            // Flat-quad fallback (Phase 3 path). Use a single uv_size pair
+            // matching the actual texture dims so non-16x16 PNGs are sampled
+            // in full rather than cropped to the top-left 16x16 corner.
             Map<String, Object> flatQuad = new LinkedHashMap<>();
             flatQuad.put("origin", List.of(-8, 0, 0));
             flatQuad.put("size", List.of(16, 16, 0));
-            flatQuad.put("uv", List.of(0, 0));
+            if (textureWidth == 16 && textureHeight == 16) {
+                // Keep the simple form for the vanilla case so the generated
+                // JSON stays byte-identical to pre-Phase-6 for 16x16 icons.
+                flatQuad.put("uv", List.of(0, 0));
+            } else {
+                // Per-face UV form lets us pin the sample region to the full
+                // texture extent regardless of PNG resolution.
+                Map<String, Object> faceUv = new LinkedHashMap<>();
+                faceUv.put("uv", List.of(0, 0));
+                faceUv.put("uv_size", List.of(textureWidth, textureHeight));
+                // The flat quad only has one visible face (north). Set the
+                // other faces to omit (Bedrock simply doesn't render them).
+                Map<String, Object> uvMap = new LinkedHashMap<>();
+                uvMap.put("north", faceUv);
+                flatQuad.put("uv", uvMap);
+            }
             cubes = List.of(flatQuad);
         }
 

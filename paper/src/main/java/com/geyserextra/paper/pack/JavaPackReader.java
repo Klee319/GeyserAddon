@@ -816,8 +816,9 @@ public final class JavaPackReader {
         float[] from = parseFloat3(map.get("from"), 0f);
         float[] to = parseFloat3(map.get("to"), 0f);
         JavaModelGeometry.ElementRotation rotation = parseElementRotation(map.get("rotation"));
+        Map<String, JavaModelGeometry.Face> faces = parseFaces(map.get("faces"));
         try {
-            return new JavaModelGeometry.Element(from, to, rotation);
+            return new JavaModelGeometry.Element(from, to, rotation, faces);
         } catch (IllegalArgumentException ignored) {
             return null;
         }
@@ -834,6 +835,86 @@ public final class JavaPackReader {
         float angle = (angleObj instanceof Number n) ? n.floatValue() : 0f;
         try {
             return new JavaModelGeometry.ElementRotation(origin, axis, angle);
+        } catch (IllegalArgumentException ignored) {
+            return null;
+        }
+    }
+
+    /**
+     * Standard Java face names. Restricting to this whitelist keeps weird
+     * keys (typos in operator-authored JSON, future face slots) from
+     * leaking into the Bedrock geometry output as unrecognised faces.
+     */
+    private static final String[] JAVA_FACE_NAMES =
+        {"north", "south", "east", "west", "up", "down"};
+
+    /**
+     * Parses the {@code faces} object of a Java element into a face-name →
+     * {@link JavaModelGeometry.Face} map. Empty map when the input is not a
+     * JSON object (matches Java's "no faces declared" semantics, which makes
+     * the cube invisible — operators rarely intend that, but if they do,
+     * we honour it by emitting a cube with no per-face UV).
+     *
+     * <p>Face entries that fail to parse individually are skipped, leaving
+     * the rest of the cube's faces intact. This is the "graceful degrade"
+     * principle: a single malformed face cannot disqualify the entire cube.</p>
+     */
+    private static Map<String, JavaModelGeometry.Face> parseFaces(Object raw) {
+        if (!(raw instanceof Map<?, ?> map)) {
+            return Map.of();
+        }
+        Map<String, JavaModelGeometry.Face> result = new java.util.LinkedHashMap<>();
+        for (String name : JAVA_FACE_NAMES) {
+            Object faceRaw = map.get(name);
+            if (!(faceRaw instanceof Map<?, ?> faceMap)) {
+                continue;
+            }
+            JavaModelGeometry.Face face = parseFace(faceMap);
+            if (face != null) {
+                result.put(name, face);
+            }
+        }
+        return result;
+    }
+
+    /**
+     * Parses a single face entry. Returns {@code null} on structural failure
+     * so the caller can skip it; this keeps a single broken face from
+     * blocking the rest of the cube.
+     */
+    private static JavaModelGeometry.Face parseFace(Map<?, ?> map) {
+        float[] uv = null;
+        Object uvObj = map.get("uv");
+        if (uvObj instanceof List<?> uvList && uvList.size() >= 4) {
+            uv = new float[4];
+            for (int i = 0; i < 4; i++) {
+                Object v = uvList.get(i);
+                if (v instanceof Number n) {
+                    uv[i] = n.floatValue();
+                }
+            }
+        }
+
+        String texture = null;
+        Object texObj = map.get("texture");
+        if (texObj instanceof String s) {
+            texture = s;
+        }
+
+        // Java face rotation is a multiple of 90 degrees; treat anything
+        // outside the valid set as 0 (no rotation) rather than rejecting
+        // the whole face — defensive degrade.
+        int rotation = 0;
+        Object rotObj = map.get("rotation");
+        if (rotObj instanceof Number n) {
+            int r = n.intValue();
+            if (r == 0 || r == 90 || r == 180 || r == 270) {
+                rotation = r;
+            }
+        }
+
+        try {
+            return new JavaModelGeometry.Face(uv, texture, rotation);
         } catch (IllegalArgumentException ignored) {
             return null;
         }

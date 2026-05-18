@@ -274,16 +274,18 @@ public final class AutoBedrockPackBuilder {
             pngTasks.add(new TextureCopyTask(def.textureFile(), zipEntry, key.toString()));
             customIconToTexturePath.put(iconKey, bedrockTextureRelative);
 
-            // Phase 3/4: collect attachable artifacts for this mapping if the
-            // model declared a display block AND the policy allows generation.
-            // The writer itself returns an empty map when the conditions
-            // don't hold, so we just merge whatever it produces. Phase 4 also
-            // passes the JavaModelGeometry so mode=full mappings get real
-            // element-cube geometry instead of the flat-quad fallback.
+            // Phase 3/4/6: collect attachable artifacts for this mapping if
+            // the model declared a display block AND the policy allows
+            // generation. The writer returns an empty map when conditions
+            // don't hold, so we just merge whatever it produces. Phase 6
+            // additionally reads the actual PNG dimensions so per-face UVs
+            // scale correctly for higher-resolution operator-supplied textures.
             if (attachableMode) {
+                int[] textureSize = probePngDimensions(def.textureFile(), logger);
                 Map<String, String> artifacts = BedrockAttachableWriter.buildArtifacts(
                     iconKey, def.display(), def.geometry(),
-                    bedrockTextureRelative, effectiveConfig);
+                    bedrockTextureRelative, textureSize[0], textureSize[1],
+                    effectiveConfig, logger);
                 for (Map.Entry<String, String> art : artifacts.entrySet()) {
                     String artifactPath = art.getKey();
                     if (!plannedZipEntries.add(artifactPath)) {
@@ -466,6 +468,55 @@ public final class AutoBedrockPackBuilder {
      * mapping set twice.
      */
     private record TextureCopyTask(Path source, String zipEntry, String keyLabel) {}
+
+    /**
+     * Reads only the dimensions of the PNG referenced by {@code source} so
+     * the geometry descriptor can declare matching {@code texture_width} /
+     * {@code texture_height}. Returns {@code [16, 16]} when the file is
+     * unreadable, not a PNG, or has zero dimensions — that keeps the
+     * pre-Phase-6 16x16 default in place for any PNG that doesn't decode
+     * cleanly, instead of producing a geometry with a zero-area UV space.
+     *
+     * <p>The PNG is read fully via {@code ImageIO.read} (no streaming
+     * shortcut here) so any rare format quirks surface as a fall-back to
+     * the safe default rather than a half-decoded image. Performance is
+     * not critical because this runs once per mapping during the
+     * Phase 1 planning loop.</p>
+     */
+    private static int[] probePngDimensions(Path source, Logger logger) {
+        if (source == null) {
+            return new int[]{16, 16};
+        }
+        try {
+            BufferedImage image = ImageIO.read(source.toFile());
+            if (image == null) {
+                return new int[]{16, 16};
+            }
+            int width = image.getWidth();
+            int height = image.getHeight();
+            if (width <= 0 || height <= 0) {
+                return new int[]{16, 16};
+            }
+            return new int[]{width, height};
+        } catch (IOException ex) {
+            if (logger != null) {
+                logger.fine("[AutoPack] failed to probe PNG dimensions for "
+                    + source + ": " + ex.getClass().getSimpleName()
+                    + " — falling back to 16x16");
+            }
+            return new int[]{16, 16};
+        } catch (RuntimeException ex) {
+            // ImageIO occasionally throws RuntimeException on malformed PNGs;
+            // treat the same as IOException so a single bad file can't abort
+            // the whole pack build.
+            if (logger != null) {
+                logger.fine("[AutoPack] PNG decode threw "
+                    + ex.getClass().getSimpleName() + " for " + source
+                    + " — falling back to 16x16");
+            }
+            return new int[]{16, 16};
+        }
+    }
 
     /**
      * Writes a ZIP entry only if its name hasn't been used yet. Records the
