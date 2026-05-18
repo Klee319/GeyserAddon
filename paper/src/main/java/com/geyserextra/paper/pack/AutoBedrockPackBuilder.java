@@ -96,14 +96,24 @@ public final class AutoBedrockPackBuilder {
 
     /**
      * Sanitizes a registry mapping name into the icon-key form Geyser's
-     * extension side ultimately registers. Lower-cases the input and replaces
-     * any character outside {@code [a-z0-9_./-]} with {@code '_'}.
+     * extension side ultimately registers. Lower-cases the input (with
+     * {@link java.util.Locale#ROOT} so Turkish-locale servers don't produce
+     * a different output) and replaces any character outside
+     * {@code [a-z0-9_./-]} with {@code '_'}.
+     *
+     * <p>Exposed as public for {@code GeyserExtraPaper}'s armor texture
+     * scan (cross-package caller), which must compute the same key the
+     * auto-pack will use when writing the texture file path. Keeping the
+     * implementation in one place avoids the locale-dependent drift Agent A
+     * flagged in Phase 7 review.</p>
      */
-    private static String toBedrockIconKey(String mappingName) {
+    public static String toBedrockIconKey(String mappingName) {
         if (mappingName == null || mappingName.isEmpty()) {
             return "";
         }
-        return BEDROCK_ICON_KEY_INVALID.matcher(mappingName.toLowerCase()).replaceAll("_");
+        return BEDROCK_ICON_KEY_INVALID
+            .matcher(mappingName.toLowerCase(java.util.Locale.ROOT))
+            .replaceAll("_");
     }
 
     /**
@@ -345,7 +355,21 @@ public final class AutoBedrockPackBuilder {
             // attachable AND keep the inventory icon, since Bedrock players
             // see the icon in their inventory slots and the armor mesh when
             // the item is worn.
-            if (mapping.hasArmor() && armorConfig != null && armorConfig.enabled()) {
+            //
+            // Codex round-1 fix: the armor attachable references
+            // textures/entity/equipment/<iconKey>.png, which is only present
+            // when scanArmorTextureCopies successfully resolved the equipment
+            // JSON. Emitting the attachable without the texture leaves a
+            // dangling reference and Bedrock renders magenta/missing. Gate
+            // emission on the texture actually being in the planned copies;
+            // otherwise skip both armor AND held-item attachable so Bedrock
+            // falls back to vanilla armor rendering for the base material.
+            boolean armorEnabled = mapping.hasArmor()
+                && armorConfig != null && armorConfig.enabled();
+            boolean armorTextureResolved = armorEnabled
+                && armorTextureCopies != null
+                && armorTextureCopies.containsKey(iconKey);
+            if (armorTextureResolved) {
                 Map<String, String> armorArt = BedrockAttachableWriter.buildArmorArtifacts(
                     iconKey, mapping.armor(), armorConfig);
                 for (Map.Entry<String, String> a : armorArt.entrySet()) {
@@ -362,6 +386,19 @@ public final class AutoBedrockPackBuilder {
                 // Don't emit the held-item attachable for armor: identifier
                 // collision would have only one win on Bedrock side anyway,
                 // and the armor path is the visually correct one when worn.
+            } else if (armorEnabled) {
+                // Armor mapping detected but no equipment texture resolved.
+                // Emit nothing so Bedrock falls back to the base item's
+                // vanilla armor texture (e.g., diamond armor for a diamond
+                // helmet base). A loud WARN surfaces the missing resolution.
+                if (logger != null) {
+                    logger.warning("[AutoPack] armor mapping " + mapping.name()
+                        + " (slot=" + mapping.armor().slot()
+                        + ", asset_id=" + mapping.armor().assetId() + ") "
+                        + "has no resolved equipment texture in any configured Java pack — "
+                        + "skipping armor attachable; Bedrock will render vanilla armor for "
+                        + mapping.baseItem());
+                }
             } else if (attachableMode) {
                 // Phase 3/4/6: collect attachable artifacts for this mapping if
                 // the model declared a display block AND the policy allows

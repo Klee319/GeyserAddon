@@ -1031,6 +1031,7 @@ public final class GeyserExtraPaper extends JavaPlugin {
             return java.util.Collections.emptyMap();
         }
         Map<String, Path> copies = new java.util.LinkedHashMap<>();
+        int skippedNamespaces = 0;
         for (Path packRoot : packRoots) {
             Path assetsDir = packRoot.resolve("assets");
             if (!Files.isDirectory(assetsDir)) {
@@ -1038,6 +1039,27 @@ public final class GeyserExtraPaper extends JavaPlugin {
             }
             try (var nsStream = Files.list(assetsDir)) {
                 for (Path namespaceDir : nsStream.filter(Files::isDirectory).toList()) {
+                    String ns = namespaceDir.getFileName().toString();
+                    // Codex round-1 fix: ONLY mirror the minecraft namespace.
+                    // Other namespaces (mythicmobs, custom-addon, etc.) ship
+                    // their own entity textures that don't 1:1-map onto
+                    // Bedrock's vanilla entity texture paths; copying them
+                    // verbatim would silently override vanilla Bedrock mobs
+                    // because we strip the namespace from the destination
+                    // path. Restricting to minecraft makes the override safe:
+                    // every collision is intentional (operator overriding a
+                    // vanilla entity). Custom-namespace entities still need
+                    // client_entity JSON authoring, which is out of Phase 7b
+                    // scope.
+                    if (!"minecraft".equals(ns)) {
+                        skippedNamespaces++;
+                        if (debug) {
+                            getLogger().fine("[EntityTex] skipping non-minecraft namespace '"
+                                + ns + "' to avoid vanilla path collision (Bedrock "
+                                + "client_entity JSON authoring is needed for non-vanilla mobs)");
+                        }
+                        continue;
+                    }
                     Path entityRoot = namespaceDir.resolve("textures").resolve("entity");
                     if (!Files.isDirectory(entityRoot)) {
                         continue;
@@ -1055,8 +1077,7 @@ public final class GeyserExtraPaper extends JavaPlugin {
                             // Later pack roots override earlier — matches CMD merge.
                             copies.put(zipEntry, pngFile);
                             if (debug) {
-                                getLogger().fine("[EntityTex] " + namespaceDir.getFileName()
-                                    + " -> " + zipEntry);
+                                getLogger().fine("[EntityTex] " + ns + " -> " + zipEntry);
                             }
                         }
                     }
@@ -1066,9 +1087,12 @@ public final class GeyserExtraPaper extends JavaPlugin {
                     + ex.getClass().getSimpleName() + ": " + ex.getMessage());
             }
         }
-        if (!copies.isEmpty()) {
+        if (!copies.isEmpty() || skippedNamespaces > 0) {
             getLogger().info("[EntityTex] planned " + copies.size()
-                + " entity texture override(s) from " + packRoots.size() + " pack(s)");
+                + " entity texture override(s) from " + packRoots.size() + " pack(s)"
+                + (skippedNamespaces > 0
+                    ? " (skipped " + skippedNamespaces + " non-minecraft namespace(s))"
+                    : ""));
         }
         return copies;
     }
@@ -1101,8 +1125,14 @@ public final class GeyserExtraPaper extends JavaPlugin {
                 continue;
             }
             com.geyserextra.core.api.ArmorData armor = mapping.armor();
-            String iconKey = mapping.name().toLowerCase(java.util.Locale.ROOT)
-                .replaceAll("[^a-z0-9_\\-./]", "_");
+            // Use the shared toBedrockIconKey helper from AutoBedrockPackBuilder
+            // so the key here is byte-identical to the one the auto-pack will
+            // look up later. Agent A's Phase 7 review flagged the previous
+            // ad-hoc replaceAll for a Locale-mismatch risk on Turkish servers
+            // (default-Locale toLowerCase produces ı for I); centralising via
+            // toBedrockIconKey eliminates that drift.
+            String iconKey = com.geyserextra.paper.pack.AutoBedrockPackBuilder
+                .toBedrockIconKey(mapping.name());
             Path resolved = null;
             for (Path packRoot : packRoots) {
                 try {

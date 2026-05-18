@@ -40,6 +40,16 @@ public record ArmorData(String slot, String assetId) {
         if (assetId.isBlank()) {
             throw new IllegalArgumentException("assetId must not be blank");
         }
+        // Slot must be one of the four supported humanoid armor slots. This
+        // is tighter than the original "any non-blank string" rule: it
+        // prevents typo'd or unsupported slots (e.g., "horse_body" from the
+        // Java equipment system) from sneaking through JSON load and silently
+        // falling back to the helmet geometry default at render time.
+        if (!SLOT_HEAD.equals(slot) && !SLOT_CHEST.equals(slot)
+            && !SLOT_LEGS.equals(slot) && !SLOT_FEET.equals(slot)) {
+            throw new IllegalArgumentException(
+                "slot must be one of head/chest/legs/feet (got: " + slot + ")");
+        }
     }
 
     /**
@@ -71,5 +81,21 @@ public record ArmorData(String slot, String assetId) {
      */
     public String equipmentLayerKey() {
         return SLOT_LEGS.equals(slot) ? "humanoid_leggings" : "humanoid";
+    }
+
+    /**
+     * Returns the Bedrock molang statement that suppresses the vanilla armor
+     * layer for THIS slot only. Used by the attachable's {@code parent_setup}
+     * script so a custom helmet doesn't accidentally hide an unrelated
+     * vanilla chest/legs/boots layer the player is wearing in another slot.
+     */
+    public String slotVisibilitySuppression() {
+        return switch (slot) {
+            case SLOT_HEAD -> "variable.helmet_layer_visible = 0.0;";
+            case SLOT_CHEST -> "variable.chest_layer_visible = 0.0;";
+            case SLOT_LEGS -> "variable.leg_layer_visible = 0.0;";
+            case SLOT_FEET -> "variable.boot_layer_visible = 0.0;";
+            default -> "";
+        };
     }
 }

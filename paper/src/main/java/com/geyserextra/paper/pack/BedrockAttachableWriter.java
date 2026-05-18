@@ -211,12 +211,15 @@ public final class BedrockAttachableWriter {
         // Suppress the vanilla armor layer Bedrock renders by default —
         // without this, the operator's custom texture appears stacked on top
         // of the vanilla iron/diamond/etc. layer for the base material.
+        //
+        // Per-slot suppression (Codex round-1 fix): only the variable for this
+        // attachable's slot is set, so a custom helmet does not accidentally
+        // hide an unrelated vanilla chest/legs/boots layer the player is
+        // wearing in another slot. The molang statement comes from
+        // ArmorData.slotVisibilitySuppression() so the slot ↔ variable
+        // mapping lives in one place.
         description.put("scripts", Map.of(
-            "parent_setup",
-            "variable.helmet_layer_visible = 0.0; "
-                + "variable.chest_layer_visible = 0.0; "
-                + "variable.leg_layer_visible = 0.0; "
-                + "variable.boot_layer_visible = 0.0;"));
+            "parent_setup", armor.slotVisibilitySuppression()));
         description.put("render_controllers", List.of("controller.render.armor"));
 
         Map<String, Object> attachable = linkedMap(
