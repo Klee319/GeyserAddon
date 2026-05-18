@@ -1,5 +1,7 @@
 package com.geyserextra.paper.pack;
 
+import com.geyserextra.core.config.DynamicResourcePackEntry;
+
 import org.bukkit.Server;
 
 import java.io.IOException;
@@ -18,9 +20,11 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
+import java.util.Set;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.zip.ZipEntry;
@@ -73,7 +77,17 @@ public final class JavaPackResolver {
     private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(15);
     private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(60);
 
+    /**
+     * Time-to-live for cache entries that have no SHA-1 to validate against
+     * (typically dynamic URLs declared without a hash). After this many
+     * milliseconds the resolver re-downloads the URL even if a cached copy
+     * exists. 24 hours strikes a balance between operator-visible freshness
+     * and not hammering remote hosts on every server restart.
+     */
+    private static final long DYNAMIC_URL_TTL_MILLIS = Duration.ofHours(24).toMillis();
+
     private final List<String> configuredPaths;
+    private final List<DynamicResourcePackEntry> dynamicUrlEntries;
     private final Server server;
     private final Path pluginDataFolder;
     private final Logger logger;
@@ -89,21 +103,15 @@ public final class JavaPackResolver {
         Path pluginDataFolder,
         Logger logger
     ) {
-        this(toSingletonList(configuredPath), server, pluginDataFolder, logger);
+        this(toSingletonList(configuredPath), Collections.emptyList(),
+             server, pluginDataFolder, logger);
     }
 
     /**
-     * @param configuredPaths  raw values of
-     *                          {@code customItems.javaResourcePackPath} +
-     *                          {@code customItems.javaResourcePackPaths},
-     *                          already concatenated and blank-filtered by the
-     *                          caller (see
-     *                          {@link com.geyserextra.core.config.GeyserExtraConfig.CustomItemsConfig#effectiveJavaResourcePackPaths()})
-     * @param server            Bukkit server instance for reading
-     *                          {@code server.properties} values
-     * @param pluginDataFolder  plugin's data folder; cache lives under
-     *                          {@code <dataFolder>/cache}
-     * @param logger            plugin logger for warnings / info
+     * Backward-compatible 4-arg constructor (pre-Phase-2 shape). Delegates to
+     * the new canonical 5-arg constructor with an empty dynamic-URL list, so
+     * call sites that haven't been updated continue to work and resolve only
+     * configured paths + the server.properties fallback.
      */
     public JavaPackResolver(
         List<String> configuredPaths,
@@ -111,8 +119,42 @@ public final class JavaPackResolver {
         Path pluginDataFolder,
         Logger logger
     ) {
+        this(configuredPaths, Collections.emptyList(),
+             server, pluginDataFolder, logger);
+    }
+
+    /**
+     * Canonical constructor including the Phase 2 dynamic URL list.
+     *
+     * @param configuredPaths     raw values of
+     *                            {@code customItems.javaResourcePackPath} +
+     *                            {@code customItems.javaResourcePackPaths},
+     *                            already concatenated and blank-filtered by the
+     *                            caller (see
+     *                            {@link com.geyserextra.core.config.GeyserExtraConfig.CustomItemsConfig#effectiveJavaResourcePackPaths()})
+     * @param dynamicUrlEntries   Phase 2: remote pack URLs from
+     *                            {@code customItems.dynamicResourcePackUrls}.
+     *                            Each entry is downloaded, cached, and extracted
+     *                            into the managed cache directory. Empty list
+     *                            preserves pre-Phase-2 behaviour bit-for-bit.
+     * @param server              Bukkit server instance for reading
+     *                            {@code server.properties} values
+     * @param pluginDataFolder    plugin's data folder; cache lives under
+     *                            {@code <dataFolder>/cache}
+     * @param logger              plugin logger for warnings / info
+     */
+    public JavaPackResolver(
+        List<String> configuredPaths,
+        List<DynamicResourcePackEntry> dynamicUrlEntries,
+        Server server,
+        Path pluginDataFolder,
+        Logger logger
+    ) {
         this.configuredPaths = configuredPaths != null
             ? List.copyOf(configuredPaths)
+            : Collections.emptyList();
+        this.dynamicUrlEntries = dynamicUrlEntries != null
+            ? List.copyOf(dynamicUrlEntries)
             : Collections.emptyList();
         this.server = server;
         this.pluginDataFolder = pluginDataFolder;
@@ -164,6 +206,8 @@ public final class JavaPackResolver {
      */
     public List<Path> resolveAll() {
         List<Path> out = new ArrayList<>();
+
+        // Step 1: explicit local paths (unzipped dirs or .zip files).
         if (!configuredPaths.isEmpty()) {
             int idx = 0;
             for (String raw : configuredPaths) {
@@ -174,10 +218,43 @@ public final class JavaPackResolver {
                 idx++;
             }
         }
+
+        // Step 2: dynamic URL packs (Phase 2). Placed AFTER configuredPaths so
+        // the auto-pack merge in saveRegistriesToSharedFolder (which uses
+        // putAll with later-wins semantics) treats URL-hosted packs as the
+        // authoritative copy. Operators who set both should expect the remote
+        // pack to override their local copy.
+        if (!dynamicUrlEntries.isEmpty()) {
+            Set<String> seenUrls = new HashSet<>();
+            int dynIdx = 0;
+            for (DynamicResourcePackEntry entry : dynamicUrlEntries) {
+                if (entry == null) {
+                    dynIdx++;
+                    continue;
+                }
+                String url = entry.url();
+                if (url == null || url.isBlank()) {
+                    dynIdx++;
+                    continue;
+                }
+                if (!seenUrls.add(url)) {
+                    logger.warning("[JavaPack] dynamic URL listed twice; skipping duplicate: " + url);
+                    dynIdx++;
+                    continue;
+                }
+                Path resolved = resolveFromDynamicEntry(entry, dynIdx);
+                if (resolved != null) {
+                    out.add(resolved);
+                }
+                dynIdx++;
+            }
+        }
+
+        // Step 3: server.properties fallback — only when neither configured
+        // paths nor dynamic URLs produced a usable pack. The fallback rule
+        // mirrors the pre-Phase-2 behaviour: operators who set the explicit
+        // sources meant to override the server.properties URL, not augment it.
         if (out.isEmpty()) {
-            // Only fall back to server.properties when no explicit pack was
-            // resolved. Mixing the URL pack into an explicit-list scan would
-            // surprise operators who specifically configured the list.
             Path autoFetched = resolveFromServerProperties();
             if (autoFetched != null) {
                 out.add(autoFetched);
@@ -241,10 +318,10 @@ public final class JavaPackResolver {
     }
 
     /**
-     * Reads {@code server.properties} via the Bukkit Server API, downloads
-     * the pack (re-using the cache when the SHA-1 matches), and extracts
-     * it into the managed cache directory. Returns {@code null} on any
-     * failure (no URL, download failed, extraction failed).
+     * Reads {@code server.properties} via the Bukkit Server API and routes
+     * the URL through {@link #resolveFromUrl(String, String, String, String, String, long, String)}.
+     * Cache file names are kept identical to the pre-Phase-2 build so existing
+     * cache directories continue to work after upgrade.
      */
     private Path resolveFromServerProperties() {
         String url = safeGet(server::getResourcePack);
@@ -252,46 +329,181 @@ public final class JavaPackResolver {
             return null;
         }
         String expectedHash = safeGet(server::getResourcePackHash);
-        Path cacheZip = cacheFile(SERVER_PACK_FILE);
-        Path hashSidecar = cacheFile(SERVER_PACK_HASH_FILE);
-
-        try {
-            Files.createDirectories(cacheZip.getParent());
-            if (needsDownload(cacheZip, hashSidecar, expectedHash)) {
-                logger.info("[JavaPack] downloading server resource pack from " + url);
-                downloadTo(url, cacheZip);
-                String actualHash = computeSha1(cacheZip);
-                Files.writeString(hashSidecar, actualHash, StandardCharsets.US_ASCII);
-                logger.info("[JavaPack] cached server resource pack ("
-                    + Files.size(cacheZip) + " bytes, sha1=" + actualHash + ")");
-            } else {
-                logger.info("[JavaPack] reusing cached server resource pack (sha1 unchanged)");
-            }
-        } catch (IOException ex) {
-            logger.warning("[JavaPack] server resource pack auto-fetch failed: "
-                + ex.getClass().getSimpleName() + ": " + ex.getMessage());
-            return null;
-        }
-
-        return extractZip(cacheZip, "server.properties:" + url,
+        return resolveFromUrl(
+            url,
+            expectedHash,
+            "server.properties:" + url,
+            SERVER_PACK_FILE,
+            SERVER_PACK_HASH_FILE,
+            0L,                              // server.properties has no TTL fallback: re-download whenever the hash is unset
             EXTRACT_DIR_NAME + "-server");
     }
 
     /**
-     * Whether the cached ZIP needs a fresh download. Re-downloads on any
-     * of: missing cache file, no expected hash (server.properties has no
-     * SHA-1, so we can't verify staleness — re-download to be safe),
-     * missing hash sidecar, or hash mismatch.
+     * Routes a single {@link DynamicResourcePackEntry} (Phase 2: config-driven
+     * remote pack) through the same download / cache / extract pipeline as
+     * the server.properties fallback. Each URL gets its own cache filename
+     * derived from a short SHA-256 hash so multiple URLs don't clobber each
+     * other on disk.
+     *
+     * @param entry the URL + optional SHA-1 declaration from config
+     * @param index zero-based position in {@code dynamicUrlEntries} (currently
+     *              only used in log lines; cache keys are URL-hash based)
      */
-    private boolean needsDownload(Path cacheZip, Path hashSidecar, String expectedHash) {
-        if (!Files.isRegularFile(cacheZip)) return true;
-        if (expectedHash == null || expectedHash.isBlank()) return true;
-        if (!Files.isRegularFile(hashSidecar)) return true;
+    private Path resolveFromDynamicEntry(DynamicResourcePackEntry entry, int index) {
+        String url = entry.url();
+        String sha1 = entry.hasSha1() ? entry.sha1() : null;
+        String urlHashShort = shortHashForUrl(url);
+        return resolveFromUrl(
+            url,
+            sha1,
+            "config.dynamicResourcePackUrls[" + index + "]:" + url,
+            "url-" + urlHashShort + ".zip",
+            "url-" + urlHashShort + ".sha1",
+            DYNAMIC_URL_TTL_MILLIS,           // re-download after 24h when no SHA-1 is provided
+            EXTRACT_DIR_NAME + "-url-" + urlHashShort);
+    }
+
+    /**
+     * Shared download → cache → extract pipeline used by both
+     * {@link #resolveFromServerProperties()} and
+     * {@link #resolveFromDynamicEntry(DynamicResourcePackEntry, int)}.
+     *
+     * <p>Returns {@code null} on any failure (HTTP error, SHA-1 mismatch,
+     * ZIP parsing error, I/O write failure) so the rest of the resolve
+     * pipeline can continue without the offending pack.</p>
+     *
+     * @param url             the HTTP/HTTPS URL to download
+     * @param expectedSha1    optional SHA-1 hash for validation (lowercase
+     *                        hex). Null/blank means no hash validation;
+     *                        {@code ttlMillis} drives cache freshness instead.
+     * @param sourceLabel     human-readable label written into the extract log
+     * @param cacheZipName    file name inside {@code cache/} where the ZIP is
+     *                        stored (must be unique across all URLs scanned in
+     *                        a single resolve cycle so packs don't clobber)
+     * @param cacheHashName   file name inside {@code cache/} for the SHA-1
+     *                        sidecar (must be paired with {@code cacheZipName})
+     * @param ttlMillis       cache-freshness window in milliseconds, used only
+     *                        when {@code expectedSha1} is null/blank. Pass 0 to
+     *                        force a re-download every resolve cycle.
+     * @param extractSubdir   subdirectory name inside {@code cache/} for the
+     *                        extracted contents (must be unique per URL).
+     */
+    private Path resolveFromUrl(
+        String url,
+        String expectedSha1,
+        String sourceLabel,
+        String cacheZipName,
+        String cacheHashName,
+        long ttlMillis,
+        String extractSubdir
+    ) {
+        Path cacheZip = cacheFile(cacheZipName);
+        Path hashSidecar = cacheFile(cacheHashName);
+
         try {
-            String cached = Files.readString(hashSidecar, StandardCharsets.US_ASCII).trim();
-            return !cached.equalsIgnoreCase(expectedHash);
+            Files.createDirectories(cacheZip.getParent());
+            if (needsDownload(cacheZip, hashSidecar, expectedSha1, ttlMillis)) {
+                logger.info("[JavaPack] downloading resource pack from " + url);
+                downloadTo(url, cacheZip);
+                String actualHash = computeSha1(cacheZip);
+                // Hash mismatch: refuse to use a pack that doesn't match what
+                // the operator (or server.properties) asserted. Clearing the
+                // cache file forces a re-download next cycle; in the meantime
+                // we return null so the rest of the pipeline continues
+                // without this pack.
+                if (expectedSha1 != null && !expectedSha1.isBlank()
+                    && !actualHash.equalsIgnoreCase(expectedSha1)) {
+                    logger.warning("[JavaPack] SHA-1 mismatch for " + url
+                        + " (expected=" + expectedSha1 + ", actual=" + actualHash
+                        + ") — pack will be skipped; cache invalidated.");
+                    Files.deleteIfExists(cacheZip);
+                    Files.deleteIfExists(hashSidecar);
+                    return null;
+                }
+                Files.writeString(hashSidecar, actualHash, StandardCharsets.US_ASCII);
+                logger.info("[JavaPack] cached " + sourceLabel + " ("
+                    + Files.size(cacheZip) + " bytes, sha1=" + actualHash + ")");
+            } else {
+                logger.info("[JavaPack] reusing cached pack " + sourceLabel
+                    + " (no fresh download needed)");
+            }
+        } catch (IOException ex) {
+            logger.warning("[JavaPack] resource pack fetch failed for " + url + ": "
+                + ex.getClass().getSimpleName() + ": " + ex.getMessage());
+            return null;
+        }
+
+        return extractZip(cacheZip, sourceLabel, extractSubdir);
+    }
+
+    /**
+     * Whether the cached ZIP needs a fresh download. Decision rules, in order:
+     * <ol>
+     *   <li>Cache file absent → download.</li>
+     *   <li>An {@code expectedHash} is provided and the sidecar doesn't match → download.</li>
+     *   <li>An {@code expectedHash} is provided and matches → reuse cache.</li>
+     *   <li>No {@code expectedHash} and {@code ttlMillis > 0} → reuse cache only
+     *       when the cache file is younger than {@code ttlMillis}.</li>
+     *   <li>No {@code expectedHash} and {@code ttlMillis == 0} → always download
+     *       (the conservative fallback path used for {@code server.properties}).</li>
+     * </ol>
+     *
+     * <p>Overload added in Phase 2 to support TTL-based caching for dynamic
+     * URLs that arrive without a SHA-1. The original two-arg semantics are
+     * preserved via the {@code ttlMillis == 0} branch.</p>
+     */
+    private boolean needsDownload(Path cacheZip, Path hashSidecar,
+                                  String expectedHash, long ttlMillis) {
+        if (!Files.isRegularFile(cacheZip)) return true;
+
+        boolean hasExpected = expectedHash != null && !expectedHash.isBlank();
+        if (hasExpected) {
+            if (!Files.isRegularFile(hashSidecar)) return true;
+            try {
+                String cached = Files.readString(hashSidecar, StandardCharsets.US_ASCII).trim();
+                return !cached.equalsIgnoreCase(expectedHash);
+            } catch (IOException e) {
+                return true;
+            }
+        }
+
+        // No expected hash. Fall back to TTL-based freshness, or force-download
+        // when TTL is zero (the pre-Phase-2 server.properties behaviour).
+        if (ttlMillis <= 0) {
+            return true;
+        }
+        try {
+            long age = System.currentTimeMillis()
+                - Files.getLastModifiedTime(cacheZip).toMillis();
+            return age >= ttlMillis;
         } catch (IOException e) {
             return true;
+        }
+    }
+
+    /**
+     * Computes a short, filename-safe identifier for a URL by SHA-256 hashing
+     * the UTF-8 bytes of the URL and taking the first 16 hex chars. Stable
+     * across JVM restarts so the same URL maps to the same cache file every
+     * resolve cycle.
+     *
+     * <p>Falls back to a {@code String.hashCode()}-based identifier if the
+     * JDK is missing SHA-256 for any reason — pure defensive guard, never
+     * expected to trigger on a real JVM.</p>
+     */
+    private static String shortHashForUrl(String url) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            byte[] digest = md.digest(url.getBytes(StandardCharsets.UTF_8));
+            StringBuilder hex = new StringBuilder(32);
+            for (byte b : digest) {
+                hex.append(String.format("%02x", b & 0xFF));
+                if (hex.length() >= 16) break;
+            }
+            return hex.substring(0, 16);
+        } catch (NoSuchAlgorithmException ignored) {
+            return Integer.toHexString(url.hashCode() & 0xfffffff);
         }
     }
 

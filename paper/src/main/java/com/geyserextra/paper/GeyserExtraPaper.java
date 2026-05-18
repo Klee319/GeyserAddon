@@ -965,6 +965,9 @@ public final class GeyserExtraPaper extends JavaPlugin {
     private List<Path> resolveJavaPackRoots() {
         JavaPackResolver resolver = new JavaPackResolver(
             config.customItems().effectiveJavaResourcePackPaths(),
+            // Phase 2: dynamic URL packs declared in config. Empty list (the
+            // default) preserves pre-Phase-2 behaviour bit-for-bit.
+            config.customItems().effectiveDynamicResourcePackUrls(),
             getServer(),
             getDataFolder().toPath(),
             getLogger());
