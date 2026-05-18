@@ -369,6 +369,15 @@ public final class AutoBedrockPackBuilder {
             boolean armorTextureResolved = armorEnabled
                 && armorTextureCopies != null
                 && armorTextureCopies.containsKey(iconKey);
+
+            // Phase 7a emission split (Codex round-2 G2 fix):
+            //   armor texture resolved          → emit armor attachable, skip held-item
+            //   armor enabled, no texture       → log WARN, FALL THROUGH to held-item
+            //                                     (Bedrock falls back to vanilla armor
+            //                                     when worn; held-item attachable still
+            //                                     handles the in-hand state so the
+            //                                     Phase 0-6 behaviour is preserved)
+            //   not armor                       → existing held-item path
             if (armorTextureResolved) {
                 Map<String, String> armorArt = BedrockAttachableWriter.buildArmorArtifacts(
                     iconKey, mapping.armor(), armorConfig);
@@ -386,26 +395,23 @@ public final class AutoBedrockPackBuilder {
                 // Don't emit the held-item attachable for armor: identifier
                 // collision would have only one win on Bedrock side anyway,
                 // and the armor path is the visually correct one when worn.
-            } else if (armorEnabled) {
-                // Armor mapping detected but no equipment texture resolved.
-                // Emit nothing so Bedrock falls back to the base item's
-                // vanilla armor texture (e.g., diamond armor for a diamond
-                // helmet base). A loud WARN surfaces the missing resolution.
-                if (logger != null) {
+            } else if (attachableMode) {
+                // Phase 3/4/6: held-item attachable. Reached for both regular
+                // mappings AND for armor mappings whose equipment texture
+                // could not be resolved — in the latter case we also log a
+                // WARN above so the operator sees why worn-state falls back
+                // to vanilla. The held-item attachable still provides the
+                // in-hand 2D/3D rendering that pre-Phase-7 builds offered
+                // for these items.
+                if (armorEnabled && logger != null) {
                     logger.warning("[AutoPack] armor mapping " + mapping.name()
                         + " (slot=" + mapping.armor().slot()
                         + ", asset_id=" + mapping.armor().assetId() + ") "
                         + "has no resolved equipment texture in any configured Java pack — "
                         + "skipping armor attachable; Bedrock will render vanilla armor for "
-                        + mapping.baseItem());
+                        + mapping.baseItem()
+                        + " when worn. Held-item attachable still emitted for in-hand view.");
                 }
-            } else if (attachableMode) {
-                // Phase 3/4/6: collect attachable artifacts for this mapping if
-                // the model declared a display block AND the policy allows
-                // generation. The writer returns an empty map when conditions
-                // don't hold, so we just merge whatever it produces. Phase 6
-                // additionally reads the actual PNG dimensions so per-face UVs
-                // scale correctly for higher-resolution operator-supplied textures.
                 int[] textureSize = probePngDimensions(def.textureFile(), logger);
                 Map<String, String> artifacts = BedrockAttachableWriter.buildArtifacts(
                     iconKey, def.display(), def.geometry(),
@@ -433,8 +439,15 @@ public final class AutoBedrockPackBuilder {
         // pair stays constant across pack regenerations and the client
         // silently keeps using stale textures or stale attachables.
         String itemTextureJson = buildItemTextureJson(mappings, customIconToTexturePath, logger, debug);
+        // Codex round-2 fix (G1): armor texture copies must participate in
+        // the patch-version hash too, otherwise an operator who only edits
+        // an equipment PNG regenerates the same zip identifier and Bedrock
+        // clients keep serving stale armor art from their cache.
+        java.util.Set<String> armorPathSet = armorTextureCopies != null
+            ? armorTextureCopies.keySet()
+            : java.util.Collections.emptySet();
         int patchVersion = patchVersionFromContent(itemTextureJson, attachableArtifacts,
-            effectiveEntityCopies.keySet());
+            effectiveEntityCopies.keySet(), armorPathSet);
         String manifestJson = buildManifestJson(patchVersion);
 
         // Phase 3 — write everything to a sibling .tmp file, then atomic-move
@@ -588,12 +601,14 @@ public final class AutoBedrockPackBuilder {
     private static int patchVersionFromContent(
         String itemTextureJson,
         Map<String, String> attachableArtifacts,
-        java.util.Set<String> entityCopyPaths
+        java.util.Set<String> entityCopyPaths,
+        java.util.Set<String> armorCopyPaths
     ) {
         boolean nothingToHash =
             (itemTextureJson == null || itemTextureJson.isEmpty())
             && (attachableArtifacts == null || attachableArtifacts.isEmpty())
-            && (entityCopyPaths == null || entityCopyPaths.isEmpty());
+            && (entityCopyPaths == null || entityCopyPaths.isEmpty())
+            && (armorCopyPaths == null || armorCopyPaths.isEmpty());
         if (nothingToHash) {
             return 0;
         }
@@ -626,6 +641,23 @@ public final class AutoBedrockPackBuilder {
                 java.util.Collections.sort(sorted);
                 for (String path : sorted) {
                     md.update(path.getBytes(StandardCharsets.UTF_8));
+                    md.update((byte) 0);
+                }
+            }
+            // Phase 7a (Codex G1 fix): armor texture iconKeys participate in
+            // the hash so a new/removed armor mapping flips the patch
+            // version. Caveat: a pure content change to an existing armor PNG
+            // (same iconKey, different bytes) does NOT flip the hash with
+            // path-only inputs, matching the entity-texture limitation noted
+            // above. A future Phase could digest texture content bytes too;
+            // out of scope here because it would also apply to entity and
+            // item textures, not just armor.
+            if (armorCopyPaths != null && !armorCopyPaths.isEmpty()) {
+                List<String> sorted = new ArrayList<>(armorCopyPaths);
+                java.util.Collections.sort(sorted);
+                for (String iconKey : sorted) {
+                    md.update("armor:".getBytes(StandardCharsets.UTF_8));
+                    md.update(iconKey.getBytes(StandardCharsets.UTF_8));
                     md.update((byte) 0);
                 }
             }
