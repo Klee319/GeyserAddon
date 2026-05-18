@@ -560,19 +560,19 @@ public final class JavaPackReader {
      * can diff against their actual pack layout.
      */
     private JavaModelDefinition resolveSingleModelRef(String baseItem, int cmd, String modelRef) {
-        // Phase 3: resolve the display transform once up-front. This is the
-        // most expensive step that could fail benignly (missing model file,
-        // unparseable JSON), and it is independent of texture resolution —
-        // so do it before any of the texture-resolution branches and reuse
-        // the result regardless of which texture path wins.
+        // Phase 3/4: resolve display + elements once up-front. They are
+        // independent of texture resolution and benign on failure, so do
+        // them before any of the texture-resolution branches and reuse the
+        // result regardless of which texture path wins.
         JavaModelDisplay display = resolveDisplayFromModelSafe(modelRef);
+        JavaModelGeometry geometry = resolveElementsFromModelSafe(modelRef);
 
         // Step 1: model JSON chain -> textures.layerN -> PNG file
         String textureRef = resolveTextureRefFromModel(modelRef);
         if (textureRef != null) {
             Path texturePath = resolveTextureFile(textureRef);
             if (texturePath != null) {
-                return new JavaModelDefinition(baseItem, cmd, modelRef, textureRef, texturePath, display);
+                return new JavaModelDefinition(baseItem, cmd, modelRef, textureRef, texturePath, display, geometry);
             }
         }
 
@@ -583,7 +583,7 @@ public final class JavaPackReader {
                 logger.fine("[JavaPack] " + baseItem + "#" + cmd
                     + ": resolved via model-name-as-texture-path fallback for " + modelRef);
             }
-            return new JavaModelDefinition(baseItem, cmd, modelRef, modelRef, direct, display);
+            return new JavaModelDefinition(baseItem, cmd, modelRef, modelRef, direct, display, geometry);
         }
 
         // Step 3: basename index lookup
@@ -596,7 +596,7 @@ public final class JavaPackReader {
                     + " -> " + indexed + ")");
             }
             return new JavaModelDefinition(baseItem, cmd, modelRef,
-                "basename:" + basename, indexed, display);
+                "basename:" + basename, indexed, display, geometry);
         }
 
         // All three paths failed: emit a single diagnostic line listing
@@ -718,6 +718,110 @@ public final class JavaPackReader {
                 logger.log(Level.FINE,
                     "[JavaPack] display extraction threw for " + modelRef, ex);
             }
+            return null;
+        }
+    }
+
+    /**
+     * Internal wrapper around {@link #resolveElementsFromModel(String)} with
+     * the same defensive semantics as {@link #resolveDisplayFromModelSafe}:
+     * extraction failures fall back to {@code null} rather than crashing the
+     * scan.
+     */
+    private JavaModelGeometry resolveElementsFromModelSafe(String modelRef) {
+        try {
+            return resolveElementsFromModel(modelRef);
+        } catch (RuntimeException ex) {
+            if (debug) {
+                logger.log(Level.FINE,
+                    "[JavaPack] elements extraction threw for " + modelRef, ex);
+            }
+            return null;
+        }
+    }
+
+    /**
+     * Walks the {@code parent} chain rooted at {@code modelRef} and returns
+     * the first non-empty {@code elements} array encountered. Unlike
+     * {@code display}, Mojang does NOT merge elements across parents — once
+     * the chain finds an elements declaration it stops walking, so child
+     * overrides completely replace the parent's geometry.
+     *
+     * <p>Returns {@code null} when the chain produces no elements (typical
+     * for 2D-icon items inheriting from {@code item/generated}).</p>
+     */
+    public JavaModelGeometry resolveElementsFromModel(String modelRef) {
+        if (modelRef == null || modelRef.isBlank()) {
+            return null;
+        }
+        String current = modelRef;
+        int hops = 0;
+        while (current != null && hops < 8) {
+            Path modelFile = resolveModelFile(current);
+            if (modelFile == null) {
+                break;
+            }
+            Map<String, Object> modelJson;
+            try {
+                modelJson = readJsonObject(modelFile);
+            } catch (IOException ex) {
+                logger.warning("[JavaPack] failed to read model JSON " + modelFile
+                    + " for elements extraction: " + ex.getMessage());
+                break;
+            }
+            Object elementsObj = modelJson.get("elements");
+            if (elementsObj instanceof List<?> rawList && !rawList.isEmpty()) {
+                List<JavaModelGeometry.Element> parsed = new ArrayList<>(rawList.size());
+                for (Object item : rawList) {
+                    if (!(item instanceof Map<?, ?> elementMap)) continue;
+                    JavaModelGeometry.Element element = parseElement(elementMap);
+                    if (element != null) {
+                        parsed.add(element);
+                    }
+                }
+                if (!parsed.isEmpty()) {
+                    return new JavaModelGeometry(parsed);
+                }
+            }
+            Object parent = modelJson.get("parent");
+            if (!(parent instanceof String parentRef) || parentRef.isBlank()) {
+                break;
+            }
+            current = parentRef;
+            hops++;
+        }
+        return null;
+    }
+
+    /**
+     * Parses one entry of a Java {@code elements} array. Returns {@code null}
+     * when the entry is structurally wrong (missing from/to, wrong array
+     * length); the caller skips nulls so a single broken element does not
+     * disqualify the entire model.
+     */
+    private static JavaModelGeometry.Element parseElement(Map<?, ?> map) {
+        float[] from = parseFloat3(map.get("from"), 0f);
+        float[] to = parseFloat3(map.get("to"), 0f);
+        JavaModelGeometry.ElementRotation rotation = parseElementRotation(map.get("rotation"));
+        try {
+            return new JavaModelGeometry.Element(from, to, rotation);
+        } catch (IllegalArgumentException ignored) {
+            return null;
+        }
+    }
+
+    private static JavaModelGeometry.ElementRotation parseElementRotation(Object raw) {
+        if (!(raw instanceof Map<?, ?> map)) {
+            return null;
+        }
+        float[] origin = parseFloat3(map.get("origin"), 8f);
+        Object axisObj = map.get("axis");
+        String axis = (axisObj instanceof String s) ? s : "y";
+        Object angleObj = map.get("angle");
+        float angle = (angleObj instanceof Number n) ? n.floatValue() : 0f;
+        try {
+            return new JavaModelGeometry.ElementRotation(origin, axis, angle);
+        } catch (IllegalArgumentException ignored) {
             return null;
         }
     }
@@ -1034,6 +1138,9 @@ public final class JavaPackReader {
      *                        model JSON (Phase 3). {@code null} when the model
      *                        declares no display overrides or could not be
      *                        re-read after texture resolution.
+     * @param geometry        optional {@code elements} block harvested from the
+     *                        model JSON (Phase 4). {@code null} when the model
+     *                        is a flat 2D icon or the elements parse failed.
      */
     public record JavaModelDefinition(
         String baseItem,
@@ -1041,15 +1148,28 @@ public final class JavaPackReader {
         String modelRef,
         String textureRef,
         Path textureFile,
-        JavaModelDisplay display
+        JavaModelDisplay display,
+        JavaModelGeometry geometry
     ) {
         /**
          * Backward-compatible 5-arg constructor used by call sites that
-         * pre-date the Phase 3 display field. Delegates with {@code display=null}.
+         * pre-date the Phase 3 display field. Delegates with
+         * {@code display=null, geometry=null}.
          */
         public JavaModelDefinition(String baseItem, int customModelData,
                                    String modelRef, String textureRef, Path textureFile) {
-            this(baseItem, customModelData, modelRef, textureRef, textureFile, null);
+            this(baseItem, customModelData, modelRef, textureRef, textureFile, null, null);
+        }
+
+        /**
+         * Backward-compatible 6-arg constructor used by Phase 3 call sites
+         * that carried a {@link JavaModelDisplay} but not yet a
+         * {@link JavaModelGeometry}. Delegates with {@code geometry=null}.
+         */
+        public JavaModelDefinition(String baseItem, int customModelData,
+                                   String modelRef, String textureRef, Path textureFile,
+                                   JavaModelDisplay display) {
+            this(baseItem, customModelData, modelRef, textureRef, textureFile, display, null);
         }
     }
 }

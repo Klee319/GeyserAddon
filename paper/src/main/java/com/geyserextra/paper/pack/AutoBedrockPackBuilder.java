@@ -274,13 +274,16 @@ public final class AutoBedrockPackBuilder {
             pngTasks.add(new TextureCopyTask(def.textureFile(), zipEntry, key.toString()));
             customIconToTexturePath.put(iconKey, bedrockTextureRelative);
 
-            // Phase 3: collect attachable artifacts for this mapping if the
+            // Phase 3/4: collect attachable artifacts for this mapping if the
             // model declared a display block AND the policy allows generation.
-            // The writer itself returns an empty map when neither condition
-            // holds, so we just merge whatever it produces.
+            // The writer itself returns an empty map when the conditions
+            // don't hold, so we just merge whatever it produces. Phase 4 also
+            // passes the JavaModelGeometry so mode=full mappings get real
+            // element-cube geometry instead of the flat-quad fallback.
             if (attachableMode) {
                 Map<String, String> artifacts = BedrockAttachableWriter.buildArtifacts(
-                    iconKey, def.display(), bedrockTextureRelative, effectiveConfig);
+                    iconKey, def.display(), def.geometry(),
+                    bedrockTextureRelative, effectiveConfig);
                 for (Map.Entry<String, String> art : artifacts.entrySet()) {
                     String artifactPath = art.getKey();
                     if (!plannedZipEntries.add(artifactPath)) {

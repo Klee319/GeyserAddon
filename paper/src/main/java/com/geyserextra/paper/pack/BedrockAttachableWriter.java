@@ -64,6 +64,7 @@ public final class BedrockAttachableWriter {
     public static Map<String, String> buildArtifacts(
         String iconKey,
         JavaModelDisplay display,
+        JavaModelGeometry geometry,
         String textureRelativePath,
         AttachableGenerationConfig config
     ) {
@@ -84,11 +85,18 @@ public final class BedrockAttachableWriter {
             return Map.of();
         }
 
+        // Phase 4: full mode + non-empty elements → emit real 3D cubes.
+        // offsets_only or empty elements → fall back to the flat-quad
+        // geometry from Phase 3.
+        boolean useFullGeometry = AttachableGenerationConfig.MODE_FULL.equals(mode)
+            && geometry != null
+            && geometry.hasElements();
+
         Map<String, String> out = new LinkedHashMap<>();
         out.put(attachableEntryPath(iconKey),
                 JsonUtil.toPrettyJson(buildAttachableJson(iconKey, textureRelativePath, config)));
         out.put(geometryEntryPath(iconKey),
-                JsonUtil.toPrettyJson(buildGeometryJson(iconKey)));
+                JsonUtil.toPrettyJson(buildGeometryJson(iconKey, useFullGeometry ? geometry : null)));
         out.put(animationEntryPath(iconKey),
                 JsonUtil.toPrettyJson(buildAnimationJson(iconKey, display, config)));
         return out;
@@ -158,11 +166,11 @@ public final class BedrockAttachableWriter {
             "minecraft:attachable", Map.of("description", description));
     }
 
-    private static Map<String, Object> buildGeometryJson(String iconKey) {
+    private static Map<String, Object> buildGeometryJson(String iconKey, JavaModelGeometry fullGeometry) {
         // Phase 3 baseline: a single 16x16 quad in the XY plane, hinged at
-        // the bone pivot. This gives the attachable a real surface to render
-        // the icon texture on; phase 4 will replace this with full element
-        // cubes when {@code mode == full} and the model has elements.
+        // the bone pivot. Phase 4: when fullGeometry is non-null we use the
+        // converter's element-derived cubes instead, giving Bedrock a true 3D
+        // representation of the Java model.
         Map<String, Object> descriptor = new LinkedHashMap<>();
         descriptor.put("identifier", "geometry." + NAMESPACE + "." + iconKey);
         descriptor.put("texture_width", 16);
@@ -171,15 +179,21 @@ public final class BedrockAttachableWriter {
         descriptor.put("visible_bounds_height", 2);
         descriptor.put("visible_bounds_offset", List.of(0, 0.5, 0));
 
-        Map<String, Object> cube = new LinkedHashMap<>();
-        cube.put("origin", List.of(-8, 0, 0));
-        cube.put("size", List.of(16, 16, 0));
-        cube.put("uv", List.of(0, 0));
+        List<Map<String, Object>> cubes;
+        if (fullGeometry != null && fullGeometry.hasElements()) {
+            cubes = BedrockGeometryConverter.convertElementsToCubes(fullGeometry);
+        } else {
+            Map<String, Object> flatQuad = new LinkedHashMap<>();
+            flatQuad.put("origin", List.of(-8, 0, 0));
+            flatQuad.put("size", List.of(16, 16, 0));
+            flatQuad.put("uv", List.of(0, 0));
+            cubes = List.of(flatQuad);
+        }
 
         Map<String, Object> bone = new LinkedHashMap<>();
         bone.put("name", HELD_BONE);
         bone.put("pivot", List.of(0, 0, 0));
-        bone.put("cubes", List.of(cube));
+        bone.put("cubes", cubes);
 
         Map<String, Object> geometry = new LinkedHashMap<>();
         geometry.put("description", descriptor);
