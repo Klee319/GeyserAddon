@@ -297,9 +297,13 @@ public final class GeyserExtraConfig {
         // pdcEnabled: emergency rollback flag for PDC-only craft result feature.
         // dynamicResourcePackUrls: optional HTTP(S) URLs of Java resource packs to fetch and merge.
         // attachableGeneration: controls Bedrock attachable/geometry/animation generation.
+        // entityTextureOverride: Phase 7b — Java pack entity textures mirrored into the Bedrock pack.
+        // armorGeneration: Phase 7a — armor attachable generation for equippable items.
         private final boolean pdcEnabled;
         private final List<DynamicResourcePackEntry> dynamicResourcePackUrls;
         private final AttachableGenerationConfig attachableGeneration;
+        private final EntityTextureOverrideConfig entityTextureOverride;
+        private final ArmorGenerationConfig armorGeneration;
 
         public CustomItemsConfig() {
             this.enabled = true;
@@ -315,6 +319,8 @@ public final class GeyserExtraConfig {
             this.pdcEnabled = true;
             this.dynamicResourcePackUrls = Collections.emptyList();
             this.attachableGeneration = new AttachableGenerationConfig();
+            this.entityTextureOverride = new EntityTextureOverrideConfig();
+            this.armorGeneration = new ArmorGenerationConfig();
         }
 
         public CustomItemsConfig(
@@ -427,6 +433,13 @@ public final class GeyserExtraConfig {
             this.attachableGeneration = attachableGeneration != null
                 ? attachableGeneration
                 : new AttachableGenerationConfig();
+            // Phase 7: new nested configs default to enabled instances when
+            // the canonical constructor doesn't receive explicit values via
+            // legacy shorter-arity calls. Gson deserialisation populates them
+            // through reflection on the actual field type when JSON declares
+            // the section.
+            this.entityTextureOverride = new EntityTextureOverrideConfig();
+            this.armorGeneration = new ArmorGenerationConfig();
         }
 
         private static String normalizePdcWarning(String raw) {
@@ -665,6 +678,80 @@ public final class GeyserExtraConfig {
          */
         public AttachableGenerationConfig attachableGeneration() {
             return attachableGeneration != null ? attachableGeneration : new AttachableGenerationConfig();
+        }
+
+        /**
+         * Returns the entity texture override configuration (Phase 7b).
+         * Never {@code null}; missing JSON section yields a default-enabled instance.
+         */
+        public EntityTextureOverrideConfig entityTextureOverride() {
+            return entityTextureOverride != null ? entityTextureOverride : new EntityTextureOverrideConfig();
+        }
+
+        /**
+         * Returns the armor attachable generation configuration (Phase 7a).
+         * Never {@code null}; missing JSON section yields a default-enabled instance.
+         */
+        public ArmorGenerationConfig armorGeneration() {
+            return armorGeneration != null ? armorGeneration : new ArmorGenerationConfig();
+        }
+    }
+
+    /**
+     * Phase 7b: controls whether the auto-pack mirrors operator-supplied
+     * entity textures from the Java pack ({@code assets/<ns>/textures/entity/**.png})
+     * into the generated Bedrock pack. When enabled (default), every PNG under
+     * the entity texture root is copied verbatim into {@code textures/entity/<rest>}
+     * inside the Bedrock pack — Bedrock then renders matching vanilla entity
+     * types with the operator's custom artwork.
+     *
+     * <p>Side-effect contract: when {@code enabled=false} OR no entity textures
+     * exist in the Java pack(s), the generated Bedrock zip is byte-identical
+     * to the pre-Phase-7b build.</p>
+     */
+    public static final class EntityTextureOverrideConfig {
+        private final boolean enabled;
+
+        public EntityTextureOverrideConfig() {
+            this(true);
+        }
+
+        public EntityTextureOverrideConfig(boolean enabled) {
+            this.enabled = enabled;
+        }
+
+        /** Whether entity texture mirroring is active. Default: true. */
+        public boolean enabled() {
+            return enabled;
+        }
+    }
+
+    /**
+     * Phase 7a: controls whether the auto-pack generates Bedrock armor
+     * attachables for Java items declaring the {@code minecraft:equippable}
+     * data component (Paper 1.21.4+). When enabled (default), each equippable
+     * mapping gets a slot-appropriate attachable referencing the built-in
+     * humanoid armor geometry so Bedrock players see the custom armor texture
+     * when the item is worn.
+     *
+     * <p>Side-effect contract: when {@code enabled=false} OR no equippable
+     * items are detected, the generated Bedrock zip is byte-identical to
+     * the pre-Phase-7a build.</p>
+     */
+    public static final class ArmorGenerationConfig {
+        private final boolean enabled;
+
+        public ArmorGenerationConfig() {
+            this(true);
+        }
+
+        public ArmorGenerationConfig(boolean enabled) {
+            this.enabled = enabled;
+        }
+
+        /** Whether armor attachable generation is active. Default: true. */
+        public boolean enabled() {
+            return enabled;
         }
     }
 

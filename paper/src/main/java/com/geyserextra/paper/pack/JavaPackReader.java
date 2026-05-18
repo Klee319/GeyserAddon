@@ -1094,6 +1094,70 @@ public final class JavaPackReader {
         return null;
     }
 
+    /**
+     * Phase 7a: resolves the texture file for a Java equipment asset.
+     *
+     * <p>Java equipment JSON lives at {@code assets/<ns>/equipment/<name>.json}
+     * (1.21.4+ format) and declares one or more texture layers per humanoid
+     * armor slot. For a given asset id (e.g. {@code "myns:my_helmet"}) and
+     * layer key (one of {@code "humanoid"} / {@code "humanoid_leggings"}),
+     * this method returns the absolute path to the referenced PNG file, or
+     * {@code null} when the asset JSON is missing, the layer is absent, or
+     * the referenced texture file cannot be located on disk.</p>
+     *
+     * <p>Texture reference resolution mirrors {@link #resolveTextureFile}:
+     * {@code "myns:my_helmet"} resolves to
+     * {@code assets/myns/textures/entity/equipment/<layer>/my_helmet.png}.
+     * The {@code <layer>} subdirectory mirrors Mojang's convention (Java
+     * 1.21.4+ ships humanoid armor textures under
+     * {@code textures/entity/equipment/humanoid/}).</p>
+     */
+    public Path resolveEquipmentTexture(String assetId, String layerKey) {
+        if (assetId == null || assetId.isBlank() || layerKey == null) {
+            return null;
+        }
+        String[] assetParts = splitNamespacedKey(assetId);
+        String namespace = assetParts[0];
+        String assetName = assetParts[1];
+        Path equipmentJson = packRoot.resolve("assets").resolve(namespace)
+            .resolve("equipment").resolve(assetName + ".json");
+        if (!Files.isRegularFile(equipmentJson)) {
+            return null;
+        }
+        Map<String, Object> json;
+        try {
+            json = readJsonObject(equipmentJson);
+        } catch (IOException ex) {
+            logger.warning("[Equipment] failed to read " + equipmentJson + ": " + ex.getMessage());
+            return null;
+        }
+        Object layersObj = json.get("layers");
+        if (!(layersObj instanceof Map<?, ?> layers)) {
+            return null;
+        }
+        Object layerListObj = layers.get(layerKey);
+        if (!(layerListObj instanceof List<?> layerList) || layerList.isEmpty()) {
+            return null;
+        }
+        // First entry is the primary texture; Mojang allows multiple stacked
+        // layers but Bedrock's single-texture attachable can only sample one.
+        Object firstLayer = layerList.get(0);
+        if (!(firstLayer instanceof Map<?, ?> layerMap)) {
+            return null;
+        }
+        Object textureRef = layerMap.get("texture");
+        if (!(textureRef instanceof String textureRefStr) || textureRefStr.isBlank()) {
+            return null;
+        }
+        // Equipment texture references resolve to
+        // assets/<ns>/textures/entity/equipment/<layer>/<name>.png
+        String[] texParts = splitNamespacedKey(textureRefStr);
+        Path texturePath = packRoot.resolve("assets").resolve(texParts[0])
+            .resolve("textures").resolve("entity").resolve("equipment")
+            .resolve(layerKey).resolve(texParts[1] + ".png");
+        return Files.isRegularFile(texturePath) ? texturePath : null;
+    }
+
     /** Resolves a model reference (e.g. {@code "myns:item/fire_sword"}) to a file. */
     private Path resolveModelFile(String modelRef) {
         String[] parts = splitNamespacedKey(modelRef);

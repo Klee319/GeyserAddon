@@ -188,30 +188,16 @@ public final class AutoBedrockPackBuilder {
         boolean debug
     ) throws IOException {
         // Backward-compat delegate: no AttachableGenerationConfig was passed,
-        // so honor the Phase 0 default (mode=full). Callers that need to
+        // so honor the Phase 0 default (mode=offsets_only). Callers that need to
         // pin a different mode use the 6-arg overload below.
         build(registry, outputZip, javaPackEntries,
               new AttachableGenerationConfig(), logger, debug);
     }
 
     /**
-     * Builds the pack ZIP using already-scanned Java pack entries and an
-     * explicit attachable generation policy.
-     *
-     * <p>Phase 3 entry point. When
-     * {@code attachableConfig.mode == off} the result is byte-for-byte
-     * identical to the pre-Phase-3 build (no attachable, geometry, or
-     * animation JSON entries). When the mode is {@code offsets_only} or
-     * {@code full}, per-mapping attachable artifacts are added for items
-     * whose Java model declared a {@code display} block.</p>
-     *
-     * @param registry          source of custom item mappings
-     * @param outputZip         target ZIP file path
-     * @param javaPackEntries   pre-scanned Java pack overrides (pass empty to skip texture copy)
-     * @param attachableConfig  Phase 3 attachable generation policy; {@code null} disables generation
-     * @param logger            plugin logger
-     * @param debug             whether to emit verbose per-file diagnostics
-     * @throws IOException if writing the ZIP fails
+     * Phase 6 entry point — kept for callers that don't yet route Phase 7b
+     * entity texture copies through. Delegates with an empty entity texture
+     * map so the zip output is identical to the prior shape.
      */
     public static void build(
         ItemMappingRegistry registry,
@@ -221,10 +207,89 @@ public final class AutoBedrockPackBuilder {
         Logger logger,
         boolean debug
     ) throws IOException {
+        build(registry, outputZip, javaPackEntries, attachableConfig,
+              Collections.emptyMap(), logger, debug);
+    }
+
+    /**
+     * Builds the pack ZIP using already-scanned Java pack entries, an
+     * explicit attachable generation policy, and a pre-planned set of
+     * entity texture copies (Phase 7b).
+     *
+     * <p>Phase 3 entry point. When
+     * {@code attachableConfig.mode == off} the result is byte-for-byte
+     * identical to the pre-Phase-3 build (no attachable, geometry, or
+     * animation JSON entries). When the mode is {@code offsets_only} or
+     * {@code full}, per-mapping attachable artifacts are added for items
+     * whose Java model declared a {@code display} block.</p>
+     *
+     * <p>Phase 7b: {@code entityTextureCopies} maps Bedrock zip-entry paths
+     * (e.g. {@code "textures/entity/zombie/zombie.png"}) to source PNG files
+     * on disk. Each entry is copied into the generated zip alongside the
+     * item textures; Bedrock then renders matching vanilla entity types
+     * with the operator-supplied artwork. An empty map preserves
+     * pre-Phase-7b zip bit identity.</p>
+     *
+     * @param registry             source of custom item mappings
+     * @param outputZip            target ZIP file path
+     * @param javaPackEntries      pre-scanned Java pack overrides (pass empty to skip texture copy)
+     * @param attachableConfig     Phase 3 attachable generation policy; {@code null} disables generation
+     * @param entityTextureCopies  Phase 7b entity texture mirror map (empty preserves identity)
+     * @param logger               plugin logger
+     * @param debug                whether to emit verbose per-file diagnostics
+     * @throws IOException if writing the ZIP fails
+     */
+    public static void build(
+        ItemMappingRegistry registry,
+        Path outputZip,
+        Map<JavaPackReader.CmdKey, JavaPackReader.JavaModelDefinition> javaPackEntries,
+        AttachableGenerationConfig attachableConfig,
+        Map<String, Path> entityTextureCopies,
+        Logger logger,
+        boolean debug
+    ) throws IOException {
+        build(registry, outputZip, javaPackEntries, attachableConfig,
+              entityTextureCopies,
+              java.util.Collections.emptyMap(),
+              new com.geyserextra.core.config.GeyserExtraConfig.ArmorGenerationConfig(false),
+              logger, debug);
+    }
+
+    /**
+     * Phase 7a entry point. Routes equippable mappings through the armor
+     * attachable path while preserving all earlier behaviour for held items
+     * and entity textures.
+     *
+     * @param armorTextureCopies  Phase 7a: map of {@code <iconKey>} → source PNG
+     *                            path for armor textures. Each entry will be
+     *                            copied into the zip at the path returned by
+     *                            {@link BedrockAttachableWriter#armorTextureEntryPath(String)}.
+     *                            Empty map means "no armor textures available".
+     * @param armorConfig         Phase 7a armor generation policy; when
+     *                            {@code enabled=false} no armor attachables
+     *                            are emitted even if mappings carry armor data.
+     */
+    public static void build(
+        ItemMappingRegistry registry,
+        Path outputZip,
+        Map<JavaPackReader.CmdKey, JavaPackReader.JavaModelDefinition> javaPackEntries,
+        AttachableGenerationConfig attachableConfig,
+        Map<String, Path> entityTextureCopies,
+        Map<String, Path> armorTextureCopies,
+        com.geyserextra.core.config.GeyserExtraConfig.ArmorGenerationConfig armorConfig,
+        Logger logger,
+        boolean debug
+    ) throws IOException {
         Collection<CustomItemMapping> mappings = registry.getMappings();
         if (javaPackEntries == null) {
             javaPackEntries = Collections.emptyMap();
         }
+        // Defensive: a null map is treated as "no entity texture overrides
+        // requested", preserving the pre-Phase-7b zip layout exactly. Only
+        // non-empty maps mutate the generated zip contents.
+        Map<String, Path> effectiveEntityCopies = entityTextureCopies != null
+            ? entityTextureCopies
+            : Collections.emptyMap();
         // Null-guard: callers that don't care about attachables pass null;
         // treat that as "off" so the rest of the pipeline sees a non-null
         // policy object without forcing generation.
@@ -274,13 +339,36 @@ public final class AutoBedrockPackBuilder {
             pngTasks.add(new TextureCopyTask(def.textureFile(), zipEntry, key.toString()));
             customIconToTexturePath.put(iconKey, bedrockTextureRelative);
 
-            // Phase 3/4/6: collect attachable artifacts for this mapping if
-            // the model declared a display block AND the policy allows
-            // generation. The writer returns an empty map when conditions
-            // don't hold, so we just merge whatever it produces. Phase 6
-            // additionally reads the actual PNG dimensions so per-face UVs
-            // scale correctly for higher-resolution operator-supplied textures.
-            if (attachableMode) {
+            // Phase 7a: armor-equipped items route through the armor
+            // attachable path (referencing geometry.humanoid.armor.<slot>)
+            // instead of the held-item attachable. We emit BOTH the armor
+            // attachable AND keep the inventory icon, since Bedrock players
+            // see the icon in their inventory slots and the armor mesh when
+            // the item is worn.
+            if (mapping.hasArmor() && armorConfig != null && armorConfig.enabled()) {
+                Map<String, String> armorArt = BedrockAttachableWriter.buildArmorArtifacts(
+                    iconKey, mapping.armor(), armorConfig);
+                for (Map.Entry<String, String> a : armorArt.entrySet()) {
+                    String artifactPath = a.getKey();
+                    if (!plannedZipEntries.add(artifactPath)) {
+                        if (logger != null) {
+                            logger.fine("[AutoPack] armor attachable already planned, skipping: "
+                                + artifactPath);
+                        }
+                        continue;
+                    }
+                    attachableArtifacts.put(artifactPath, a.getValue());
+                }
+                // Don't emit the held-item attachable for armor: identifier
+                // collision would have only one win on Bedrock side anyway,
+                // and the armor path is the visually correct one when worn.
+            } else if (attachableMode) {
+                // Phase 3/4/6: collect attachable artifacts for this mapping if
+                // the model declared a display block AND the policy allows
+                // generation. The writer returns an empty map when conditions
+                // don't hold, so we just merge whatever it produces. Phase 6
+                // additionally reads the actual PNG dimensions so per-face UVs
+                // scale correctly for higher-resolution operator-supplied textures.
                 int[] textureSize = probePngDimensions(def.textureFile(), logger);
                 Map<String, String> artifacts = BedrockAttachableWriter.buildArtifacts(
                     iconKey, def.display(), def.geometry(),
@@ -308,7 +396,8 @@ public final class AutoBedrockPackBuilder {
         // pair stays constant across pack regenerations and the client
         // silently keeps using stale textures or stale attachables.
         String itemTextureJson = buildItemTextureJson(mappings, customIconToTexturePath, logger, debug);
-        int patchVersion = patchVersionFromContent(itemTextureJson, attachableArtifacts);
+        int patchVersion = patchVersionFromContent(itemTextureJson, attachableArtifacts,
+            effectiveEntityCopies.keySet());
         String manifestJson = buildManifestJson(patchVersion);
 
         // Phase 3 — write everything to a sibling .tmp file, then atomic-move
@@ -352,6 +441,44 @@ public final class AutoBedrockPackBuilder {
             for (Map.Entry<String, String> art : attachableArtifacts.entrySet()) {
                 putEntryUnique(zos, art.getKey(),
                     art.getValue().getBytes(StandardCharsets.UTF_8), writtenEntries, logger);
+            }
+
+            // Phase 7b: mirror operator-supplied entity textures from the
+            // Java pack(s) into the generated zip. Empty map preserves the
+            // pre-Phase-7b zip layout. Each entry's key is the absolute
+            // Bedrock zip path; the value is the source PNG path on disk.
+            for (Map.Entry<String, Path> entityCopy : effectiveEntityCopies.entrySet()) {
+                String zipEntry = entityCopy.getKey();
+                Path source = entityCopy.getValue();
+                try {
+                    byte[] pngBytes = Files.readAllBytes(source);
+                    putEntryUnique(zos, zipEntry, pngBytes, writtenEntries, logger);
+                } catch (IOException ex) {
+                    if (logger != null) {
+                        logger.warning("[AutoPack] failed to copy entity texture "
+                            + source + " -> " + zipEntry + ": " + ex.getMessage());
+                    }
+                }
+            }
+
+            // Phase 7a: copy armor textures (resolved from Java equipment
+            // JSON by the caller) into the Bedrock zip at the path the
+            // armor attachable already references.
+            if (armorTextureCopies != null) {
+                for (Map.Entry<String, Path> armorCopy : armorTextureCopies.entrySet()) {
+                    String iconKey = armorCopy.getKey();
+                    Path source = armorCopy.getValue();
+                    String zipEntry = BedrockAttachableWriter.armorTextureEntryPath(iconKey);
+                    try {
+                        byte[] pngBytes = Files.readAllBytes(source);
+                        putEntryUnique(zos, zipEntry, pngBytes, writtenEntries, logger);
+                    } catch (IOException ex) {
+                        if (logger != null) {
+                            logger.warning("[AutoPack] failed to copy armor texture "
+                                + source + " -> " + zipEntry + ": " + ex.getMessage());
+                        }
+                    }
+                }
             }
         } catch (IOException ioEx) {
             // Failed to fully write the tmp file — make sure it doesn't
@@ -401,6 +528,10 @@ public final class AutoBedrockPackBuilder {
             logger.info("[AutoPack] attachables: " + attachableItemCount
                 + " custom item(s) received hold-* animation (mode=" + effectiveConfig.mode() + ")");
         }
+        if (logger != null && !effectiveEntityCopies.isEmpty()) {
+            logger.info("[AutoPack] entity textures: " + effectiveEntityCopies.size()
+                + " override(s) mirrored from Java pack");
+        }
     }
 
     /**
@@ -419,10 +550,14 @@ public final class AutoBedrockPackBuilder {
      */
     private static int patchVersionFromContent(
         String itemTextureJson,
-        Map<String, String> attachableArtifacts
+        Map<String, String> attachableArtifacts,
+        java.util.Set<String> entityCopyPaths
     ) {
-        if ((itemTextureJson == null || itemTextureJson.isEmpty())
-            && (attachableArtifacts == null || attachableArtifacts.isEmpty())) {
+        boolean nothingToHash =
+            (itemTextureJson == null || itemTextureJson.isEmpty())
+            && (attachableArtifacts == null || attachableArtifacts.isEmpty())
+            && (entityCopyPaths == null || entityCopyPaths.isEmpty());
+        if (nothingToHash) {
             return 0;
         }
         try {
@@ -442,6 +577,18 @@ public final class AutoBedrockPackBuilder {
                     if (entry.getValue() != null) {
                         md.update(entry.getValue().getBytes(StandardCharsets.UTF_8));
                     }
+                    md.update((byte) 0);
+                }
+            }
+            // Phase 7b: include entity texture paths in the hash so a new or
+            // renamed entity override flips the patch version and Bedrock
+            // clients drop their cached zip. Sorting first keeps the hash
+            // stable across HashSet-backed inputs.
+            if (entityCopyPaths != null && !entityCopyPaths.isEmpty()) {
+                List<String> sorted = new ArrayList<>(entityCopyPaths);
+                java.util.Collections.sort(sorted);
+                for (String path : sorted) {
+                    md.update(path.getBytes(StandardCharsets.UTF_8));
                     md.update((byte) 0);
                 }
             }

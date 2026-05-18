@@ -180,6 +180,10 @@ public final class CustomItemScanner {
         // Create and register. register=true so the BE Geyser side picks the item up; the
         // auto-generated BE pack supplies the matching item_texture.json entry pointing at
         // the vanilla base texture, which is what makes this safe without an authored pack.
+        // Phase 7a: armor metadata is extracted from the EQUIPPABLE component
+        // when present, so the auto-pack can route this mapping through the
+        // armor attachable path instead of the held-item path.
+        com.geyserextra.core.api.ArmorData armorData = extractArmorData(itemStack);
         CustomItemMapping mapping = new CustomItemMapping(
             name,
             baseItem,
@@ -189,7 +193,9 @@ public final class CustomItemScanner {
             null,
             determineCreativeCategory(itemStack.getType()),
             null,
-            true
+            true,
+            null,        // pdcIdentifier (CMD path)
+            armorData
         );
 
         registry.register(mapping);
@@ -662,6 +668,70 @@ public final class CustomItemScanner {
         return registry;
     }
 
+    /**
+     * Phase 7a: extracts {@link com.geyserextra.core.api.ArmorData} from an
+     * item's {@code minecraft:equippable} data component (Paper 1.21.4+).
+     * Returns {@code null} when the item is not equippable, the slot is not
+     * recognised, or the asset_id is missing — in which case the auto-pack
+     * routes the item through the standard held-item attachable path.
+     *
+     * <p>The reflective-style component access used here means a Paper build
+     * that ships without the EQUIPPABLE constant (older 1.21.x) silently
+     * falls back to "no armor metadata", keeping the scanner functional on
+     * legacy server versions. Modern equipped-armor plugins are 1.21.4+ so
+     * this is a strict no-op on the legacy path.</p>
+     */
+    private com.geyserextra.core.api.ArmorData extractArmorData(ItemStack itemStack) {
+        if (itemStack == null) {
+            return null;
+        }
+        try {
+            if (!itemStack.hasData(DataComponentTypes.EQUIPPABLE)) {
+                return null;
+            }
+            io.papermc.paper.datacomponent.item.Equippable eq =
+                itemStack.getData(DataComponentTypes.EQUIPPABLE);
+            if (eq == null) {
+                return null;
+            }
+            org.bukkit.inventory.EquipmentSlot slot = eq.slot();
+            net.kyori.adventure.key.Key assetId = eq.assetId();
+            if (slot == null || assetId == null) {
+                return null;
+            }
+            String slotName = switch (slot) {
+                case HEAD -> com.geyserextra.core.api.ArmorData.SLOT_HEAD;
+                case CHEST -> com.geyserextra.core.api.ArmorData.SLOT_CHEST;
+                case LEGS -> com.geyserextra.core.api.ArmorData.SLOT_LEGS;
+                case FEET -> com.geyserextra.core.api.ArmorData.SLOT_FEET;
+                default -> null;
+            };
+            if (slotName == null) {
+                // Body slot (wolves/horses) and hand slots are out of scope
+                // for player armor rendering — skip silently rather than
+                // emitting an attachable that Bedrock cannot render.
+                return null;
+            }
+            return new com.geyserextra.core.api.ArmorData(slotName, assetId.asString());
+        } catch (LinkageError legacyPaper) {
+            // Pre-1.21.4 Paper builds lack the EQUIPPABLE accessor. Treat as
+            // "no armor metadata" so the scanner stays functional on legacy
+            // servers without forcing operators to upgrade Paper.
+            // LinkageError covers NoSuchMethodError, NoClassDefFoundError, and
+            // related cases — Java's exception hierarchy makes a multi-catch
+            // with both impossible (NoSuchMethodError extends LinkageError).
+            return null;
+        } catch (Throwable unexpected) {
+            // Defensive: any other failure (NPE in record accessor, etc.)
+            // shouldn't disable item scanning. Log at FINE so debug-mode
+            // operators see it but live servers aren't spammed.
+            plugin.getLogger().fine("[ArmorScan] equippable extraction failed for "
+                + itemStack.getType() + ": " + unexpected.getClass().getSimpleName()
+                + " — treating as non-equippable");
+            return null;
+        }
+    }
+
     // =================================================================
     // Phase 1: PDC-only craft result path
     // =================================================================
@@ -760,6 +830,7 @@ public final class CustomItemScanner {
             }
         }
 
+        com.geyserextra.core.api.ArmorData armorDataPdc = extractArmorData(itemStack);
         CustomItemMapping mapping = new CustomItemMapping(
             sanitizedName,
             baseItem,
@@ -770,7 +841,8 @@ public final class CustomItemScanner {
             determineCreativeCategory(itemStack.getType()),
             null,                                         // creativeGroup
             true,                                         // register with Geyser
-            pdcId                                         // stable PDC identifier (new field)
+            pdcId,                                        // stable PDC identifier
+            armorDataPdc                                  // Phase 7a armor metadata (nullable)
         );
         registry.register(mapping);
         plugin.getLogger().info("Registered PDC custom item: " + sanitizedName

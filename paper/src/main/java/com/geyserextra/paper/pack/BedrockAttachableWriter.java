@@ -156,6 +156,78 @@ public final class BedrockAttachableWriter {
         return "attachables/" + FOLDER + "/" + iconKey + ".json";
     }
 
+    /**
+     * Phase 7a: ZIP entry path for the armor texture an equippable item ships.
+     * The Bedrock attachable's {@code textures.default} references this path
+     * (extension-less, Bedrock appends {@code .png} automatically).
+     */
+    public static String armorTextureEntryPath(String iconKey) {
+        return "textures/entity/equipment/" + iconKey + ".png";
+    }
+
+    /**
+     * Phase 7a: builds the Bedrock attachable JSON for an armor item. Unlike
+     * the held-item path, this references Bedrock's built-in humanoid armor
+     * geometry ({@code geometry.humanoid.armor.<slot>}) so the player model
+     * wears the operator's custom texture on the correct slot.
+     *
+     * <p>Returns an empty map when armor generation is disabled or no usable
+     * armor data is provided. The texture path written to the attachable
+     * matches {@link #armorTextureEntryPath(String)} so the auto-pack can
+     * copy the texture file alongside the JSON.</p>
+     *
+     * @param iconKey  sanitised Bedrock icon key (also the
+     *                 {@code bedrock_identifier} suffix)
+     * @param armor    {@link com.geyserextra.core.api.ArmorData} carrying
+     *                 slot + asset id
+     * @param config   armor generation config (gates whether anything is emitted)
+     * @return path → JSON content map; one entry when generation succeeds,
+     *         empty when armor is null or disabled
+     */
+    public static Map<String, String> buildArmorArtifacts(
+        String iconKey,
+        com.geyserextra.core.api.ArmorData armor,
+        com.geyserextra.core.config.GeyserExtraConfig.ArmorGenerationConfig config
+    ) {
+        if (iconKey == null || iconKey.isBlank()) {
+            return Map.of();
+        }
+        if (armor == null) {
+            return Map.of();
+        }
+        if (config != null && !config.enabled()) {
+            return Map.of();
+        }
+
+        Map<String, Object> description = new LinkedHashMap<>();
+        description.put("identifier", NAMESPACE + ":" + iconKey);
+        description.put("materials", linkedMap(
+            "default", "armor",
+            "enchanted", "armor_enchanted"));
+        description.put("textures", linkedMap(
+            "default", "textures/entity/equipment/" + iconKey,
+            "enchanted", "textures/misc/enchanted_item_glint"));
+        description.put("geometry", Map.of("default", armor.bedrockGeometry()));
+        // Suppress the vanilla armor layer Bedrock renders by default —
+        // without this, the operator's custom texture appears stacked on top
+        // of the vanilla iron/diamond/etc. layer for the base material.
+        description.put("scripts", Map.of(
+            "parent_setup",
+            "variable.helmet_layer_visible = 0.0; "
+                + "variable.chest_layer_visible = 0.0; "
+                + "variable.leg_layer_visible = 0.0; "
+                + "variable.boot_layer_visible = 0.0;"));
+        description.put("render_controllers", List.of("controller.render.armor"));
+
+        Map<String, Object> attachable = linkedMap(
+            "format_version", "1.10.0",
+            "minecraft:attachable", Map.of("description", description));
+
+        return Map.of(
+            attachableEntryPath(iconKey),
+            JsonUtil.toPrettyJson(attachable));
+    }
+
     public static String geometryEntryPath(String iconKey) {
         return "models/entity/" + FOLDER + "/" + iconKey + ".geo.json";
     }

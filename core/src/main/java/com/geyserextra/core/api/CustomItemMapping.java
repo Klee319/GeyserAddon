@@ -33,7 +33,8 @@ public record CustomItemMapping(
     int creativeCategory,
     String creativeGroup,
     boolean register,
-    String pdcIdentifier
+    String pdcIdentifier,
+    ArmorData armor
 ) {
     /**
      * Bedrock creative inventory categories.
@@ -84,7 +85,7 @@ public record CustomItemMapping(
      * @param customModelData The CustomModelData predicate value
      */
     public CustomItemMapping(String name, String baseItem, int customModelData) {
-        this(name, baseItem, customModelData, false, null, null, CREATIVE_CATEGORY_NONE, null, false, null);
+        this(name, baseItem, customModelData, false, null, null, CREATIVE_CATEGORY_NONE, null, false, null, null);
     }
 
     /**
@@ -96,7 +97,7 @@ public record CustomItemMapping(
      * @param creativeCategory Creative category (1-5) for recipe book
      */
     public CustomItemMapping(String name, String baseItem, int customModelData, int creativeCategory) {
-        this(name, baseItem, customModelData, false, null, null, creativeCategory, null, false, null);
+        this(name, baseItem, customModelData, false, null, null, creativeCategory, null, false, null, null);
     }
 
     /**
@@ -120,7 +121,28 @@ public record CustomItemMapping(
         boolean register
     ) {
         this(name, baseItem, customModelData, unbreakable, displayName, iconPath,
-             creativeCategory, creativeGroup, register, null);
+             creativeCategory, creativeGroup, register, null, null);
+    }
+
+    /**
+     * Backward-compatible 10-arg constructor (pre-Phase-7a shape). Delegates
+     * to the canonical 11-arg constructor with {@code armor=null} so call
+     * sites that don't yet carry equippable data keep working.
+     */
+    public CustomItemMapping(
+        String name,
+        String baseItem,
+        int customModelData,
+        boolean unbreakable,
+        String displayName,
+        String iconPath,
+        int creativeCategory,
+        String creativeGroup,
+        boolean register,
+        String pdcIdentifier
+    ) {
+        this(name, baseItem, customModelData, unbreakable, displayName, iconPath,
+             creativeCategory, creativeGroup, register, pdcIdentifier, null);
     }
 
     /**
@@ -130,7 +152,7 @@ public record CustomItemMapping(
      * @return A new CustomItemMapping instance with the updated display name
      */
     public CustomItemMapping withDisplayName(String newDisplayName) {
-        return new CustomItemMapping(name, baseItem, customModelData, unbreakable, newDisplayName, iconPath, creativeCategory, creativeGroup, register, pdcIdentifier);
+        return new CustomItemMapping(name, baseItem, customModelData, unbreakable, newDisplayName, iconPath, creativeCategory, creativeGroup, register, pdcIdentifier, armor);
     }
 
     /**
@@ -140,7 +162,7 @@ public record CustomItemMapping(
      * @return A new CustomItemMapping instance with the updated icon path
      */
     public CustomItemMapping withIconPath(String newIconPath) {
-        return new CustomItemMapping(name, baseItem, customModelData, unbreakable, displayName, newIconPath, creativeCategory, creativeGroup, register, pdcIdentifier);
+        return new CustomItemMapping(name, baseItem, customModelData, unbreakable, displayName, newIconPath, creativeCategory, creativeGroup, register, pdcIdentifier, armor);
     }
 
     /**
@@ -150,7 +172,7 @@ public record CustomItemMapping(
      * @return A new CustomItemMapping instance with the updated unbreakable flag
      */
     public CustomItemMapping withUnbreakable(boolean newUnbreakable) {
-        return new CustomItemMapping(name, baseItem, customModelData, newUnbreakable, displayName, iconPath, creativeCategory, creativeGroup, register, pdcIdentifier);
+        return new CustomItemMapping(name, baseItem, customModelData, newUnbreakable, displayName, iconPath, creativeCategory, creativeGroup, register, pdcIdentifier, armor);
     }
 
     /**
@@ -161,7 +183,7 @@ public record CustomItemMapping(
      * @return A new CustomItemMapping instance with the updated creative category
      */
     public CustomItemMapping withCreativeCategory(int newCreativeCategory) {
-        return new CustomItemMapping(name, baseItem, customModelData, unbreakable, displayName, iconPath, newCreativeCategory, creativeGroup, register, pdcIdentifier);
+        return new CustomItemMapping(name, baseItem, customModelData, unbreakable, displayName, iconPath, newCreativeCategory, creativeGroup, register, pdcIdentifier, armor);
     }
 
     /**
@@ -171,7 +193,7 @@ public record CustomItemMapping(
      * @return A new CustomItemMapping instance with the updated creative group
      */
     public CustomItemMapping withCreativeGroup(String newCreativeGroup) {
-        return new CustomItemMapping(name, baseItem, customModelData, unbreakable, displayName, iconPath, creativeCategory, newCreativeGroup, register, pdcIdentifier);
+        return new CustomItemMapping(name, baseItem, customModelData, unbreakable, displayName, iconPath, creativeCategory, newCreativeGroup, register, pdcIdentifier, armor);
     }
 
     /**
@@ -181,7 +203,18 @@ public record CustomItemMapping(
      * @return A new CustomItemMapping instance with the updated PDC identifier
      */
     public CustomItemMapping withPdcIdentifier(String newPdcIdentifier) {
-        return new CustomItemMapping(name, baseItem, customModelData, unbreakable, displayName, iconPath, creativeCategory, creativeGroup, register, newPdcIdentifier);
+        return new CustomItemMapping(name, baseItem, customModelData, unbreakable, displayName, iconPath, creativeCategory, creativeGroup, register, newPdcIdentifier, armor);
+    }
+
+    /**
+     * Creates a new CustomItemMapping with the specified armor data.
+     *
+     * @param newArmor The {@link ArmorData} describing the equippable slot, or
+     *                 {@code null} to clear armor metadata
+     * @return A new CustomItemMapping instance with the updated armor data
+     */
+    public CustomItemMapping withArmor(ArmorData newArmor) {
+        return new CustomItemMapping(name, baseItem, customModelData, unbreakable, displayName, iconPath, creativeCategory, creativeGroup, register, pdcIdentifier, newArmor);
     }
 
     /**
@@ -228,5 +261,14 @@ public record CustomItemMapping(
      */
     public boolean hasPdcIdentifier() {
         return pdcIdentifier != null && !pdcIdentifier.isBlank();
+    }
+
+    /**
+     * Checks if this mapping carries armor metadata (Phase 7a).
+     *
+     * @return true if armor is non-null
+     */
+    public boolean hasArmor() {
+        return armor != null;
     }
 }

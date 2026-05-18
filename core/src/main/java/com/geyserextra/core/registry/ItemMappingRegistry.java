@@ -428,6 +428,16 @@ public final class ItemMappingRegistry {
             json.put("pdc_identifier", mapping.pdcIdentifier());
         }
 
+        // Phase 7a: armor metadata (slot + asset_id). Persisted so the
+        // auto-pack rebuild after restart can route this mapping through the
+        // armor attachable path without re-scanning the item.
+        if (mapping.hasArmor()) {
+            Map<String, Object> armorJson = new java.util.LinkedHashMap<>();
+            armorJson.put("slot", mapping.armor().slot());
+            armorJson.put("asset_id", mapping.armor().assetId());
+            json.put("armor", armorJson);
+        }
+
         return json;
     }
 
@@ -559,6 +569,11 @@ public final class ItemMappingRegistry {
             // Optional PDC identifier — null for legacy CMD-only JSON files.
             String pdcIdentifier = getStringOrNull(itemDef, "pdc_identifier");
 
+            // Phase 7a: optional armor metadata. Older JSON files lack the
+            // "armor" object, in which case the mapping carries no armor data
+            // and the auto-pack routes it through the held-item path.
+            com.geyserextra.core.api.ArmorData armor = parseArmorData(itemDef);
+
             // Defensive filter: a mapping with neither a valid CMD nor a PDC
             // identifier has no way for the extension to identify the matching
             // Java item at runtime. Older builds occasionally wrote CMD=0
@@ -580,10 +595,39 @@ public final class ItemMappingRegistry {
                 creativeCategory,
                 creativeGroup,
                 register,
-                pdcIdentifier
+                pdcIdentifier,
+                armor
             );
         } catch (Exception e) {
             LOGGER.warning(() -> "Failed to parse item definition: " + e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Phase 7a: parses the optional {@code armor} object from a mapping JSON
+     * entry. Returns {@code null} when the field is missing, structurally
+     * wrong, or carries blank values — in which case the loaded mapping has
+     * no armor metadata and is treated as a regular held-item by the
+     * auto-pack.
+     */
+    private com.geyserextra.core.api.ArmorData parseArmorData(com.google.gson.JsonObject itemDef) {
+        if (!itemDef.has("armor") || itemDef.get("armor").isJsonNull()) {
+            return null;
+        }
+        if (!itemDef.get("armor").isJsonObject()) {
+            return null;
+        }
+        com.google.gson.JsonObject armorObj = itemDef.getAsJsonObject("armor");
+        String slot = getStringOrNull(armorObj, "slot");
+        String assetId = getStringOrNull(armorObj, "asset_id");
+        if (slot == null || slot.isBlank() || assetId == null || assetId.isBlank()) {
+            return null;
+        }
+        try {
+            return new com.geyserextra.core.api.ArmorData(slot, assetId);
+        } catch (IllegalArgumentException ex) {
+            LOGGER.fine(() -> "Skipping invalid armor block in mapping: " + ex.getMessage());
             return null;
         }
     }

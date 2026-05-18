@@ -728,12 +728,31 @@ public final class GeyserExtraPaper extends JavaPlugin {
                     getLogger().info("Saved " + itemMappingRegistry.size() + " items.");
                 }
 
+                // Phase 7b: scan Java pack roots for entity texture overrides
+                // ahead of the auto-pack build so they share the same merge
+                // semantics (later packs win) as the CMD/PDC entries above.
+                Map<String, Path> entityTextureCopies = scanEntityTextureCopies(
+                    javaPackRoots, debug);
+
+                // Phase 7a: resolve armor texture files for every equippable
+                // mapping in the registry. Walks each Java pack root via the
+                // JavaPackReader's equipment lookup; later packs override
+                // earlier ones for the same iconKey, matching the merge
+                // semantics already used elsewhere in this method.
+                Map<String, Path> armorTextureCopies = scanArmorTextureCopies(
+                    javaPackRoots,
+                    config.customItems().javaResourcePackFormat(),
+                    debug);
+
                 try {
                     AutoBedrockPackBuilder.build(
                         itemMappingRegistry,
                         autoPackPath,
                         javaPackEntries,
                         config.customItems().attachableGeneration(),
+                        entityTextureCopies,
+                        armorTextureCopies,
+                        config.customItems().armorGeneration(),
                         getLogger(),
                         debug
                     );
@@ -987,6 +1006,134 @@ public final class GeyserExtraPaper extends JavaPlugin {
      * <p>Returns an empty list when no source resolves — the auto-pack
      * builder then falls back to vanilla textures for every item.</p>
      */
+    /**
+     * Phase 7b: walks each Java pack root for {@code assets/<ns>/textures/entity/**.png}
+     * and builds a Bedrock-zip-entry-path → source-PNG-path map. Later pack
+     * roots overwrite earlier entries for the same logical entity path, matching
+     * the merge semantics of the CMD/PDC override scanning above.
+     *
+     * <p>Returns an empty map when the config flag is disabled, no pack roots
+     * exist, or the entity texture directory is absent. An empty map preserves
+     * the pre-Phase-7b zip layout bit-for-bit.</p>
+     *
+     * <p>Bedrock zip entry path is derived from the Java path by stripping the
+     * {@code assets/<ns>/} prefix: {@code assets/minecraft/textures/entity/zombie/zombie.png}
+     * becomes {@code textures/entity/zombie/zombie.png}. The minecraft namespace
+     * maps 1-to-1 onto Bedrock's vanilla entity texture paths, so Bedrock
+     * clients automatically pick up the operator's artwork for any matching
+     * vanilla entity type without additional client_entity JSON.</p>
+     */
+    private Map<String, Path> scanEntityTextureCopies(List<Path> packRoots, boolean debug) {
+        if (!config.customItems().entityTextureOverride().enabled()) {
+            return java.util.Collections.emptyMap();
+        }
+        if (packRoots == null || packRoots.isEmpty()) {
+            return java.util.Collections.emptyMap();
+        }
+        Map<String, Path> copies = new java.util.LinkedHashMap<>();
+        for (Path packRoot : packRoots) {
+            Path assetsDir = packRoot.resolve("assets");
+            if (!Files.isDirectory(assetsDir)) {
+                continue;
+            }
+            try (var nsStream = Files.list(assetsDir)) {
+                for (Path namespaceDir : nsStream.filter(Files::isDirectory).toList()) {
+                    Path entityRoot = namespaceDir.resolve("textures").resolve("entity");
+                    if (!Files.isDirectory(entityRoot)) {
+                        continue;
+                    }
+                    try (var pngStream = Files.walk(entityRoot)) {
+                        for (Path pngFile : pngStream
+                                .filter(Files::isRegularFile)
+                                .filter(p -> p.getFileName().toString()
+                                    .toLowerCase(java.util.Locale.ROOT).endsWith(".png"))
+                                .toList()) {
+                            Path relative = entityRoot.relativize(pngFile);
+                            // Bedrock entity paths use forward slashes regardless of OS.
+                            String zipEntry = "textures/entity/"
+                                + relative.toString().replace('\\', '/');
+                            // Later pack roots override earlier — matches CMD merge.
+                            copies.put(zipEntry, pngFile);
+                            if (debug) {
+                                getLogger().fine("[EntityTex] " + namespaceDir.getFileName()
+                                    + " -> " + zipEntry);
+                            }
+                        }
+                    }
+                }
+            } catch (IOException ex) {
+                getLogger().warning("[EntityTex] scan failed for " + packRoot + ": "
+                    + ex.getClass().getSimpleName() + ": " + ex.getMessage());
+            }
+        }
+        if (!copies.isEmpty()) {
+            getLogger().info("[EntityTex] planned " + copies.size()
+                + " entity texture override(s) from " + packRoots.size() + " pack(s)");
+        }
+        return copies;
+    }
+
+    /**
+     * Phase 7a: walks the registry for mappings with armor metadata and
+     * resolves each one's equipment texture against the configured Java pack
+     * roots. Returns a Bedrock-iconKey → source-PNG-path map for
+     * {@code AutoBedrockPackBuilder} to copy into the zip.
+     *
+     * <p>Resolution order mirrors the rest of this method: later pack roots
+     * win when multiple packs ship an asset of the same name. Mappings whose
+     * texture cannot be resolved are silently skipped — the armor attachable
+     * JSON is still emitted, falling back to Bedrock's vanilla armor texture.</p>
+     */
+    private Map<String, Path> scanArmorTextureCopies(
+        List<Path> packRoots, String javaPackFormat, boolean debug
+    ) {
+        if (!config.customItems().armorGeneration().enabled()) {
+            return java.util.Collections.emptyMap();
+        }
+        if (packRoots == null || packRoots.isEmpty()) {
+            return java.util.Collections.emptyMap();
+        }
+        Map<String, Path> result = new java.util.LinkedHashMap<>();
+        // Iterate mappings once and probe each pack root in order. Later
+        // packs win because we overwrite earlier entries for the same iconKey.
+        for (com.geyserextra.core.api.CustomItemMapping mapping : itemMappingRegistry.getMappings()) {
+            if (!mapping.hasArmor()) {
+                continue;
+            }
+            com.geyserextra.core.api.ArmorData armor = mapping.armor();
+            String iconKey = mapping.name().toLowerCase(java.util.Locale.ROOT)
+                .replaceAll("[^a-z0-9_\\-./]", "_");
+            Path resolved = null;
+            for (Path packRoot : packRoots) {
+                try {
+                    JavaPackReader reader = new JavaPackReader(
+                        packRoot, javaPackFormat, getLogger(), debug);
+                    Path texture = reader.resolveEquipmentTexture(
+                        armor.assetId(), armor.equipmentLayerKey());
+                    if (texture != null) {
+                        resolved = texture;
+                    }
+                } catch (Exception ex) {
+                    getLogger().warning("[Armor] equipment texture resolve failed for "
+                        + armor.assetId() + " in " + packRoot + ": "
+                        + ex.getClass().getSimpleName() + ": " + ex.getMessage());
+                }
+            }
+            if (resolved != null) {
+                result.put(iconKey, resolved);
+                if (debug) {
+                    getLogger().fine("[Armor] " + iconKey + " (slot=" + armor.slot()
+                        + ", assetId=" + armor.assetId() + ") -> " + resolved);
+                }
+            }
+        }
+        if (!result.isEmpty()) {
+            getLogger().info("[Armor] resolved " + result.size()
+                + " armor texture(s) for the auto-pack");
+        }
+        return result;
+    }
+
     private List<Path> resolveJavaPackRoots() {
         // V3: when called on the primary thread (onEnable startup scans,
         // onDisable shutdown save), disallow network so a slow remote pack URL
