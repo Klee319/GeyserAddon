@@ -502,14 +502,59 @@ public final class AutoBedrockPackBuilder {
         // drop your cached copy". Without this the manifest UUID + version
         // pair stays constant across pack regenerations and the client
         // silently keeps using stale textures or stale attachables.
+        // Codex round-6 fix (K1): apply the byte-lockstep pattern to
+        // ordinary item PNGs too. The Phase 1 planner has already populated
+        // pngTasks with source paths; pre-read those bytes here so the
+        // hash and the Phase 3 zip write reference the same buffer. Read
+        // failures cascade-clean: the failed icon's entry is dropped from
+        // customIconToTexturePath (so item_texture.json doesn't claim it
+        // exists), from any planned attachable artifacts (so there's no
+        // dangling reference), and from pngTasks (so the zip write skips
+        // it). This keeps hash and zip in lockstep across every texture
+        // category — items, entity overrides, and armor textures.
+        Map<String, byte[]> itemTextureBytes = new LinkedHashMap<>();
+        java.util.Iterator<TextureCopyTask> taskIter = pngTasks.iterator();
+        while (taskIter.hasNext()) {
+            TextureCopyTask task = taskIter.next();
+            try {
+                itemTextureBytes.put(task.zipEntry(), Files.readAllBytes(task.source()));
+            } catch (IOException ex) {
+                if (logger != null) {
+                    logger.warning("[AutoPack] failed to read item texture "
+                        + task.source() + " -> " + task.zipEntry() + ": "
+                        + ex.getClass().getSimpleName() + ": " + ex.getMessage()
+                        + " — texture and any planned attachable artifacts will be "
+                        + "dropped for this mapping (Bedrock falls back to vanilla).");
+                }
+                taskIter.remove();
+                // Strip "textures/items/" prefix and ".png" suffix to recover
+                // the iconKey for the cascading cleanup.
+                String zipEntry = task.zipEntry();
+                String iconKey;
+                if (zipEntry.startsWith("textures/items/") && zipEntry.endsWith(".png")) {
+                    iconKey = zipEntry.substring("textures/items/".length(),
+                        zipEntry.length() - ".png".length());
+                } else {
+                    iconKey = null;
+                }
+                if (iconKey != null) {
+                    customIconToTexturePath.remove(iconKey);
+                    attachableArtifacts.remove(BedrockAttachableWriter.attachableEntryPath(iconKey));
+                    attachableArtifacts.remove(BedrockAttachableWriter.geometryEntryPath(iconKey));
+                    attachableArtifacts.remove(BedrockAttachableWriter.animationEntryPath(iconKey));
+                    plannedZipEntries.remove(zipEntry);
+                }
+            }
+        }
+
         String itemTextureJson = buildItemTextureJson(mappings, customIconToTexturePath, logger, debug);
-        // Codex round-2/3/4/5 fix (G1 + H1 + I1 + J1): armor AND entity
-        // textures both feed their PRE-READ PNG bytes into the patch hash.
-        // Hash and zip share the same byte buffer for each texture, so an
-        // in-place PNG edit always flips the manifest version (no
-        // path-only fallback that could mask byte changes).
+        // Codex round-2/3/4/5/6 fix (G1 + H1 + I1 + J1 + K1): item, entity,
+        // and armor textures all feed PRE-READ PNG bytes into the patch
+        // hash. Hash and zip share the same byte buffer for every texture
+        // category, so any in-place PNG edit flips the manifest version
+        // and Bedrock clients drop stale cached packs reliably.
         int patchVersion = patchVersionFromContent(itemTextureJson, attachableArtifacts,
-            entityTextureBytes, armorTextureBytes);
+            entityTextureBytes, armorTextureBytes, itemTextureBytes);
         String manifestJson = buildManifestJson(patchVersion);
 
         // Phase 3 — write everything to a sibling .tmp file, then atomic-move
@@ -527,19 +572,29 @@ public final class AutoBedrockPackBuilder {
                 manifestJson.getBytes(StandardCharsets.UTF_8), writtenEntries, logger);
             putEntryUnique(zos, "pack_icon.png", buildPackIconPng(), writtenEntries, logger);
 
+            // Codex K1 fix: write item PNGs from the pre-read bytes buffer
+            // (populated alongside the hash) instead of re-reading each
+            // source via Files.readAllBytes. The second read was the
+            // window where transient I/O could let the hash see one set of
+            // bytes and the zip see another. Entries that failed the
+            // single pre-read were already removed from pngTasks +
+            // itemTextureBytes, so this loop only writes what the hash
+            // already accounted for.
             for (TextureCopyTask task : pngTasks) {
-                try {
-                    byte[] pngBytes = Files.readAllBytes(task.source());
-                    putEntryUnique(zos, task.zipEntry(), pngBytes, writtenEntries, logger);
-                    textureCopyCount++;
-                    if (debug && logger != null) {
-                        logger.fine("[AutoPack] copied " + task.source() + " -> " + task.zipEntry());
-                    }
-                } catch (IOException ex) {
+                byte[] pngBytes = itemTextureBytes.get(task.zipEntry());
+                if (pngBytes == null) {
+                    // Defensive: should be impossible because the pre-read
+                    // and pngTasks were cleaned in lockstep, but guard anyway.
                     if (logger != null) {
-                        logger.warning("[AutoPack] failed to copy texture for " + task.keyLabel()
-                            + " from " + task.source() + ": " + ex.getMessage());
+                        logger.fine("[AutoPack] missing pre-read bytes for "
+                            + task.zipEntry() + " — skipping copy.");
                     }
+                    continue;
+                }
+                putEntryUnique(zos, task.zipEntry(), pngBytes, writtenEntries, logger);
+                textureCopyCount++;
+                if (debug && logger != null) {
+                    logger.fine("[AutoPack] copied " + task.source() + " -> " + task.zipEntry());
                 }
             }
 
@@ -653,13 +708,15 @@ public final class AutoBedrockPackBuilder {
         String itemTextureJson,
         Map<String, String> attachableArtifacts,
         Map<String, byte[]> entityTextureBytes,
-        Map<String, byte[]> armorTextureBytes
+        Map<String, byte[]> armorTextureBytes,
+        Map<String, byte[]> itemTextureBytes
     ) {
         boolean nothingToHash =
             (itemTextureJson == null || itemTextureJson.isEmpty())
             && (attachableArtifacts == null || attachableArtifacts.isEmpty())
             && (entityTextureBytes == null || entityTextureBytes.isEmpty())
-            && (armorTextureBytes == null || armorTextureBytes.isEmpty());
+            && (armorTextureBytes == null || armorTextureBytes.isEmpty())
+            && (itemTextureBytes == null || itemTextureBytes.isEmpty());
         if (nothingToHash) {
             return 0;
         }
@@ -701,6 +758,26 @@ public final class AutoBedrockPackBuilder {
                     md.update((byte) 0);
                 }
             }
+            // Phase 1 (Codex K1 fix): item texture PNG bytes feed the hash
+            // alongside their zip paths. Same byte-lockstep pattern as
+            // armor/entity — read failures already removed from
+            // itemTextureBytes at planning time, so hash and zip stay
+            // synchronised even under transient I/O failures.
+            if (itemTextureBytes != null && !itemTextureBytes.isEmpty()) {
+                List<String> sorted = new ArrayList<>(itemTextureBytes.keySet());
+                java.util.Collections.sort(sorted);
+                for (String path : sorted) {
+                    md.update("item:".getBytes(StandardCharsets.UTF_8));
+                    md.update(path.getBytes(StandardCharsets.UTF_8));
+                    md.update((byte) 0);
+                    byte[] bytes = itemTextureBytes.get(path);
+                    if (bytes != null) {
+                        md.update(bytes);
+                    }
+                    md.update((byte) 0);
+                }
+            }
+
             // Phase 7a (Codex I1 fix): armor texture iconKeys AND pre-read
             // PNG bytes both flow into the hash. The bytes are passed in
             // from the build() caller after a single readAllBytes pass at
