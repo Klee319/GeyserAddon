@@ -44,8 +44,22 @@ public final class ItemMappingRegistry {
     /**
      * Secondary index: baseItem:customModelData -> CustomItemMapping
      * Composite key format allows efficient lookup by item type and CMD value.
+     *
+     * <p>Only populated when {@code customModelData > 0}. CMD-less PDC-only
+     * mappings live exclusively in {@link #mappingsByPdcKey}. This split keeps
+     * {@code getByCustomModelData} from accidentally returning a PDC entry
+     * when callers pass {@code customModelData = 0} as a sentinel.</p>
      */
     private final Map<String, CustomItemMapping> mappingsByModelData;
+
+    /**
+     * Tertiary index: baseItem::pdc::pdcIdentifier -> CustomItemMapping.
+     *
+     * <p>Mirrors {@link #mappingsByModelData} but keyed on the stable PDC
+     * identifier (e.g. {@code "oraxen:fire_sword"}). Only populated when
+     * the mapping has a non-blank {@link CustomItemMapping#pdcIdentifier()}.</p>
+     */
+    private final Map<String, CustomItemMapping> mappingsByPdcKey;
 
     /**
      * Lock for batch operations that require consistency across multiple maps.
@@ -58,6 +72,7 @@ public final class ItemMappingRegistry {
     public ItemMappingRegistry() {
         this.mappingsByName = new ConcurrentHashMap<>();
         this.mappingsByModelData = new ConcurrentHashMap<>();
+        this.mappingsByPdcKey = new ConcurrentHashMap<>();
         this.batchLock = new ReentrantReadWriteLock();
     }
 
@@ -76,19 +91,33 @@ public final class ItemMappingRegistry {
 
         batchLock.writeLock().lock();
         try {
-            // Remove old secondary index entry if updating existing mapping
+            // Remove old secondary/tertiary index entries if updating an existing mapping
             CustomItemMapping existing = mappingsByName.get(mapping.name());
             if (existing != null) {
-                String oldKey = createModelDataKey(existing.baseItem(), existing.customModelData());
-                mappingsByModelData.remove(oldKey);
+                if (existing.customModelData() > 0) {
+                    String oldCmdKey = createModelDataKey(existing.baseItem(), existing.customModelData());
+                    mappingsByModelData.remove(oldCmdKey);
+                }
+                if (existing.hasPdcIdentifier()) {
+                    String oldPdcKey = createPdcKey(existing.baseItem(), existing.pdcIdentifier());
+                    mappingsByPdcKey.remove(oldPdcKey);
+                }
             }
 
             // Register in primary storage
             CustomItemMapping previous = mappingsByName.put(mapping.name(), mapping);
 
-            // Register in secondary index
-            String newKey = createModelDataKey(mapping.baseItem(), mapping.customModelData());
-            mappingsByModelData.put(newKey, mapping);
+            // CMD index: skip CMD=0 entries so getByCustomModelData(base, 0) does not
+            // accidentally return a PDC-only mapping that happens to share the base.
+            if (mapping.customModelData() > 0) {
+                String newCmdKey = createModelDataKey(mapping.baseItem(), mapping.customModelData());
+                mappingsByModelData.put(newCmdKey, mapping);
+            }
+            // PDC index: populated alongside the CMD index when present.
+            if (mapping.hasPdcIdentifier()) {
+                String newPdcKey = createPdcKey(mapping.baseItem(), mapping.pdcIdentifier());
+                mappingsByPdcKey.put(newPdcKey, mapping);
+            }
 
             LOGGER.fine(() -> "Registered item mapping: " + mapping.name());
             return previous;
@@ -113,17 +142,29 @@ public final class ItemMappingRegistry {
         batchLock.writeLock().lock();
         try {
             for (CustomItemMapping mapping : mappings) {
-                // Remove old secondary index entry if updating existing mapping
+                // Remove old secondary/tertiary index entries if updating an existing mapping
                 CustomItemMapping existing = mappingsByName.get(mapping.name());
                 if (existing != null) {
-                    String oldKey = createModelDataKey(existing.baseItem(), existing.customModelData());
-                    mappingsByModelData.remove(oldKey);
+                    if (existing.customModelData() > 0) {
+                        String oldCmdKey = createModelDataKey(existing.baseItem(), existing.customModelData());
+                        mappingsByModelData.remove(oldCmdKey);
+                    }
+                    if (existing.hasPdcIdentifier()) {
+                        String oldPdcKey = createPdcKey(existing.baseItem(), existing.pdcIdentifier());
+                        mappingsByPdcKey.remove(oldPdcKey);
+                    }
                 }
 
                 mappingsByName.put(mapping.name(), mapping);
 
-                String newKey = createModelDataKey(mapping.baseItem(), mapping.customModelData());
-                mappingsByModelData.put(newKey, mapping);
+                if (mapping.customModelData() > 0) {
+                    String newCmdKey = createModelDataKey(mapping.baseItem(), mapping.customModelData());
+                    mappingsByModelData.put(newCmdKey, mapping);
+                }
+                if (mapping.hasPdcIdentifier()) {
+                    String newPdcKey = createPdcKey(mapping.baseItem(), mapping.pdcIdentifier());
+                    mappingsByPdcKey.put(newPdcKey, mapping);
+                }
             }
 
             LOGGER.fine(() -> "Registered " + mappings.size() + " item mappings");
@@ -146,8 +187,14 @@ public final class ItemMappingRegistry {
         try {
             CustomItemMapping removed = mappingsByName.remove(name);
             if (removed != null) {
-                String key = createModelDataKey(removed.baseItem(), removed.customModelData());
-                mappingsByModelData.remove(key);
+                if (removed.customModelData() > 0) {
+                    String cmdKey = createModelDataKey(removed.baseItem(), removed.customModelData());
+                    mappingsByModelData.remove(cmdKey);
+                }
+                if (removed.hasPdcIdentifier()) {
+                    String pdcKey = createPdcKey(removed.baseItem(), removed.pdcIdentifier());
+                    mappingsByPdcKey.remove(pdcKey);
+                }
                 LOGGER.fine(() -> "Unregistered item mapping: " + name);
             }
             return removed;
@@ -194,6 +241,21 @@ public final class ItemMappingRegistry {
         Objects.requireNonNull(baseItem, "baseItem must not be null");
         String key = createModelDataKey(baseItem, customModelData);
         return Optional.ofNullable(mappingsByModelData.get(key));
+    }
+
+    /**
+     * Gets a mapping by base item and stable PersistentDataContainer identifier.
+     *
+     * @param baseItem      The base item identifier (e.g., {@code "minecraft:stick"})
+     * @param pdcIdentifier The stable PDC identifier (e.g., {@code "oraxen:fire_sword"})
+     * @return An Optional containing the mapping if found, or empty if not found
+     * @throws NullPointerException if either argument is null
+     */
+    public Optional<CustomItemMapping> getByPdc(String baseItem, String pdcIdentifier) {
+        Objects.requireNonNull(baseItem, "baseItem must not be null");
+        Objects.requireNonNull(pdcIdentifier, "pdcIdentifier must not be null");
+        String key = createPdcKey(baseItem, pdcIdentifier);
+        return Optional.ofNullable(mappingsByPdcKey.get(key));
     }
 
     /**
@@ -254,6 +316,7 @@ public final class ItemMappingRegistry {
         try {
             mappingsByName.clear();
             mappingsByModelData.clear();
+            mappingsByPdcKey.clear();
             LOGGER.fine("Cleared all item mappings");
         } finally {
             batchLock.writeLock().unlock();
@@ -358,6 +421,13 @@ public final class ItemMappingRegistry {
         // which would cause them to appear transparent on Bedrock clients.
         json.put("register", mapping.register());
 
+        // PDC identifier — only present for CMD-less / PDC-based mappings. The
+        // extension reads this to switch the predicate from legacyCustomModelData
+        // to hasComponent("minecraft:custom_data") when registering with Geyser.
+        if (mapping.hasPdcIdentifier()) {
+            json.put("pdc_identifier", mapping.pdcIdentifier());
+        }
+
         return json;
     }
 
@@ -393,12 +463,19 @@ public final class ItemMappingRegistry {
         try {
             mappingsByName.clear();
             mappingsByModelData.clear();
+            mappingsByPdcKey.clear();
 
             for (CustomItemMapping mapping : mappings) {
                 if (mapping != null) {
                     mappingsByName.put(mapping.name(), mapping);
-                    String key = createModelDataKey(mapping.baseItem(), mapping.customModelData());
-                    mappingsByModelData.put(key, mapping);
+                    if (mapping.customModelData() > 0) {
+                        String cmdKey = createModelDataKey(mapping.baseItem(), mapping.customModelData());
+                        mappingsByModelData.put(cmdKey, mapping);
+                    }
+                    if (mapping.hasPdcIdentifier()) {
+                        String pdcKey = createPdcKey(mapping.baseItem(), mapping.pdcIdentifier());
+                        mappingsByPdcKey.put(pdcKey, mapping);
+                    }
                 }
             }
 
@@ -479,6 +556,19 @@ public final class ItemMappingRegistry {
             // item_texture.json entry for every mapping pointing at the base item's
             // vanilla texture, so registration is safe even without an authored pack.
             boolean register = getBooleanOrDefault(itemDef, "register", true);
+            // Optional PDC identifier — null for legacy CMD-only JSON files.
+            String pdcIdentifier = getStringOrNull(itemDef, "pdc_identifier");
+
+            // Defensive filter: a mapping with neither a valid CMD nor a PDC
+            // identifier has no way for the extension to identify the matching
+            // Java item at runtime. Older builds occasionally wrote CMD=0
+            // sentinels into custom_items.json; drop those entries here rather
+            // than letting them survive into the registry.
+            if (customModelData <= 0 && (pdcIdentifier == null || pdcIdentifier.isBlank())) {
+                LOGGER.fine(() -> "Skipping mapping '" + name
+                    + "' (base=" + baseItem + ") — no CMD and no PDC identifier");
+                return null;
+            }
 
             return new CustomItemMapping(
                 name,
@@ -489,7 +579,8 @@ public final class ItemMappingRegistry {
                 iconPath,
                 creativeCategory,
                 creativeGroup,
-                register
+                register,
+                pdcIdentifier
             );
         } catch (Exception e) {
             LOGGER.warning(() -> "Failed to parse item definition: " + e.getMessage());
@@ -553,5 +644,16 @@ public final class ItemMappingRegistry {
      */
     private String createModelDataKey(String baseItem, int customModelData) {
         return baseItem + ":" + customModelData;
+    }
+
+    /**
+     * Creates a composite key for the PDC identifier index.
+     *
+     * <p>Uses {@code ::pdc::} as the separator to guarantee non-overlap with the
+     * {@code baseItem:CMD} keyspace, even if a future plugin coins a PDC
+     * identifier that looks like an integer.</p>
+     */
+    private String createPdcKey(String baseItem, String pdcIdentifier) {
+        return baseItem + "::pdc::" + pdcIdentifier;
     }
 }

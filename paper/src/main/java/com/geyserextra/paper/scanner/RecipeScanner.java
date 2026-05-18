@@ -197,10 +197,22 @@ public final class RecipeScanner {
     }
 
     /**
-     * Creates a unique key for an item based on type and CustomModelData.
+     * Creates a unique key for an item based on type and CustomModelData,
+     * falling back to a stable PersistentDataContainer identifier when the
+     * item carries no CMD data.
+     *
+     * <p>Why both forms: the legacy CMD path keys recipes off the CMD floats /
+     * strings tuple, which uniquely identifies any CMD-bearing custom item.
+     * PDC-only items have neither, so the {@code scanItemIfNew} short-circuit
+     * previously returned {@code null} and silently dropped the recipe result
+     * before {@link CustomItemScanner#scanItem(ItemStack)} ever ran. We now
+     * fall through to a {@code "pdc:<base>:<pdcId>"} key so the scanner gets
+     * its chance, while keeping a hard separator ({@code "pdc:"}) so PDC keys
+     * cannot collide with CMD keys (which start with the material name).</p>
      *
      * @param item The item stack
-     * @return A unique key string, or null if no CMD
+     * @return A unique key string, or null if the item is neither CMD-bearing
+     *         nor carries a usable PDC identifier (i.e., a regular vanilla item)
      */
     private String createItemKey(ItemStack item) {
         if (item == null) {
@@ -208,24 +220,32 @@ public final class RecipeScanner {
         }
 
         try {
-            if (!item.hasData(io.papermc.paper.datacomponent.DataComponentTypes.CUSTOM_MODEL_DATA)) {
-                return null;
+            if (item.hasData(io.papermc.paper.datacomponent.DataComponentTypes.CUSTOM_MODEL_DATA)) {
+                var cmd = item.getData(io.papermc.paper.datacomponent.DataComponentTypes.CUSTOM_MODEL_DATA);
+                if (cmd != null) {
+                    // Create key from material + CMD data (legacy form, unchanged).
+                    StringBuilder key = new StringBuilder();
+                    key.append(item.getType().name());
+                    key.append(":");
+                    key.append(cmd.floats().toString());
+                    key.append(":");
+                    key.append(cmd.strings().toString());
+                    return key.toString();
+                }
+                // CMD component present but null contents — fall through to
+                // the PDC path. Matches the scanItem dispatch order so the
+                // dedupe key tracks whatever scanItem will actually register.
             }
 
-            var cmd = item.getData(io.papermc.paper.datacomponent.DataComponentTypes.CUSTOM_MODEL_DATA);
-            if (cmd == null) {
+            // PDC fallback: extract namespace-qualified identifier (e.g.
+            // "oraxen:fire_sword"). When neither CMD nor a recognised PDC slot
+            // is present, return null so the item is treated as vanilla and
+            // skipped silently (no registration, no log spam).
+            String pdcId = CustomItemScanner.extractStableIdFromPDC(item);
+            if (pdcId == null) {
                 return null;
             }
-
-            // Create key from material + CMD data
-            StringBuilder key = new StringBuilder();
-            key.append(item.getType().name());
-            key.append(":");
-            key.append(cmd.floats().toString());
-            key.append(":");
-            key.append(cmd.strings().toString());
-
-            return key.toString();
+            return "pdc:" + item.getType().getKey() + ":" + pdcId;
         } catch (Exception e) {
             return null;
         }

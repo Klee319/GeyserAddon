@@ -16,6 +16,7 @@ import org.geysermc.geyser.api.item.custom.v2.CustomItemBedrockOptions;
 import org.geysermc.geyser.api.item.custom.v2.CustomItemDefinition;
 import org.geysermc.geyser.api.predicate.MinecraftPredicate;
 import org.geysermc.geyser.api.predicate.context.item.ItemPredicateContext;
+import org.geysermc.geyser.api.predicate.item.ItemConditionPredicate;
 import org.geysermc.geyser.api.predicate.item.ItemRangeDispatchPredicate;
 import org.geysermc.geyser.api.util.CreativeCategory;
 import org.geysermc.geyser.api.util.Identifier;
@@ -207,11 +208,17 @@ public class CustomItemsHandler {
             int textureSize = getIntOrDefault(itemDef, "texture_size", 16);
             int creativeCategory = getIntOrDefault(itemDef, "creative_category", 0);
             String creativeGroup = getStringOrDefault(itemDef, "creative_group", null);
+            // Optional PDC identifier — Phase 1 PDC-only craft result path.
+            // Null in legacy JSON (or when the Paper-side scanner found no PDC)
+            // means the entry is still CMD-only and registers via the legacy
+            // legacyCustomModelData predicate path.
+            String pdcIdentifier = getStringOrDefault(itemDef, "pdc_identifier", null);
 
             return new ItemMapping(
                 baseItem, name, customModelData, unbreakable, damagePredicate,
                 displayName, icon, allowOffhand, textureSize,
-                false, null, 0, creativeCategory, creativeGroup);
+                false, null, 0, creativeCategory, creativeGroup,
+                pdcIdentifier);
         } catch (Exception e) {
             extension.logger().warning("Failed to parse item definition: " + e.getMessage());
             return null;
@@ -326,16 +333,16 @@ public class CustomItemsHandler {
                     continue;
                 }
 
-                if (mapping.customModelData <= 0) {
-                    // Vanilla items with CMD<=0 would be registered with no
-                    // CMD predicate, which Geyser treats as a wholesale
-                    // override of the base vanilla item (it logs:
-                    // "Custom item ... overrides the vanilla item model ...
-                    // without additional predicates" and the base item's
-                    // texture is replaced by ours for every player). Drop
-                    // these defensively even though the Paper-side scanner
-                    // / pack reader already filter them out, in case the
-                    // shared custom_items.json was hand-edited or written
+                if (mapping.customModelData <= 0 && !mapping.hasPdcIdentifier()) {
+                    // Vanilla items with CMD<=0 and no PDC identifier would
+                    // be registered with no predicate at all, which Geyser
+                    // treats as a wholesale override of the base vanilla item
+                    // (it logs: "Custom item ... overrides the vanilla item
+                    // model ... without additional predicates" and the base
+                    // item's texture is replaced by ours for every player).
+                    // Drop these defensively even though the Paper-side
+                    // scanner / pack reader already filter them out, in case
+                    // the shared custom_items.json was hand-edited or written
                     // by an older build.
                     extension.logger().warning("Skipping " + mapping.name()
                         + " (base=" + mapping.baseItem + ", CMD=" + mapping.customModelData
@@ -443,6 +450,19 @@ public class CustomItemsHandler {
 
         if (mapping.customModelData > 0) {
             builder.predicate(ItemRangeDispatchPredicate.legacyCustomModelData(mapping.customModelData));
+        } else if (mapping.hasPdcIdentifier()) {
+            // PDC-only path: no CMD predicate exists, so we match on the
+            // presence of the {@code minecraft:custom_data} component (= the
+            // Java PDC blob). This is the broadest possible match — any item
+            // whose Java side carries PDC data will surface as this Bedrock
+            // item — but Geyser's v2 API does not yet expose a PDC-value
+            // predicate, so multiple PDC items sharing the same base material
+            // collapse onto whichever entry registers first. The Bedrock
+            // client still distinguishes them by display name (which Geyser
+            // transfers from the Java NBT), so recipe results remain visible
+            // even when icons share. See plan
+            // cmd-plugin-3dmodel-java-robust-meteor.md for the rationale.
+            builder.predicate(ItemConditionPredicate.hasComponent(Identifier.of("minecraft:custom_data")));
         }
 
         // Per-item registration log lines were intentionally removed: each
@@ -710,6 +730,9 @@ public class CustomItemsHandler {
      *
      * @param creativeCategory legacy 0-5 category code; mapped to v2 {@link CreativeCategory} at register time
      * @param creativeGroup    Bedrock creative group for sub-categorization
+     * @param pdcIdentifier    stable PersistentDataContainer identifier (e.g. {@code "oraxen:fire_sword"})
+     *                         that triggers the {@code hasComponent("minecraft:custom_data")} predicate
+     *                         path. Null for legacy CMD-only mappings — preserves pre-feature behaviour.
      */
     public record ItemMapping(
         String baseItem,
@@ -725,6 +748,40 @@ public class CustomItemsHandler {
         String identifier,
         int javaId,
         int creativeCategory,
-        String creativeGroup
-    ) {}
+        String creativeGroup,
+        String pdcIdentifier
+    ) {
+        /**
+         * Backward-compatible 14-arg constructor used by call sites that
+         * don't carry PDC information (legacy CMD-only mappings,
+         * non-vanilla items). Delegates to the canonical constructor with
+         * {@code pdcIdentifier=null}.
+         */
+        public ItemMapping(
+            String baseItem,
+            String name,
+            int customModelData,
+            boolean unbreakable,
+            int damagePredicate,
+            String displayName,
+            String icon,
+            boolean allowOffhand,
+            int textureSize,
+            boolean isNonVanilla,
+            String identifier,
+            int javaId,
+            int creativeCategory,
+            String creativeGroup
+        ) {
+            this(baseItem, name, customModelData, unbreakable, damagePredicate,
+                 displayName, icon, allowOffhand, textureSize,
+                 isNonVanilla, identifier, javaId, creativeCategory, creativeGroup,
+                 null);
+        }
+
+        /** True when this mapping is identified by a stable PDC value rather than CMD. */
+        public boolean hasPdcIdentifier() {
+            return pdcIdentifier != null && !pdcIdentifier.isBlank();
+        }
+    }
 }

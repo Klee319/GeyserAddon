@@ -63,7 +63,20 @@ public final class CustomItemScanner {
     }
 
     /**
-     * Scans an item stack for custom model data and registers it if found.
+     * Scans an item stack for custom model data (or, when CMD is absent, a
+     * stable PersistentDataContainer identifier) and registers it if found.
+     *
+     * <p>Dispatch order:</p>
+     * <ol>
+     *   <li>If the item has CMD data, follow the legacy CMD-only path
+     *       (no behavioural changes from pre-Phase-1 builds).</li>
+     *   <li>If the item has no CMD but {@code customItems.pdcEnabled=true}
+     *       (default) and {@link #extractStableIdFromPDC(ItemStack)} produces
+     *       a usable identifier, register the item via the PDC path so the
+     *       extension can expose it to Bedrock players via the
+     *       {@code hasComponent("minecraft:custom_data")} predicate.</li>
+     *   <li>Otherwise return empty (non-custom item).</li>
+     * </ol>
      */
     public Optional<CustomItemMapping> scanItem(ItemStack itemStack) {
         if (itemStack == null || itemStack.getType() == Material.AIR) {
@@ -71,7 +84,13 @@ public final class CustomItemScanner {
         }
 
         if (!itemStack.hasData(DataComponentTypes.CUSTOM_MODEL_DATA)) {
-            return Optional.empty();
+            // Phase 1: route CMD-less items through the PDC path when the
+            // feature flag is on. When the flag is off, behaviour is identical
+            // to the pre-Phase-1 build (return empty, never register).
+            if (!isPdcEnabled()) {
+                return Optional.empty();
+            }
+            return scanPdcItem(itemStack);
         }
 
         CustomModelData customModelData = itemStack.getData(DataComponentTypes.CUSTOM_MODEL_DATA);
@@ -641,5 +660,251 @@ public final class CustomItemScanner {
 
     public ItemMappingRegistry getRegistry() {
         return registry;
+    }
+
+    // =================================================================
+    // Phase 1: PDC-only craft result path
+    // =================================================================
+
+    /**
+     * Preferred PDC namespaces from known custom-item plugins. Checked in
+     * declaration order against each PDC key's namespace. Used by
+     * {@link #extractStableIdFromPDC(ItemStack)} so the registry key for a
+     * given item is deterministic even if the plugin writes multiple unrelated
+     * PDC keys to the same {@code ItemMeta}.
+     */
+    private static final String[] PREFERRED_PDC_NAMESPACES = {
+        "oraxen", "itemsadder", "mythicmobs", "mythiccrucible",
+        "mmoitems", "mmocore", "ecoitems", "nexo", "skript"
+    };
+
+    /**
+     * PDC key-name hint patterns. When no preferred namespace matches, the
+     * scanner walks PDC entries in alphabetical order and picks the first one
+     * whose key name contains any of these tokens. Matches the patterns used
+     * by {@link #extractItemIdFromPDC(ItemStack)} for display-name purposes,
+     * intentionally — both code paths should agree on which PDC slot carries
+     * the item's logical identity.
+     */
+    private static final String[] PDC_ID_KEY_HINTS = {
+        "item_id", "itemid", "custom_id", "identifier", "item_type", "type", "id"
+    };
+
+    /**
+     * Whether the PDC-only scan path is enabled via configuration.
+     *
+     * <p>Defensive against partially-initialised plugin state (config might be
+     * null during early boot in test harnesses); defaults to {@code true} so a
+     * missing config does not silently disable the feature on a real server.</p>
+     */
+    private boolean isPdcEnabled() {
+        GeyserExtraConfig config = plugin.getGeyserExtraConfig();
+        if (config == null || config.customItems() == null) {
+            return true;
+        }
+        return config.customItems().pdcEnabled();
+    }
+
+    /**
+     * Scan path for items that have no CustomModelData but carry a stable
+     * PersistentDataContainer identifier.
+     *
+     * <p>Reuses the existing {@code generateMappingName} / display-name /
+     * unbreakable / creative-category helpers so the resulting
+     * {@link CustomItemMapping} is structurally identical to a CMD-based
+     * mapping — only the predicate side differs at registration time
+     * (the extension switches to {@code hasComponent("minecraft:custom_data")}
+     * when {@code customModelData == 0 && pdcIdentifier != null}).</p>
+     *
+     * <p>Returns {@link Optional#empty()} when the item lacks a usable PDC
+     * identifier, when the identifier sanitises down to an invalid name, or
+     * when an entry for the same {@code (baseItem, pdcIdentifier)} already
+     * exists and needs no upgrade.</p>
+     */
+    private Optional<CustomItemMapping> scanPdcItem(ItemStack itemStack) {
+        String pdcId = extractStableIdFromPDC(itemStack);
+        if (pdcId == null) {
+            return Optional.empty();
+        }
+        String baseItem = buildBaseItemIdentifier(itemStack);
+
+        // Existing entry for the same (base, pdcId)? Reuse it (no churn).
+        Optional<CustomItemMapping> existing = registry.getByPdc(baseItem, pdcId);
+        if (existing.isPresent()) {
+            return existing;
+        }
+
+        // Derive a Geyser-compatible name. Geyser identifiers only allow
+        // [a-z0-9_\-./], so sanitise the colon out of "namespace:value" into
+        // "namespace_value". Collisions (e.g. two plugins both producing
+        // "fire_sword") are resolved by tagging the base material on.
+        String sanitizedName = sanitizeItemId(pdcId);
+        if (sanitizedName == null || sanitizedName.isBlank() || !isValidItemId(sanitizedName)) {
+            return Optional.empty();
+        }
+        if (registry.contains(sanitizedName)) {
+            String suffix = baseItem.startsWith(MINECRAFT_NAMESPACE)
+                ? baseItem.substring(MINECRAFT_NAMESPACE.length())
+                : baseItem;
+            sanitizedName = sanitizedName + "_" + sanitizeItemId(suffix);
+            if (registry.contains(sanitizedName)) {
+                // Last resort: short hash of the full (base, pdcId) pair.
+                sanitizedName = sanitizedName + "_"
+                    + Integer.toHexString((baseItem + "::" + pdcId).hashCode() & 0xfffff);
+            }
+        }
+
+        CustomItemMapping mapping = new CustomItemMapping(
+            sanitizedName,
+            baseItem,
+            0,                                            // customModelData (none — PDC path)
+            isUnbreakable(itemStack),
+            extractDisplayName(itemStack),
+            null,                                         // iconPath — falls back to vanilla texture
+            determineCreativeCategory(itemStack.getType()),
+            null,                                         // creativeGroup
+            true,                                         // register with Geyser
+            pdcId                                         // stable PDC identifier (new field)
+        );
+        registry.register(mapping);
+        plugin.getLogger().info("Registered PDC custom item: " + sanitizedName
+            + " (pdc=" + pdcId + ", base=" + baseItem + ")");
+        return Optional.of(mapping);
+    }
+
+    /**
+     * Extracts a <b>namespace-qualified</b> PDC identifier suitable as a
+     * stable registry key. Returns the same identifier across server restarts
+     * because the underlying plugins (Oraxen, ItemsAdder, MMOItems, etc.) keep
+     * writing the same {@code NamespacedKey}+value pair to every instance of
+     * their items.
+     *
+     * <p>Selection order, deliberately deterministic:</p>
+     * <ol>
+     *   <li>Walk preferred plugin namespaces ({@link #PREFERRED_PDC_NAMESPACES})
+     *       in order. For each, scan the item's PDC keys (sorted lexicographically)
+     *       and return the first {@code namespace:value} pair whose value is a
+     *       valid item id string.</li>
+     *   <li>If no preferred namespace matches, walk all PDC keys in sorted order
+     *       and return the first one whose <i>key name</i> contains a hint token
+     *       from {@link #PDC_ID_KEY_HINTS}.</li>
+     *   <li>If nothing matches, return {@code null} — the item has PDC data but
+     *       no clear identifier slot, so it is not safe to register.</li>
+     * </ol>
+     *
+     * <p>The returned form is always {@code namespace:value} (e.g.
+     * {@code "oraxen:fire_sword"}), never the bare value. Two plugins that
+     * accidentally coin the same value (one's {@code "fire_sword"} and
+     * another's) will therefore produce distinct registry keys.</p>
+     *
+     * <p>Static + no plugin/config dependencies so {@code RecipeScanner} can
+     * call it from {@code createItemKey} without an extra detour through this
+     * scanner instance.</p>
+     */
+    public static String extractStableIdFromPDC(ItemStack itemStack) {
+        if (itemStack == null) {
+            return null;
+        }
+        ItemMeta meta = itemStack.getItemMeta();
+        if (meta == null) {
+            return null;
+        }
+        PersistentDataContainer pdc = meta.getPersistentDataContainer();
+        if (pdc.isEmpty()) {
+            return null;
+        }
+
+        // Snapshot + sort once for deterministic iteration. HashMap-backed
+        // PDC implementations don't promise an order, so sorting up-front is
+        // necessary for "first match wins" to be stable across restarts.
+        List<NamespacedKey> sortedKeys = new java.util.ArrayList<>(pdc.getKeys());
+        sortedKeys.sort(java.util.Comparator.comparing(NamespacedKey::toString));
+
+        // Phase 1: preferred plugin namespaces.
+        for (String preferred : PREFERRED_PDC_NAMESPACES) {
+            for (NamespacedKey key : sortedKeys) {
+                if (!preferred.equalsIgnoreCase(key.getNamespace())) {
+                    continue;
+                }
+                String value = readPdcStringSafe(pdc, key);
+                if (value == null) {
+                    continue;
+                }
+                String sanitized = sanitizeForStableId(value);
+                if (!isStableIdValueValid(sanitized)) {
+                    continue;
+                }
+                return key.getNamespace() + ":" + sanitized;
+            }
+        }
+
+        // Phase 2: key-name hints across any namespace.
+        for (NamespacedKey key : sortedKeys) {
+            String lowerKeyName = key.getKey().toLowerCase(Locale.ROOT);
+            boolean keyMatches = false;
+            for (String hint : PDC_ID_KEY_HINTS) {
+                if (lowerKeyName.contains(hint)) {
+                    keyMatches = true;
+                    break;
+                }
+            }
+            if (!keyMatches) {
+                continue;
+            }
+            String value = readPdcStringSafe(pdc, key);
+            if (value == null) {
+                continue;
+            }
+            String sanitized = sanitizeForStableId(value);
+            if (!isStableIdValueValid(sanitized)) {
+                continue;
+            }
+            return key.getNamespace() + ":" + sanitized;
+        }
+
+        return null;
+    }
+
+    /**
+     * Reads a PDC value as String, swallowing only the narrow
+     * {@code IllegalArgumentException} that Bukkit throws when the stored
+     * value is of a non-string type. Broader exceptions propagate so the
+     * scanner does not silently mask programmer errors.
+     */
+    private static String readPdcStringSafe(PersistentDataContainer pdc, NamespacedKey key) {
+        try {
+            String value = pdc.get(key, PersistentDataType.STRING);
+            return (value != null && !value.isBlank()) ? value : null;
+        } catch (IllegalArgumentException nonStringValue) {
+            return null;
+        }
+    }
+
+    /**
+     * Sanitises a raw PDC value into the canonical lower-cased, underscore-only
+     * form used in the registry key. Drops separators and any chars outside
+     * {@code [a-z0-9_]}. Returns {@code null} when the result would be empty.
+     */
+    private static String sanitizeForStableId(String raw) {
+        if (raw == null) return null;
+        String lower = raw.toLowerCase(Locale.ROOT)
+            .replace(' ', '_')
+            .replace('-', '_')
+            .replace(':', '_')
+            .replaceAll("[^a-z0-9_]", "");
+        return lower.isBlank() ? null : lower;
+    }
+
+    /**
+     * Stricter validity check than the existing {@link #isValidItemId(String)}:
+     * stable identifiers must be at least 2 characters, max 64, and contain
+     * only {@code [a-z0-9_]} so they survive the colon-to-underscore conversion
+     * applied at Geyser registration time.
+     */
+    private static boolean isStableIdValueValid(String sanitized) {
+        return sanitized != null
+            && sanitized.length() >= 2
+            && sanitized.length() <= 64
+            && sanitized.matches("[a-z0-9_]+");
     }
 }
