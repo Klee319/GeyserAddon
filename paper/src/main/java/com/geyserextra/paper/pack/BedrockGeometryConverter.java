@@ -334,21 +334,24 @@ public final class BedrockGeometryConverter {
         int textureHeight,
         Logger logger
     ) {
-        // Phase 6 (Codex-flagged correctness): Bedrock per-face UV format
-        // 1.16.0 has no native equivalent for Java's 0/90/180/270 per-face
-        // texture rotation. Rather than silently render the face with the
-        // texture in the wrong orientation, we skip the face entirely so the
-        // operator sees a visibly missing face — a stronger signal that the
-        // model needs updating than a misrotated texture which they might
-        // not notice. The accompanying WARN log lets them locate the
-        // affected face quickly.
-        if (face.rotation() != 0) {
+        // Phase 6 case C (hybrid rotation handling):
+        //   - 0°   → standard uv/uv_size, identity mapping
+        //   - 180° → uv=(u2,v2) with negative uv_size on both axes, which is
+        //            point-symmetric to the unrotated form and visually
+        //            indistinguishable from rotating the texture 180° in Java
+        //   - 90°/270° → not expressible in Bedrock 1.16.0 per-face UV (would
+        //            require swapping the texture's u/v axes relative to the
+        //            face axes; Bedrock per-face uv has no rotation field).
+        //            Skip the face with a clear WARN so operators can either
+        //            pre-rotate the source PNG or accept the missing face.
+        int rotation = face.rotation();
+        if (rotation != 0 && rotation != 180) {
             if (logger != null) {
                 logger.warning("[BedrockGeometry] face " + faceName + " has Java rotation "
-                    + face.rotation() + "° which Bedrock per-face UV cannot express — "
-                    + "the face will not be rendered on Bedrock. To restore visibility, "
-                    + "pre-rotate the texture in the source PNG and set the model face "
-                    + "rotation to 0.");
+                    + rotation + "° which Bedrock 1.16.0 per-face UV cannot express "
+                    + "(only 0°/180° supported via negative uv_size) — the face will "
+                    + "not be rendered on Bedrock. To restore visibility, pre-rotate "
+                    + "the texture in the source PNG and set the model face rotation to 0.");
             }
             return null;
         }
@@ -371,18 +374,35 @@ public final class BedrockGeometryConverter {
         float scaleX = textureWidth / 16f;
         float scaleY = textureHeight / 16f;
 
-        float bedrockU = u1 * scaleX;
-        float bedrockV = v1 * scaleY;
-        // uv_size may be negative — Bedrock interprets that as a flipped texture
-        // on that face, which matches Java's behaviour for u1 > u2 / v1 > v2.
-        // We deliberately do NOT clamp these to positive.
-        float bedrockUSize = (u2 - u1) * scaleX;
-        float bedrockVSize = (v2 - v1) * scaleY;
+        float bedrockU;
+        float bedrockV;
+        float bedrockUSize;
+        float bedrockVSize;
+        if (rotation == 180) {
+            // 180° rotation = point-symmetric remap. The face's top-left
+            // corner samples from what was the texture region's bottom-right
+            // corner, and uv_size walks "backwards" via negative values.
+            // Bedrock honours negative uv_size as a flip in that axis, so
+            // double-negating produces a clean 180° rotation visually.
+            bedrockU = u2 * scaleX;
+            bedrockV = v2 * scaleY;
+            bedrockUSize = -(u2 - u1) * scaleX;
+            bedrockVSize = -(v2 - v1) * scaleY;
+        } else {
+            bedrockU = u1 * scaleX;
+            bedrockV = v1 * scaleY;
+            // uv_size may be negative when u1 > u2 or v1 > v2 — Bedrock
+            // interprets that as a flipped texture on that face, matching
+            // Java's u1>u2 / v1>v2 flipping semantics. We deliberately do
+            // NOT clamp these to positive.
+            bedrockUSize = (u2 - u1) * scaleX;
+            bedrockVSize = (v2 - v1) * scaleY;
+        }
 
         // Phase 6 (Codex-flagged): zero area on EITHER axis means the face
         // can't physically render — a UV strip of {@code N x 0} or {@code 0 x N}
-        // is still degenerate. Previously we only caught the {@code 0 x 0} case
-        // which let narrow strip artefacts through.
+        // is still degenerate. Catches both 0° and 180° degenerate cases
+        // because 180°'s negative form preserves the absolute value.
         if (bedrockUSize == 0f || bedrockVSize == 0f) {
             return null;
         }

@@ -68,7 +68,9 @@ GeyserExtra は Java の `display` ブロックと Blockbench `elements` を Bed
 - マテリアル指定は `entity_alphatest` 固定
 - `display.head` / `display.ground` / `display.fixed` は未対応 (手持ち時の slot のみ)
 - 複数 texture variable (`#layer0` 以外) を使うモデルは default texture のみ反映 (Bedrock `material_instances` 未実装、Phase 7 候補)
-- Java face 単位の `rotation: 90/180/270` (テクスチャ回転) は Bedrock 1.16.0 per-face UV 形式に native equivalent が無いため、該当 face は **non-rendered + WARN ログ**。可視化したい場合は PNG 側でテクスチャを pre-rotate して JSON 側の rotation を 0 に。
+- Java face 単位のテクスチャ rotation サポート:
+  - `0` / `180` — ✓ 完全対応 (180° は Bedrock の negative uv_size で表現)
+  - `90` / `270` — ✗ Bedrock 1.16.0 per-face UV では U/V 軸入れ替えを表現できないため、該当 face は **non-rendered + WARN ログ**。可視化したい場合は PNG 側でテクスチャを pre-rotate して JSON 側の rotation を 0 に。
 - `faces` が空 (または全 face が rotation で skip) の element は **invisible として cube 自体を omit**。Mojang セマンティクス準拠。
 
 完全な 3D 表現や複雑な multi-layer テクスチャが必要な場合は、別途 [Kas-tle/java2bedrock](https://github.com/Kas-tle/java2bedrock.sh) などの外部コンバータの出力を `plugins/Geyser-Spigot/packs/` に配置することで自動パックを上書きできます。
