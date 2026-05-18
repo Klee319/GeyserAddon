@@ -13,6 +13,17 @@ dependencies {
     compileOnly("org.geysermc.floodgate:api:2.2.4-SNAPSHOT")
     compileOnly("net.dmulloy2:ProtocolLib:5.4.0")
     compileOnly("com.discordsrv:discordsrv:1.30.0")
+
+    // Unit-test dependencies (JUnit 5 + AssertJ). Used by the
+    // BedrockGeometryConverter tests that lock in the per-face UV math so
+    // a future refactor cannot silently regress rotation 0/180 output or
+    // the 90/270 skip semantics that Codex round 2/3 review hardened.
+    testImplementation("org.junit.jupiter:junit-jupiter:5.10.2")
+    testImplementation("org.assertj:assertj-core:3.25.3")
+}
+
+tasks.test {
+    useJUnitPlatform()
 }
 
 // Surface every deprecated / marked-for-removal API call at build time so
