@@ -281,6 +281,13 @@ public final class GeyserExtraConfig {
         private final List<String> javaResourcePackPaths;
         private final String javaResourcePackFormat;
         private final String javaPackLocale;
+        // --- New fields (Phase 0): see plan cmd-plugin-3dmodel-java-robust-meteor.md ---
+        // pdcEnabled: emergency rollback flag for PDC-only craft result feature.
+        // dynamicResourcePackUrls: optional HTTP(S) URLs of Java resource packs to fetch and merge.
+        // attachableGeneration: controls Bedrock attachable/geometry/animation generation.
+        private final boolean pdcEnabled;
+        private final List<DynamicResourcePackEntry> dynamicResourcePackUrls;
+        private final AttachableGenerationConfig attachableGeneration;
 
         public CustomItemsConfig() {
             this.enabled = true;
@@ -293,6 +300,9 @@ public final class GeyserExtraConfig {
             this.javaResourcePackPaths = Collections.emptyList();
             this.javaResourcePackFormat = JAVA_PACK_FORMAT_AUTO;
             this.javaPackLocale = "en_us";
+            this.pdcEnabled = true;
+            this.dynamicResourcePackUrls = Collections.emptyList();
+            this.attachableGeneration = new AttachableGenerationConfig();
         }
 
         public CustomItemsConfig(
@@ -350,6 +360,33 @@ public final class GeyserExtraConfig {
                 String javaResourcePackFormat,
                 String javaPackLocale
         ) {
+            this(enabled, mappingsFile, autoReload, reloadIntervalSeconds,
+                 bedrockPacksPath, pdcWarning, javaResourcePackPath, javaResourcePackPaths,
+                 javaResourcePackFormat, javaPackLocale,
+                 true, Collections.emptyList(), new AttachableGenerationConfig());
+        }
+
+        /**
+         * Canonical constructor including Phase 0 additions
+         * ({@code pdcEnabled}, {@code dynamicResourcePackUrls}, {@code attachableGeneration}).
+         * All shorter constructors ultimately delegate here so a single normalization
+         * path applies to every field.
+         */
+        public CustomItemsConfig(
+                boolean enabled,
+                String mappingsFile,
+                boolean autoReload,
+                int reloadIntervalSeconds,
+                String bedrockPacksPath,
+                String pdcWarning,
+                String javaResourcePackPath,
+                List<String> javaResourcePackPaths,
+                String javaResourcePackFormat,
+                String javaPackLocale,
+                boolean pdcEnabled,
+                List<DynamicResourcePackEntry> dynamicResourcePackUrls,
+                AttachableGenerationConfig attachableGeneration
+        ) {
             this.enabled = enabled;
             this.mappingsFile = mappingsFile != null ? mappingsFile : "custom_items.json";
             this.autoReload = autoReload;
@@ -364,6 +401,15 @@ public final class GeyserExtraConfig {
             this.javaPackLocale = (javaPackLocale != null && !javaPackLocale.isBlank())
                 ? javaPackLocale.toLowerCase()
                 : "en_us";
+            this.pdcEnabled = pdcEnabled;
+            this.dynamicResourcePackUrls = dynamicResourcePackUrls != null
+                ? List.copyOf(dynamicResourcePackUrls.stream()
+                    .filter(e -> e != null && e.url() != null && !e.url().isBlank())
+                    .toList())
+                : Collections.emptyList();
+            this.attachableGeneration = attachableGeneration != null
+                ? attachableGeneration
+                : new AttachableGenerationConfig();
         }
 
         private static String normalizePdcWarning(String raw) {
@@ -542,6 +588,145 @@ public final class GeyserExtraConfig {
             return javaPackLocale != null && !javaPackLocale.isBlank()
                 ? javaPackLocale.toLowerCase()
                 : "en_us";
+        }
+
+        /**
+         * Whether the PDC-only custom item registration path is enabled.
+         *
+         * <p>When {@code true} (default), items identified by a stable
+         * PersistentDataContainer key (Oraxen / ItemsAdder / MMOItems / etc.)
+         * without a CustomModelData value are scanned, registered, and made
+         * available as Bedrock recipe results via the {@code hasComponent}
+         * predicate.</p>
+         *
+         * <p>Setting this to {@code false} reverts to pre-feature behaviour
+         * (PDC-only items are not registered). Provided as an emergency rollback
+         * lever; should not be needed under normal operation.</p>
+         */
+        public boolean pdcEnabled() {
+            return pdcEnabled;
+        }
+
+        /**
+         * Optional list of remote Java resource pack URLs to fetch and merge
+         * alongside the locally-resolved packs.
+         *
+         * <p>Default: empty list (no remote fetching, behaviour identical to
+         * pre-feature releases). When non-empty, each entry is downloaded,
+         * cached, and extracted by {@code JavaPackResolver} using the same
+         * pipeline as {@code server.properties} resource packs.</p>
+         */
+        public List<DynamicResourcePackEntry> dynamicResourcePackUrls() {
+            return dynamicResourcePackUrls != null ? dynamicResourcePackUrls : Collections.emptyList();
+        }
+
+        /**
+         * Returns the {@link #dynamicResourcePackUrls()} list with null entries
+         * and blank URLs filtered out. Returned list is unmodifiable.
+         *
+         * <p>Use this from the resolver call sites to avoid wasting a no-op
+         * resolve attempt on each invalid entry.</p>
+         */
+        public List<DynamicResourcePackEntry> effectiveDynamicResourcePackUrls() {
+            List<DynamicResourcePackEntry> raw = dynamicResourcePackUrls();
+            if (raw.isEmpty()) {
+                return Collections.emptyList();
+            }
+            List<DynamicResourcePackEntry> out = new ArrayList<>(raw.size());
+            for (DynamicResourcePackEntry entry : raw) {
+                if (entry == null || entry.url() == null || entry.url().isBlank()) {
+                    continue;
+                }
+                out.add(entry);
+            }
+            return List.copyOf(out);
+        }
+
+        /**
+         * Returns the Bedrock attachable generation configuration.
+         * Never {@code null}; missing JSON section yields a default-mode instance.
+         */
+        public AttachableGenerationConfig attachableGeneration() {
+            return attachableGeneration != null ? attachableGeneration : new AttachableGenerationConfig();
+        }
+    }
+
+    /**
+     * Controls generation of Bedrock attachable / geometry / animation artifacts
+     * derived from Java models. Lives under {@code customItems.attachableGeneration}
+     * in the config JSON.
+     *
+     * <p>Modes:</p>
+     * <ul>
+     *   <li>{@code off} — write nothing extra. Resulting auto-pack ZIP is
+     *       bit-for-bit identical to the pre-feature build. Emergency rollback.</li>
+     *   <li>{@code offsets_only} — write attachable + a flat-quad geometry that
+     *       only encodes the Java {@code display} transform (firstperson_righthand
+     *       / thirdperson_righthand). 3D Blockbench {@code elements} are ignored.</li>
+     *   <li>{@code full} — write attachable + full 3D geometry derived from
+     *       Java {@code elements}. Default.</li>
+     * </ul>
+     */
+    public static final class AttachableGenerationConfig {
+
+        /** Disable attachable generation (zip identical to pre-feature). */
+        public static final String MODE_OFF = "off";
+        /** Write attachable with flat-quad geometry + display transform animation. */
+        public static final String MODE_OFFSETS_ONLY = "offsets_only";
+        /** Write attachable with full 3D geometry from Java elements + display transform. */
+        public static final String MODE_FULL = "full";
+
+        private final String mode;
+        private final boolean forceFirstPersonOnly;
+        private final boolean debugDumpArtifacts;
+
+        public AttachableGenerationConfig() {
+            this(MODE_FULL, false, false);
+        }
+
+        public AttachableGenerationConfig(String mode,
+                                          boolean forceFirstPersonOnly,
+                                          boolean debugDumpArtifacts) {
+            this.mode = normalizeMode(mode);
+            this.forceFirstPersonOnly = forceFirstPersonOnly;
+            this.debugDumpArtifacts = debugDumpArtifacts;
+        }
+
+        private static String normalizeMode(String raw) {
+            if (raw == null || raw.isBlank()) {
+                return MODE_FULL;
+            }
+            String lower = raw.toLowerCase(java.util.Locale.ROOT);
+            return switch (lower) {
+                case MODE_OFF, MODE_OFFSETS_ONLY, MODE_FULL -> lower;
+                default -> MODE_FULL;
+            };
+        }
+
+        /**
+         * The active mode: {@link #MODE_OFF}, {@link #MODE_OFFSETS_ONLY}, or
+         * {@link #MODE_FULL}. Always normalised to one of these values.
+         */
+        public String mode() {
+            return mode != null ? mode : MODE_FULL;
+        }
+
+        /**
+         * If {@code true}, skip writing the {@code hold_third_person} animation
+         * channel. Emergency rollback lever for the case where a buggy third-person
+         * transform causes visible glitches across many items.
+         */
+        public boolean forceFirstPersonOnly() {
+            return forceFirstPersonOnly;
+        }
+
+        /**
+         * If {@code true}, mirror generated attachable/geometry/animation JSON
+         * files under {@code <plugin>/debug/auto_pack/} for inspection. Has no
+         * effect on the live Bedrock pack contents.
+         */
+        public boolean debugDumpArtifacts() {
+            return debugDumpArtifacts;
         }
     }
 

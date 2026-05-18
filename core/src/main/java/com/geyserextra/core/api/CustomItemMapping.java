@@ -6,17 +6,22 @@ import java.util.Objects;
  * Immutable record representing a custom item mapping configuration.
  *
  * This record defines how a Java Edition item with CustomModelData
- * should be mapped to a Bedrock Edition custom item.
+ * or a stable PersistentDataContainer identifier should be mapped to
+ * a Bedrock Edition custom item.
  *
  * @param name            Unique identifier for this custom item mapping
  * @param baseItem        The base Java Edition item identifier (e.g., "minecraft:diamond_sword")
- * @param customModelData The CustomModelData predicate value
+ * @param customModelData The CustomModelData predicate value (0 when identifying via PDC only)
  * @param unbreakable     Whether the item should be unbreakable
  * @param displayName     Optional display name for the item (can be null)
  * @param iconPath        Optional path to the icon texture (can be null)
  * @param creativeCategory Creative inventory category (1-5) for recipe book visibility, 0 = none
  * @param creativeGroup   Optional creative group for sub-categorization (can be null)
  * @param register        Whether to register this item with Geyser (false = skip, prevents transparent items)
+ * @param pdcIdentifier   Optional stable PersistentDataContainer identifier
+ *                        (e.g., {@code "oraxen:fire_sword"}). When non-null, the item is
+ *                        identified by PDC rather than (or in addition to) CMD.
+ *                        Null for legacy CMD-only mappings.
  */
 public record CustomItemMapping(
     String name,
@@ -27,7 +32,8 @@ public record CustomItemMapping(
     String iconPath,
     int creativeCategory,
     String creativeGroup,
-    boolean register
+    boolean register,
+    String pdcIdentifier
 ) {
     /**
      * Bedrock creative inventory categories.
@@ -70,13 +76,15 @@ public record CustomItemMapping(
      * - iconPath: null
      * - creativeCategory: 0 (none)
      * - creativeGroup: null
+     * - register: false
+     * - pdcIdentifier: null (CMD-only mapping)
      *
      * @param name           Unique identifier for this custom item mapping
      * @param baseItem       The base Java Edition item identifier
      * @param customModelData The CustomModelData predicate value
      */
     public CustomItemMapping(String name, String baseItem, int customModelData) {
-        this(name, baseItem, customModelData, false, null, null, CREATIVE_CATEGORY_NONE, null, false);
+        this(name, baseItem, customModelData, false, null, null, CREATIVE_CATEGORY_NONE, null, false, null);
     }
 
     /**
@@ -88,7 +96,31 @@ public record CustomItemMapping(
      * @param creativeCategory Creative category (1-5) for recipe book
      */
     public CustomItemMapping(String name, String baseItem, int customModelData, int creativeCategory) {
-        this(name, baseItem, customModelData, false, null, null, creativeCategory, null, false);
+        this(name, baseItem, customModelData, false, null, null, creativeCategory, null, false, null);
+    }
+
+    /**
+     * Backward-compatible 9-argument constructor for legacy CMD-only mappings.
+     *
+     * <p>Delegates to the canonical 10-argument constructor with
+     * {@code pdcIdentifier=null}. Preserves the pre-existing call shape used by
+     * {@code ItemMappingRegistry}, {@code GeyserExtraPaper}, and
+     * {@code CustomItemScanner} so the addition of the {@code pdcIdentifier}
+     * field does not require updates at every construction site.</p>
+     */
+    public CustomItemMapping(
+        String name,
+        String baseItem,
+        int customModelData,
+        boolean unbreakable,
+        String displayName,
+        String iconPath,
+        int creativeCategory,
+        String creativeGroup,
+        boolean register
+    ) {
+        this(name, baseItem, customModelData, unbreakable, displayName, iconPath,
+             creativeCategory, creativeGroup, register, null);
     }
 
     /**
@@ -98,7 +130,7 @@ public record CustomItemMapping(
      * @return A new CustomItemMapping instance with the updated display name
      */
     public CustomItemMapping withDisplayName(String newDisplayName) {
-        return new CustomItemMapping(name, baseItem, customModelData, unbreakable, newDisplayName, iconPath, creativeCategory, creativeGroup, register);
+        return new CustomItemMapping(name, baseItem, customModelData, unbreakable, newDisplayName, iconPath, creativeCategory, creativeGroup, register, pdcIdentifier);
     }
 
     /**
@@ -108,7 +140,7 @@ public record CustomItemMapping(
      * @return A new CustomItemMapping instance with the updated icon path
      */
     public CustomItemMapping withIconPath(String newIconPath) {
-        return new CustomItemMapping(name, baseItem, customModelData, unbreakable, displayName, newIconPath, creativeCategory, creativeGroup, register);
+        return new CustomItemMapping(name, baseItem, customModelData, unbreakable, displayName, newIconPath, creativeCategory, creativeGroup, register, pdcIdentifier);
     }
 
     /**
@@ -118,7 +150,7 @@ public record CustomItemMapping(
      * @return A new CustomItemMapping instance with the updated unbreakable flag
      */
     public CustomItemMapping withUnbreakable(boolean newUnbreakable) {
-        return new CustomItemMapping(name, baseItem, customModelData, newUnbreakable, displayName, iconPath, creativeCategory, creativeGroup, register);
+        return new CustomItemMapping(name, baseItem, customModelData, newUnbreakable, displayName, iconPath, creativeCategory, creativeGroup, register, pdcIdentifier);
     }
 
     /**
@@ -129,7 +161,7 @@ public record CustomItemMapping(
      * @return A new CustomItemMapping instance with the updated creative category
      */
     public CustomItemMapping withCreativeCategory(int newCreativeCategory) {
-        return new CustomItemMapping(name, baseItem, customModelData, unbreakable, displayName, iconPath, newCreativeCategory, creativeGroup, register);
+        return new CustomItemMapping(name, baseItem, customModelData, unbreakable, displayName, iconPath, newCreativeCategory, creativeGroup, register, pdcIdentifier);
     }
 
     /**
@@ -139,7 +171,17 @@ public record CustomItemMapping(
      * @return A new CustomItemMapping instance with the updated creative group
      */
     public CustomItemMapping withCreativeGroup(String newCreativeGroup) {
-        return new CustomItemMapping(name, baseItem, customModelData, unbreakable, displayName, iconPath, creativeCategory, newCreativeGroup, register);
+        return new CustomItemMapping(name, baseItem, customModelData, unbreakable, displayName, iconPath, creativeCategory, newCreativeGroup, register, pdcIdentifier);
+    }
+
+    /**
+     * Creates a new CustomItemMapping with the specified PDC identifier.
+     *
+     * @param newPdcIdentifier The stable PersistentDataContainer identifier, or null to clear
+     * @return A new CustomItemMapping instance with the updated PDC identifier
+     */
+    public CustomItemMapping withPdcIdentifier(String newPdcIdentifier) {
+        return new CustomItemMapping(name, baseItem, customModelData, unbreakable, displayName, iconPath, creativeCategory, creativeGroup, register, newPdcIdentifier);
     }
 
     /**
@@ -176,5 +218,15 @@ public record CustomItemMapping(
      */
     public boolean hasCreativeGroup() {
         return creativeGroup != null && !creativeGroup.isBlank();
+    }
+
+    /**
+     * Checks if this mapping is identified by a PersistentDataContainer key
+     * rather than (or in addition to) CustomModelData.
+     *
+     * @return true if pdcIdentifier is not null and not blank
+     */
+    public boolean hasPdcIdentifier() {
+        return pdcIdentifier != null && !pdcIdentifier.isBlank();
     }
 }
