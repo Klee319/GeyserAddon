@@ -539,10 +539,23 @@ public final class AutoBedrockPackBuilder {
                 }
                 if (iconKey != null) {
                     customIconToTexturePath.remove(iconKey);
-                    attachableArtifacts.remove(BedrockAttachableWriter.attachableEntryPath(iconKey));
-                    attachableArtifacts.remove(BedrockAttachableWriter.geometryEntryPath(iconKey));
-                    attachableArtifacts.remove(BedrockAttachableWriter.animationEntryPath(iconKey));
+                    String attachableEntry = BedrockAttachableWriter.attachableEntryPath(iconKey);
+                    String geometryEntry = BedrockAttachableWriter.geometryEntryPath(iconKey);
+                    String animationEntry = BedrockAttachableWriter.animationEntryPath(iconKey);
+                    attachableArtifacts.remove(attachableEntry);
+                    attachableArtifacts.remove(geometryEntry);
+                    attachableArtifacts.remove(animationEntry);
+                    // Codex round-7 optional cleanup: also drop the removed
+                    // entries from plannedZipEntries so the deduplication set
+                    // stays symmetric with the actual zip contents. The set
+                    // is not consulted after Phase 1 in the current flow, so
+                    // this is cosmetic correctness rather than a behavioural
+                    // fix — but keeping the data structures in sync prevents
+                    // a future caller from observing inconsistent state.
                     plannedZipEntries.remove(zipEntry);
+                    plannedZipEntries.remove(attachableEntry);
+                    plannedZipEntries.remove(geometryEntry);
+                    plannedZipEntries.remove(animationEntry);
                 }
             }
         }
