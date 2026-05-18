@@ -560,12 +560,19 @@ public final class JavaPackReader {
      * can diff against their actual pack layout.
      */
     private JavaModelDefinition resolveSingleModelRef(String baseItem, int cmd, String modelRef) {
-        // Step 1: model JSON chain → textures.layerN → PNG file
+        // Phase 3: resolve the display transform once up-front. This is the
+        // most expensive step that could fail benignly (missing model file,
+        // unparseable JSON), and it is independent of texture resolution —
+        // so do it before any of the texture-resolution branches and reuse
+        // the result regardless of which texture path wins.
+        JavaModelDisplay display = resolveDisplayFromModelSafe(modelRef);
+
+        // Step 1: model JSON chain -> textures.layerN -> PNG file
         String textureRef = resolveTextureRefFromModel(modelRef);
         if (textureRef != null) {
             Path texturePath = resolveTextureFile(textureRef);
             if (texturePath != null) {
-                return new JavaModelDefinition(baseItem, cmd, modelRef, textureRef, texturePath);
+                return new JavaModelDefinition(baseItem, cmd, modelRef, textureRef, texturePath, display);
             }
         }
 
@@ -576,7 +583,7 @@ public final class JavaPackReader {
                 logger.fine("[JavaPack] " + baseItem + "#" + cmd
                     + ": resolved via model-name-as-texture-path fallback for " + modelRef);
             }
-            return new JavaModelDefinition(baseItem, cmd, modelRef, modelRef, direct);
+            return new JavaModelDefinition(baseItem, cmd, modelRef, modelRef, direct, display);
         }
 
         // Step 3: basename index lookup
@@ -589,7 +596,7 @@ public final class JavaPackReader {
                     + " -> " + indexed + ")");
             }
             return new JavaModelDefinition(baseItem, cmd, modelRef,
-                "basename:" + basename, indexed);
+                "basename:" + basename, indexed, display);
         }
 
         // All three paths failed: emit a single diagnostic line listing
@@ -678,6 +685,128 @@ public final class JavaPackReader {
      * texture for items whose model JSON happened to list one before any
      * layer slot.</p>
      */
+    /**
+     * Walks the {@code parent} chain rooted at {@code modelRef} and accumulates
+     * any {@code display} slots declared by Mojang's per-slot merge rules: a
+     * child's slot overrides the parent's, but slots the child does not
+     * declare keep the parent's value. Returns a {@link JavaModelDisplay} when
+     * at least one slot resolved, otherwise {@code null}.
+     *
+     * <p>Vanilla {@code item/handheld} / {@code item/generated} defaults live
+     * inside the Mojang client jar and are not present in operator packs, so
+     * slots that no overridden ancestor declares remain {@code null}. The
+     * downstream {@code BedrockAttachableWriter} uses this signal to skip
+     * attachable generation entirely for items that inherit all their display
+     * transforms from vanilla.</p>
+     *
+     * <p>Made public so {@code AutoBedrockPackBuilder} can call it directly if
+     * it wants per-item display extraction without going through the full
+     * scan pipeline.</p>
+     */
+    /**
+     * Internal wrapper around {@link #resolveDisplayFromModel(String)} that
+     * swallows any exception thrown during resolution. Used at the resolver
+     * call site so a single malformed model JSON cannot abort the whole scan
+     * — failures are logged at FINE and the affected entry simply lands in
+     * the registry with {@code display == null}.
+     */
+    private JavaModelDisplay resolveDisplayFromModelSafe(String modelRef) {
+        try {
+            return resolveDisplayFromModel(modelRef);
+        } catch (RuntimeException ex) {
+            if (debug) {
+                logger.log(Level.FINE,
+                    "[JavaPack] display extraction threw for " + modelRef, ex);
+            }
+            return null;
+        }
+    }
+
+    public JavaModelDisplay resolveDisplayFromModel(String modelRef) {
+        if (modelRef == null || modelRef.isBlank()) {
+            return null;
+        }
+        JavaModelDisplay.Transform firstHand = null;
+        JavaModelDisplay.Transform thirdHand = null;
+        JavaModelDisplay.Transform gui = null;
+        JavaModelDisplay.Transform ground = null;
+        JavaModelDisplay.Transform head = null;
+
+        String current = modelRef;
+        int hops = 0;
+        while (current != null && hops < 8) {
+            Path modelFile = resolveModelFile(current);
+            if (modelFile == null) {
+                break;
+            }
+            Map<String, Object> modelJson;
+            try {
+                modelJson = readJsonObject(modelFile);
+            } catch (IOException ex) {
+                logger.warning("[JavaPack] failed to read model JSON " + modelFile
+                    + " for display extraction: " + ex.getMessage());
+                break;
+            }
+            Object displayObj = modelJson.get("display");
+            if (displayObj instanceof Map<?, ?> displayMap) {
+                if (firstHand == null) firstHand = parseTransform(displayMap.get("firstperson_righthand"));
+                if (thirdHand == null) thirdHand = parseTransform(displayMap.get("thirdperson_righthand"));
+                if (gui == null) gui = parseTransform(displayMap.get("gui"));
+                if (ground == null) ground = parseTransform(displayMap.get("ground"));
+                if (head == null) head = parseTransform(displayMap.get("head"));
+            }
+            Object parent = modelJson.get("parent");
+            if (!(parent instanceof String parentRef) || parentRef.isBlank()) {
+                break;
+            }
+            current = parentRef;
+            hops++;
+        }
+
+        if (firstHand == null && thirdHand == null && gui == null
+            && ground == null && head == null) {
+            return null;
+        }
+        return new JavaModelDisplay(firstHand, thirdHand, gui, ground, head);
+    }
+
+    /**
+     * Parses one slot of a Java {@code display} map (e.g.
+     * {@code {"rotation":[0,-90,25],"translation":[1.13,3.2,1.13],"scale":[0.68,0.68,0.68]}})
+     * into a {@link JavaModelDisplay.Transform}. Missing arrays default to the
+     * identity values (zero rotation/translation, unit scale) per Mojang's
+     * client behaviour. Returns {@code null} when the input is not a JSON
+     * object — caller treats that as "slot not declared here".
+     */
+    private static JavaModelDisplay.Transform parseTransform(Object raw) {
+        if (!(raw instanceof Map<?, ?> map)) {
+            return null;
+        }
+        float[] rotation = parseFloat3(map.get("rotation"), 0f);
+        float[] translation = parseFloat3(map.get("translation"), 0f);
+        float[] scale = parseFloat3(map.get("scale"), 1f);
+        return new JavaModelDisplay.Transform(rotation, translation, scale);
+    }
+
+    /**
+     * Parses an "expected 3-number array" JSON value into a {@code float[3]}.
+     * Pads short arrays and ignores extra entries; non-numeric items become
+     * {@code defaultValue}. Always returns a fresh non-null array.
+     */
+    private static float[] parseFloat3(Object raw, float defaultValue) {
+        float[] out = new float[]{defaultValue, defaultValue, defaultValue};
+        if (raw instanceof List<?> list) {
+            int len = Math.min(3, list.size());
+            for (int i = 0; i < len; i++) {
+                Object element = list.get(i);
+                if (element instanceof Number n) {
+                    out[i] = n.floatValue();
+                }
+            }
+        }
+        return out;
+    }
+
     private String resolveTextureRefFromModel(String modelRef) {
         String current = modelRef;
         int hops = 0;
@@ -901,12 +1030,26 @@ public final class JavaPackReader {
      * @param textureRef      the raw texture reference resolved from the model
      *                        (e.g. {@code "mymod:items/fire_sword"}); diagnostic only
      * @param textureFile     absolute path to the PNG file on disk
+     * @param display         optional {@code display} block harvested from the
+     *                        model JSON (Phase 3). {@code null} when the model
+     *                        declares no display overrides or could not be
+     *                        re-read after texture resolution.
      */
     public record JavaModelDefinition(
         String baseItem,
         int customModelData,
         String modelRef,
         String textureRef,
-        Path textureFile
-    ) {}
+        Path textureFile,
+        JavaModelDisplay display
+    ) {
+        /**
+         * Backward-compatible 5-arg constructor used by call sites that
+         * pre-date the Phase 3 display field. Delegates with {@code display=null}.
+         */
+        public JavaModelDefinition(String baseItem, int customModelData,
+                                   String modelRef, String textureRef, Path textureFile) {
+            this(baseItem, customModelData, modelRef, textureRef, textureFile, null);
+        }
+    }
 }

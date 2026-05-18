@@ -709,6 +709,7 @@ public final class GeyserExtraPaper extends JavaPlugin {
                         itemMappingRegistry,
                         autoPackPath,
                         javaPackEntries,
+                        config.customItems().attachableGeneration(),
                         getLogger(),
                         debug
                     );

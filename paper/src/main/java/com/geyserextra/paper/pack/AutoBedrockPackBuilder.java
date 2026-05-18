@@ -1,6 +1,7 @@
 package com.geyserextra.paper.pack;
 
 import com.geyserextra.core.api.CustomItemMapping;
+import com.geyserextra.core.config.GeyserExtraConfig.AttachableGenerationConfig;
 import com.geyserextra.core.registry.ItemMappingRegistry;
 import com.geyserextra.core.util.JsonUtil;
 
@@ -118,7 +119,9 @@ public final class AutoBedrockPackBuilder {
      * @throws IOException if writing the ZIP fails
      */
     public static void build(ItemMappingRegistry registry, Path outputZip) throws IOException {
-        build(registry, outputZip, null, null, null, false);
+        // Explicit cast disambiguates between the Path-overload (which would
+        // trigger a Java pack scan) and the Map-overload added later.
+        build(registry, outputZip, (Path) null, (String) null, (Logger) null, false);
     }
 
     /**
@@ -184,17 +187,58 @@ public final class AutoBedrockPackBuilder {
         Logger logger,
         boolean debug
     ) throws IOException {
+        // Backward-compat delegate: no AttachableGenerationConfig was passed,
+        // so honor the Phase 0 default (mode=full). Callers that need to
+        // pin a different mode use the 6-arg overload below.
+        build(registry, outputZip, javaPackEntries,
+              new AttachableGenerationConfig(), logger, debug);
+    }
+
+    /**
+     * Builds the pack ZIP using already-scanned Java pack entries and an
+     * explicit attachable generation policy.
+     *
+     * <p>Phase 3 entry point. When
+     * {@code attachableConfig.mode == off} the result is byte-for-byte
+     * identical to the pre-Phase-3 build (no attachable, geometry, or
+     * animation JSON entries). When the mode is {@code offsets_only} or
+     * {@code full}, per-mapping attachable artifacts are added for items
+     * whose Java model declared a {@code display} block.</p>
+     *
+     * @param registry          source of custom item mappings
+     * @param outputZip         target ZIP file path
+     * @param javaPackEntries   pre-scanned Java pack overrides (pass empty to skip texture copy)
+     * @param attachableConfig  Phase 3 attachable generation policy; {@code null} disables generation
+     * @param logger            plugin logger
+     * @param debug             whether to emit verbose per-file diagnostics
+     * @throws IOException if writing the ZIP fails
+     */
+    public static void build(
+        ItemMappingRegistry registry,
+        Path outputZip,
+        Map<JavaPackReader.CmdKey, JavaPackReader.JavaModelDefinition> javaPackEntries,
+        AttachableGenerationConfig attachableConfig,
+        Logger logger,
+        boolean debug
+    ) throws IOException {
         Collection<CustomItemMapping> mappings = registry.getMappings();
         if (javaPackEntries == null) {
             javaPackEntries = Collections.emptyMap();
         }
+        // Null-guard: callers that don't care about attachables pass null;
+        // treat that as "off" so the rest of the pipeline sees a non-null
+        // policy object without forcing generation.
+        AttachableGenerationConfig effectiveConfig = attachableConfig != null
+            ? attachableConfig
+            : new AttachableGenerationConfig(AttachableGenerationConfig.MODE_OFF, false, false);
+        boolean attachableMode = !AttachableGenerationConfig.MODE_OFF.equals(effectiveConfig.mode());
 
         Path parent = outputZip.getParent();
         if (parent != null) {
             Files.createDirectories(parent);
         }
 
-        // Phase 1 — plan the PNG copies (without writing yet) so we know the
+        // Phase 1 - plan the PNG copies (without writing yet) so we know the
         // final customIconToTexturePath before we serialize the manifest.
         // Writing PNGs to disk only happens inside phase 3 below, against the
         // tmp file. This separation also lets phase 2 hash the rendered
@@ -202,6 +246,11 @@ public final class AutoBedrockPackBuilder {
         Map<String, String> customIconToTexturePath = new LinkedHashMap<>();
         List<TextureCopyTask> pngTasks = new ArrayList<>();
         Set<String> plannedZipEntries = new HashSet<>();
+        // Phase 3: plan attachable artifacts alongside textures. Key is the
+        // ZIP entry path; value is the UTF-8-ready JSON. We collect them in a
+        // LinkedHashMap so the iteration order (and therefore the patch hash)
+        // remains deterministic.
+        Map<String, String> attachableArtifacts = new LinkedHashMap<>();
         int duplicateSkipCount = 0;
         for (CustomItemMapping mapping : mappings) {
             JavaPackReader.CmdKey key = new JavaPackReader.CmdKey(
@@ -224,16 +273,37 @@ public final class AutoBedrockPackBuilder {
             }
             pngTasks.add(new TextureCopyTask(def.textureFile(), zipEntry, key.toString()));
             customIconToTexturePath.put(iconKey, bedrockTextureRelative);
+
+            // Phase 3: collect attachable artifacts for this mapping if the
+            // model declared a display block AND the policy allows generation.
+            // The writer itself returns an empty map when neither condition
+            // holds, so we just merge whatever it produces.
+            if (attachableMode) {
+                Map<String, String> artifacts = BedrockAttachableWriter.buildArtifacts(
+                    iconKey, def.display(), bedrockTextureRelative, effectiveConfig);
+                for (Map.Entry<String, String> art : artifacts.entrySet()) {
+                    String artifactPath = art.getKey();
+                    if (!plannedZipEntries.add(artifactPath)) {
+                        if (logger != null) {
+                            logger.fine("[AutoPack] attachable artifact already planned, skipping: "
+                                + artifactPath);
+                        }
+                        continue;
+                    }
+                    attachableArtifacts.put(artifactPath, art.getValue());
+                }
+            }
         }
 
-        // Phase 2 — render item_texture.json from the finalised iconKey map
+        // Phase 2 - render item_texture.json from the finalised iconKey map
         // and derive a content-addressed patch version. The patch version
-        // changes whenever item_texture.json changes, which is what tells
-        // Bedrock clients "this is a new pack, drop your cached copy". Without
-        // this the manifest UUID + version pair stays constant across pack
-        // regenerations and the client silently keeps using stale textures.
+        // changes whenever item_texture.json OR any attachable artifact
+        // changes, which is what tells Bedrock clients "this is a new pack,
+        // drop your cached copy". Without this the manifest UUID + version
+        // pair stays constant across pack regenerations and the client
+        // silently keeps using stale textures or stale attachables.
         String itemTextureJson = buildItemTextureJson(mappings, customIconToTexturePath, logger, debug);
-        int patchVersion = patchVersionFromContent(itemTextureJson);
+        int patchVersion = patchVersionFromContent(itemTextureJson, attachableArtifacts);
         String manifestJson = buildManifestJson(patchVersion);
 
         // Phase 3 — write everything to a sibling .tmp file, then atomic-move
@@ -269,6 +339,15 @@ public final class AutoBedrockPackBuilder {
 
             putEntryUnique(zos, "textures/item_texture.json",
                 itemTextureJson.getBytes(StandardCharsets.UTF_8), writtenEntries, logger);
+
+            // Phase 3 (this release): write attachable / geometry / animation
+            // JSONs planned earlier. mode=off produces an empty map, so this
+            // loop is a strict no-op for callers that disable the feature —
+            // preserving bit-for-bit identity with the pre-Phase-3 build.
+            for (Map.Entry<String, String> art : attachableArtifacts.entrySet()) {
+                putEntryUnique(zos, art.getKey(),
+                    art.getValue().getBytes(StandardCharsets.UTF_8), writtenEntries, logger);
+            }
         } catch (IOException ioEx) {
             // Failed to fully write the tmp file — make sure it doesn't
             // accumulate on disk before propagating the error.
@@ -308,6 +387,15 @@ public final class AutoBedrockPackBuilder {
                 + " fell back to vanilla, "
                 + duplicateSkipCount + " skipped due to duplicate ZIP entry name");
         }
+        if (logger != null && attachableMode) {
+            // Each item contributes either 0 or 3 attachable artifacts
+            // (attachable + geometry + animation), so the count of attachable
+            // ZIP entries divided by 3 gives the number of items that
+            // successfully produced a held-item rendering.
+            int attachableItemCount = attachableArtifacts.size() / 3;
+            logger.info("[AutoPack] attachables: " + attachableItemCount
+                + " custom item(s) received hold-* animation (mode=" + effectiveConfig.mode() + ")");
+        }
     }
 
     /**
@@ -324,13 +412,35 @@ public final class AutoBedrockPackBuilder {
      * algorithm in the JDK platform, and the cost is negligible at the
      * mappings.size() scale we handle.</p>
      */
-    private static int patchVersionFromContent(String itemTextureJson) {
-        if (itemTextureJson == null || itemTextureJson.isEmpty()) {
+    private static int patchVersionFromContent(
+        String itemTextureJson,
+        Map<String, String> attachableArtifacts
+    ) {
+        if ((itemTextureJson == null || itemTextureJson.isEmpty())
+            && (attachableArtifacts == null || attachableArtifacts.isEmpty())) {
             return 0;
         }
         try {
-            byte[] digest = MessageDigest.getInstance("SHA-256")
-                .digest(itemTextureJson.getBytes(StandardCharsets.UTF_8));
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            if (itemTextureJson != null) {
+                md.update(itemTextureJson.getBytes(StandardCharsets.UTF_8));
+            }
+            if (attachableArtifacts != null && !attachableArtifacts.isEmpty()) {
+                // Iterate in deterministic order (the planning step used a
+                // LinkedHashMap). Mixing the entry path into the hash means
+                // that a rename like attachables/A.json -> attachables/B.json
+                // also changes the patch version even when the JSON content
+                // is identical.
+                for (Map.Entry<String, String> entry : attachableArtifacts.entrySet()) {
+                    md.update(entry.getKey().getBytes(StandardCharsets.UTF_8));
+                    md.update((byte) 0);
+                    if (entry.getValue() != null) {
+                        md.update(entry.getValue().getBytes(StandardCharsets.UTF_8));
+                    }
+                    md.update((byte) 0);
+                }
+            }
+            byte[] digest = md.digest();
             int value = 0;
             for (int i = 0; i < 4 && i < digest.length; i++) {
                 value = (value << 8) | (digest[i] & 0xFF);

@@ -1,0 +1,242 @@
+package com.geyserextra.paper.pack;
+
+import com.geyserextra.core.config.GeyserExtraConfig.AttachableGenerationConfig;
+import com.geyserextra.core.util.JsonUtil;
+
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
+/**
+ * Generates the three JSON artifacts ({@code attachables/*.json},
+ * {@code models/entity/*.geo.json}, {@code animations/*.animation.json})
+ * that Bedrock needs in order to render a held-item appearance matching
+ * the Java {@code display} transform.
+ *
+ * <p>Output identifiers all share the form {@code geyserextra:<iconKey>},
+ * mirroring the {@code bedrock_identifier} the Geyser extension registers
+ * for the same item. Bedrock auto-binds an attachable to a custom item when
+ * the identifiers match exactly, so this is the only "wiring" needed —
+ * Geyser itself has no setter for attachables in its v2 API.</p>
+ *
+ * <p><b>Phase 3 (this release):</b> always writes a flat-quad geometry
+ * (single 16x16 quad facing the camera) and uses the Java {@code display}
+ * transform on the {@code rightitem} bone's animation channels. Phase 4
+ * will replace the flat quad with Java {@code elements}-derived cubes
+ * when {@code mode == full} and the model has elements.</p>
+ */
+public final class BedrockAttachableWriter {
+
+    /** Bedrock pack-internal namespace for our generated artifacts. */
+    private static final String NAMESPACE = "geyserextra";
+
+    /** Sub-folder under each artifact category — keeps generated files out of operator-authored content. */
+    private static final String FOLDER = "geyserextra_auto";
+
+    /** Bone name that the standard {@code controller.render.item_default} drives. */
+    private static final String HELD_BONE = "rightitem";
+
+    private BedrockAttachableWriter() {}
+
+    /**
+     * Builds the three JSON artifacts for a single mapping. The keys of the
+     * returned map are absolute zip-entry paths (suitable for direct use with
+     * {@link java.util.zip.ZipOutputStream#putNextEntry}); the values are
+     * UTF-8-ready strings.
+     *
+     * <p>Returns an empty map when {@code config.mode == off} or the display
+     * block is unusable for held-item rendering. Callers should treat an
+     * empty result as "no artifacts to write" and continue without logging
+     * an error.</p>
+     *
+     * @param iconKey   sanitised Bedrock icon key (also used as the
+     *                  {@code bedrock_identifier} suffix)
+     * @param display   the model's display transform; may be {@code null}
+     * @param textureRelativePath the existing {@code textures/items/<iconKey>}
+     *                            path written by {@code AutoBedrockPackBuilder}.
+     *                            Used as the attachable's default texture so
+     *                            held-item rendering uses the same artwork as
+     *                            the inventory icon.
+     * @param config    the {@code customItems.attachableGeneration} settings
+     * @return path -> JSON content map (empty when nothing should be written)
+     */
+    public static Map<String, String> buildArtifacts(
+        String iconKey,
+        JavaModelDisplay display,
+        String textureRelativePath,
+        AttachableGenerationConfig config
+    ) {
+        if (iconKey == null || iconKey.isBlank()) {
+            return Map.of();
+        }
+        if (config == null) {
+            return Map.of();
+        }
+        String mode = config.mode();
+        if (AttachableGenerationConfig.MODE_OFF.equals(mode)) {
+            return Map.of();
+        }
+        // Mode is offsets_only or full. Both still require at least one
+        // held-item transform — without it the attachable would just be a
+        // duplicate of the vanilla in-hand rendering and not worth the bytes.
+        if (display == null || !display.hasAnyHandTransform()) {
+            return Map.of();
+        }
+
+        Map<String, String> out = new LinkedHashMap<>();
+        out.put(attachableEntryPath(iconKey),
+                JsonUtil.toPrettyJson(buildAttachableJson(iconKey, textureRelativePath, config)));
+        out.put(geometryEntryPath(iconKey),
+                JsonUtil.toPrettyJson(buildGeometryJson(iconKey)));
+        out.put(animationEntryPath(iconKey),
+                JsonUtil.toPrettyJson(buildAnimationJson(iconKey, display, config)));
+        return out;
+    }
+
+    // ---------------------------------------------------------------------
+    // Path helpers
+    // ---------------------------------------------------------------------
+
+    public static String attachableEntryPath(String iconKey) {
+        return "attachables/" + FOLDER + "/" + iconKey + ".json";
+    }
+
+    public static String geometryEntryPath(String iconKey) {
+        return "models/entity/" + FOLDER + "/" + iconKey + ".geo.json";
+    }
+
+    public static String animationEntryPath(String iconKey) {
+        return "animations/" + FOLDER + "/" + iconKey + ".animation.json";
+    }
+
+    // ---------------------------------------------------------------------
+    // JSON builders
+    // ---------------------------------------------------------------------
+
+    private static Map<String, Object> buildAttachableJson(
+        String iconKey, String textureRelativePath, AttachableGenerationConfig config
+    ) {
+        // Path written to attachable.textures must omit the trailing extension
+        // (Bedrock appends .png automatically). The auto-pack writes the PNG
+        // as "textures/items/<iconKey>.png" so the extension-less form is the
+        // textureRelativePath value AutoBedrockPackBuilder already tracks.
+        String tex = (textureRelativePath != null && !textureRelativePath.isBlank())
+            ? textureRelativePath
+            : "textures/items/" + iconKey;
+
+        Map<String, Object> description = new LinkedHashMap<>();
+        description.put("identifier", NAMESPACE + ":" + iconKey);
+        description.put("materials", linkedMap(
+            "default", "entity_alphatest",
+            "enchanted", "entity_alphatest_glint"));
+        description.put("textures", linkedMap(
+            "default", tex,
+            "enchanted", "textures/misc/enchanted_item_glint"));
+        description.put("geometry", Map.of("default", "geometry." + NAMESPACE + "." + iconKey));
+
+        Map<String, String> animations = new LinkedHashMap<>();
+        animations.put("hold_first_person",
+            "animation." + NAMESPACE + "." + iconKey + ".first_person");
+        if (!config.forceFirstPersonOnly()) {
+            animations.put("hold_third_person",
+                "animation." + NAMESPACE + "." + iconKey + ".third_person");
+        }
+        description.put("animations", animations);
+
+        List<Map<String, String>> scripts = new ArrayList<>();
+        scripts.add(Map.of("hold_first_person", "context.is_first_person == 1.0"));
+        if (!config.forceFirstPersonOnly()) {
+            scripts.add(Map.of("hold_third_person", "context.is_first_person == 0.0"));
+        }
+        description.put("scripts", Map.of("animate", scripts));
+
+        description.put("render_controllers", List.of("controller.render.item_default"));
+
+        return linkedMap(
+            "format_version", "1.10.0",
+            "minecraft:attachable", Map.of("description", description));
+    }
+
+    private static Map<String, Object> buildGeometryJson(String iconKey) {
+        // Phase 3 baseline: a single 16x16 quad in the XY plane, hinged at
+        // the bone pivot. This gives the attachable a real surface to render
+        // the icon texture on; phase 4 will replace this with full element
+        // cubes when {@code mode == full} and the model has elements.
+        Map<String, Object> descriptor = new LinkedHashMap<>();
+        descriptor.put("identifier", "geometry." + NAMESPACE + "." + iconKey);
+        descriptor.put("texture_width", 16);
+        descriptor.put("texture_height", 16);
+        descriptor.put("visible_bounds_width", 2);
+        descriptor.put("visible_bounds_height", 2);
+        descriptor.put("visible_bounds_offset", List.of(0, 0.5, 0));
+
+        Map<String, Object> cube = new LinkedHashMap<>();
+        cube.put("origin", List.of(-8, 0, 0));
+        cube.put("size", List.of(16, 16, 0));
+        cube.put("uv", List.of(0, 0));
+
+        Map<String, Object> bone = new LinkedHashMap<>();
+        bone.put("name", HELD_BONE);
+        bone.put("pivot", List.of(0, 0, 0));
+        bone.put("cubes", List.of(cube));
+
+        Map<String, Object> geometry = new LinkedHashMap<>();
+        geometry.put("description", descriptor);
+        geometry.put("bones", List.of(bone));
+
+        return linkedMap(
+            "format_version", "1.16.0",
+            "minecraft:geometry", List.of(geometry));
+    }
+
+    private static Map<String, Object> buildAnimationJson(
+        String iconKey, JavaModelDisplay display, AttachableGenerationConfig config
+    ) {
+        Map<String, Object> animations = new LinkedHashMap<>();
+        animations.put(
+            "animation." + NAMESPACE + "." + iconKey + ".first_person",
+            buildHoldAnimation(display.handTransformFor(true)));
+        if (!config.forceFirstPersonOnly()) {
+            animations.put(
+                "animation." + NAMESPACE + "." + iconKey + ".third_person",
+                buildHoldAnimation(display.handTransformFor(false)));
+        }
+        return linkedMap(
+            "format_version", "1.8.0",
+            "animations", animations);
+    }
+
+    private static Map<String, Object> buildHoldAnimation(JavaModelDisplay.Transform transform) {
+        JavaModelDisplay.Transform t = transform != null
+            ? transform
+            : JavaModelDisplay.Transform.identity();
+
+        float[] rotation = BedrockGeometryConverter.convertRotation(t.rotation());
+        float[] position = BedrockGeometryConverter.convertTranslation(t.translation());
+        float[] scale = BedrockGeometryConverter.convertScale(t.scale());
+
+        Map<String, Object> bone = new LinkedHashMap<>();
+        bone.put("rotation", List.of(rotation[0], rotation[1], rotation[2]));
+        bone.put("position", List.of(position[0], position[1], position[2]));
+        bone.put("scale", List.of(scale[0], scale[1], scale[2]));
+
+        Map<String, Object> animation = new LinkedHashMap<>();
+        animation.put("loop", "hold_on_last_frame");
+        animation.put("bones", Map.of(HELD_BONE, bone));
+        return animation;
+    }
+
+    /**
+     * Tiny helper: builds a {@link LinkedHashMap} preserving declaration order
+     * so the rendered JSON is stable from one build to the next. Required for
+     * the patchVersion content-hash in {@code AutoBedrockPackBuilder} to remain
+     * deterministic.
+     */
+    private static <V> Map<String, V> linkedMap(String k1, V v1, String k2, V v2) {
+        Map<String, V> m = new LinkedHashMap<>();
+        m.put(k1, v1);
+        m.put(k2, v2);
+        return m;
+    }
+}
