@@ -313,14 +313,15 @@ public final class AutoBedrockPackBuilder {
             Files.createDirectories(parent);
         }
 
-        // Codex round-4 fix (I1): pre-read every armor PNG ONCE here so the
-        // hash (Phase 2) and the zip write (Phase 3) consume the same byte
-        // buffer. Two independent Files.readAllBytes calls would otherwise
-        // open a window where the hash-time read fails (transient AV lock,
-        // Windows sharing violation, etc.) while the write-time read
-        // succeeds — flipping the zip contents without flipping the patch
-        // version. Failed reads here drop the armor texture from BOTH the
-        // hash and the zip in lockstep, keeping (UUID, version) honest.
+        // Codex round-4/5 fix (I1 + J1): pre-read every armor AND entity PNG
+        // ONCE here so the hash (Phase 2) and the zip write (Phase 3)
+        // consume the same byte buffer. Two independent Files.readAllBytes
+        // calls would otherwise open a window where the hash-time read
+        // fails (transient AV lock, Windows sharing violation, etc.) while
+        // the write-time read succeeds — flipping the zip contents without
+        // flipping the patch version. Failed reads here drop the texture
+        // from BOTH the hash and the zip in lockstep, keeping
+        // (UUID, version) honest for cache invalidation.
         Map<String, byte[]> armorTextureBytes = new LinkedHashMap<>();
         if (armorTextureCopies != null && !armorTextureCopies.isEmpty()) {
             for (Map.Entry<String, Path> entry : armorTextureCopies.entrySet()) {
@@ -339,6 +340,28 @@ public final class AutoBedrockPackBuilder {
                             + " — armor attachable AND PNG copy will be skipped for "
                             + "this mapping (Bedrock falls back to vanilla armor).");
                     }
+                }
+            }
+        }
+        // Same lockstep treatment for entity texture overrides (Codex J1):
+        // in-place edits to a Java pack entity PNG must flip the manifest
+        // patch version so Bedrock clients drop their cached pack.
+        Map<String, byte[]> entityTextureBytes = new LinkedHashMap<>();
+        for (Map.Entry<String, Path> entry : effectiveEntityCopies.entrySet()) {
+            String zipPath = entry.getKey();
+            Path source = entry.getValue();
+            if (source == null) {
+                continue;
+            }
+            try {
+                entityTextureBytes.put(zipPath, Files.readAllBytes(source));
+            } catch (IOException ex) {
+                if (logger != null) {
+                    logger.warning("[AutoPack] failed to read entity texture "
+                        + source + " -> " + zipPath + ": "
+                        + ex.getClass().getSimpleName() + ": " + ex.getMessage()
+                        + " — entity override will be skipped for this mapping "
+                        + "(Bedrock falls back to vanilla entity texture).");
                 }
             }
         }
@@ -480,14 +503,13 @@ public final class AutoBedrockPackBuilder {
         // pair stays constant across pack regenerations and the client
         // silently keeps using stale textures or stale attachables.
         String itemTextureJson = buildItemTextureJson(mappings, customIconToTexturePath, logger, debug);
-        // Codex round-2/3/4 fix (G1 + H1 + I1): armor texture iconKeys AND
-        // the pre-read PNG bytes both participate in the patch-version
-        // hash. The pre-read happens at the top of this method so the same
-        // byte buffer drives both the hash here and the zip write below;
-        // any read failure already dropped the entry from armorTextureBytes
-        // so the hash and zip stay in lockstep.
+        // Codex round-2/3/4/5 fix (G1 + H1 + I1 + J1): armor AND entity
+        // textures both feed their PRE-READ PNG bytes into the patch hash.
+        // Hash and zip share the same byte buffer for each texture, so an
+        // in-place PNG edit always flips the manifest version (no
+        // path-only fallback that could mask byte changes).
         int patchVersion = patchVersionFromContent(itemTextureJson, attachableArtifacts,
-            effectiveEntityCopies.keySet(), armorTextureBytes);
+            entityTextureBytes, armorTextureBytes);
         String manifestJson = buildManifestJson(patchVersion);
 
         // Phase 3 — write everything to a sibling .tmp file, then atomic-move
@@ -533,22 +555,14 @@ public final class AutoBedrockPackBuilder {
                     art.getValue().getBytes(StandardCharsets.UTF_8), writtenEntries, logger);
             }
 
-            // Phase 7b: mirror operator-supplied entity textures from the
-            // Java pack(s) into the generated zip. Empty map preserves the
-            // pre-Phase-7b zip layout. Each entry's key is the absolute
-            // Bedrock zip path; the value is the source PNG path on disk.
-            for (Map.Entry<String, Path> entityCopy : effectiveEntityCopies.entrySet()) {
-                String zipEntry = entityCopy.getKey();
-                Path source = entityCopy.getValue();
-                try {
-                    byte[] pngBytes = Files.readAllBytes(source);
-                    putEntryUnique(zos, zipEntry, pngBytes, writtenEntries, logger);
-                } catch (IOException ex) {
-                    if (logger != null) {
-                        logger.warning("[AutoPack] failed to copy entity texture "
-                            + source + " -> " + zipEntry + ": " + ex.getMessage());
-                    }
-                }
+            // Phase 7b (Codex J1 fix): write entity textures from the
+            // pre-read bytes buffer (populated at the top of build()) so
+            // the hash and zip share the same byte sequence. Read failures
+            // already dropped those entries from entityTextureBytes at
+            // planning time, keeping hash and zip in lockstep.
+            for (Map.Entry<String, byte[]> entityCopy : entityTextureBytes.entrySet()) {
+                putEntryUnique(zos, entityCopy.getKey(), entityCopy.getValue(),
+                    writtenEntries, logger);
             }
 
             // Phase 7a: copy armor textures from the pre-read bytes buffer
@@ -610,9 +624,14 @@ public final class AutoBedrockPackBuilder {
             logger.info("[AutoPack] attachables: " + attachableItemCount
                 + " custom item(s) received hold-* animation (mode=" + effectiveConfig.mode() + ")");
         }
-        if (logger != null && !effectiveEntityCopies.isEmpty()) {
-            logger.info("[AutoPack] entity textures: " + effectiveEntityCopies.size()
-                + " override(s) mirrored from Java pack");
+        if (logger != null && !entityTextureBytes.isEmpty()) {
+            int requested = effectiveEntityCopies.size();
+            int written = entityTextureBytes.size();
+            logger.info("[AutoPack] entity textures: " + written
+                + " override(s) mirrored from Java pack"
+                + (written < requested
+                    ? " (" + (requested - written) + " dropped due to read failures)"
+                    : ""));
         }
     }
 
@@ -633,13 +652,13 @@ public final class AutoBedrockPackBuilder {
     private static int patchVersionFromContent(
         String itemTextureJson,
         Map<String, String> attachableArtifacts,
-        java.util.Set<String> entityCopyPaths,
+        Map<String, byte[]> entityTextureBytes,
         Map<String, byte[]> armorTextureBytes
     ) {
         boolean nothingToHash =
             (itemTextureJson == null || itemTextureJson.isEmpty())
             && (attachableArtifacts == null || attachableArtifacts.isEmpty())
-            && (entityCopyPaths == null || entityCopyPaths.isEmpty())
+            && (entityTextureBytes == null || entityTextureBytes.isEmpty())
             && (armorTextureBytes == null || armorTextureBytes.isEmpty());
         if (nothingToHash) {
             return 0;
@@ -664,15 +683,21 @@ public final class AutoBedrockPackBuilder {
                     md.update((byte) 0);
                 }
             }
-            // Phase 7b: include entity texture paths in the hash so a new or
-            // renamed entity override flips the patch version and Bedrock
-            // clients drop their cached zip. Sorting first keeps the hash
-            // stable across HashSet-backed inputs.
-            if (entityCopyPaths != null && !entityCopyPaths.isEmpty()) {
-                List<String> sorted = new ArrayList<>(entityCopyPaths);
+            // Phase 7b (Codex J1 fix): entity texture paths AND pre-read PNG
+            // bytes both flow into the hash. Symmetric with the armor path
+            // below — single byte buffer drives hash and zip write, so
+            // in-place PNG edits always flip the patch version.
+            if (entityTextureBytes != null && !entityTextureBytes.isEmpty()) {
+                List<String> sorted = new ArrayList<>(entityTextureBytes.keySet());
                 java.util.Collections.sort(sorted);
                 for (String path : sorted) {
+                    md.update("entity:".getBytes(StandardCharsets.UTF_8));
                     md.update(path.getBytes(StandardCharsets.UTF_8));
+                    md.update((byte) 0);
+                    byte[] bytes = entityTextureBytes.get(path);
+                    if (bytes != null) {
+                        md.update(bytes);
+                    }
                     md.update((byte) 0);
                 }
             }
