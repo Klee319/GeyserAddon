@@ -50,9 +50,58 @@ CustomModelDataを持つアイテムを自動検出し、Bedrockプレイヤー�
 - 空文字 → 機能無効、vanilla テクスチャフォールバックのみ（既定）
 - フォーマット: `AUTO`（推奨・両方読む） / `LEGACY` / `MODERN`
 
-**3D カスタムモデルが必要な場合:**
+**3D カスタムモデルと手持ち時の見え方:**
 
-GeyserExtra は **2D テクスチャのみ**自動変換します。Java で BlockBench 由来のカスタム形状（剣の刃や独自ジオメトリの装備等）を使っており、Bedrock でも同じ 3D 形状を表示したい場合は、別途 [Kas-tle/java2bedrock](https://github.com/Kas-tle/java2bedrock.sh) などの外部コンバータをご利用ください。出力された BE pack を `plugins/Geyser-Spigot/packs/` に配置すれば auto pack より優先されます（同名 identifier の上書き）。
+GeyserExtra は Java の `display` ブロックと Blockbench `elements` を Bedrock 用 attachable / geometry / animation JSON に自動変換します（既定有効）。プレイヤーが手に持った時の角度・位置・形状が Java と一致するように生成されます。
+
+- `customItems.attachableGeneration.mode`:
+  - `full` (**既定**) — display transform + elements 3D 形状を Bedrock 側に反映
+  - `offsets_only` — display transform のみ反映、3D 形状は 1 枚 quad
+  - `off` — attachable 生成を完全に無効化（既存リリースとバイナリ完全一致）
+- `customItems.attachableGeneration.force_first_person_only` — `hold_third_person` アニメを書き出さない緊急回避フラグ
+- `customItems.attachableGeneration.debug_dump_artifacts` — 生成 JSON を `<plugin>/debug/auto_pack/` に複製保存（将来拡張用、現状は未使用）
+
+軸変換が想定と異なる場合は `paper/.../pack/BedrockGeometryConverter.java` の符号定数 (`ROT_Y_SIGN`, `TRANS_Z_SIGN` 等) を 1 箇所変更してください。実機検証は ValhallaMMO の handheld 武器など 1 件で十分です。
+
+**既知の制限（妥協を明示）:**
+- ブロックモデル（非 `item/`）は対象外
+- マテリアル指定は `entity_alphatest` 固定
+- `display.head` / `display.ground` / `display.fixed` は未対応（手持ち時の slot のみ）
+- per-face UV は Bedrock 側で単一 UV pair に集約
+
+完全な 3D 表現や複雑な multi-layer テクスチャが必要な場合は、別途 [Kas-tle/java2bedrock](https://github.com/Kas-tle/java2bedrock.sh) などの外部コンバータの出力を `plugins/Geyser-Spigot/packs/` に配置することで自動パックを上書きできます。
+
+### PDC-only カスタムアイテムのクラフトリザルト
+
+`CustomModelData` を持たず `PersistentDataContainer` のみで識別されるカスタムアイテム（Oraxen, ItemsAdder, MMOItems, MythicMobs, EcoItems 等）も Bedrock プレイヤーから craft result として見えるようになります。
+
+- 既定で有効（`customItems.pdcEnabled = true`）
+- ロールバックは `customItems.pdcEnabled = false`
+- 安定識別子の抽出順序: 著名プラグイン namespace 完全一致 → キー名ヒント (`item_id`, `custom_id`, `identifier` 等) → 該当なしは登録対象外
+
+**API 制約による注意:** Geyser v2 API には「特定 PDC キー一致」predicate が無いため、`hasComponent("minecraft:custom_data")` を採用しています。**同じベースマテリアル（例: stick）を共有する複数の PDC アイテムは、Bedrock 側でアイコン/3D モデルが最初に登録された定義に集約されます。** ただし `display.Name` (アイテム名) は Geyser の標準機能で個別に転送されるため、Bedrock のレシピブック / ホバー時には個別の名前で区別可能です。
+
+### 動的 URL リソースパック対応
+
+プラグイン側で URL を保持してサーバー起動時／プレイヤー参加時に動的配信するタイプのリソースパック（VillagerBucket, ItemsAdder, Oraxen 等の一部）に対応します。
+
+```json
+{
+  "customItems": {
+    "dynamicResourcePackUrls": [
+      { "url": "https://cdn.example.com/villager-bucket.zip", "sha1": "abcdef..." },
+      { "url": "https://example.com/oraxen.zip", "sha1": null }
+    ]
+  }
+}
+```
+
+- 複数 URL を列挙可能（順序保持、URL 由来パックは local パックを上書き）
+- SHA-1 指定あり → 厳密ハッシュ検証、不一致時はキャッシュ無効化 + skip
+- SHA-1 未指定 → 24 時間 TTL ベースのキャッシュ
+- HTTP 失敗 / 不正 ZIP / SHA-1 mismatch は WARN ログ + 該当エントリのみ skip、他は継続
+
+**自動検出について:** VillagerBucket のように内部で URL を保持しているプラグインから自動取得する API は現状存在しないため、運用者が当該プラグインの config 等から URL を確認して上記設定に書き写してください。将来 `JavaResourcePackProvider` SPI 経由での自動連携 (interface 宣言済み、本体結線は次フェーズ) を予定しています。
 
 **マッピング名の決定（優先順）:**
 1. PersistentDataContainer の `item_id` 等のキー（複数の標準名に対応）
