@@ -56,18 +56,20 @@ GeyserExtra は Java の `display` ブロックと Blockbench `elements` を Bed
 
 - `customItems.attachableGeneration.mode`:
   - `offsets_only` (**既定**) — display transform を反映、3D 形状は 1 枚 quad で 2D アイコンを Java と同じ角度・位置で持つ。手持ち姿勢は Java と一致、形状はインベントリと同じフラットアイコン。
-  - `full` — `elements` 由来の 3D 形状も反映（opt-in）。**注意:** per-face UV は Bedrock 側で単一 UV ペアに集約するため、多面 Blockbench モデルでは各面のテクスチャ位置が Java と異なるケースが多い。手元検証推奨。
-  - `off` — attachable 生成を完全に無効化。pre-feature 版とバイナリ完全一致（緊急ロールバック）。
+  - `full` — `elements` 由来の 3D 形状も反映 (opt-in)。Phase 6 で per-face UV 変換を実装したため、各面が Java の `faces[*].uv` に対応する正しいテクスチャ位置をサンプリング。高解像度テクスチャ (32×32 / 64×64 等) も `texture_width` / `texture_height` を実 PNG 寸法で declared することで正確にスケール。
+  - `off` — attachable 生成を完全に無効化。pre-feature 版とバイナリ完全一致 (緊急ロールバック)。
 - `customItems.attachableGeneration.force_first_person_only` — `hold_third_person` アニメを書き出さない緊急回避フラグ
 - `customItems.attachableGeneration.debug_dump_artifacts` — 生成 JSON を `<plugin>/debug/auto_pack/` に複製保存（将来拡張用、現状は未使用）
 
 軸変換が想定と異なる場合は `paper/.../pack/BedrockGeometryConverter.java` の符号定数 (`ROT_Y_SIGN`, `TRANS_Z_SIGN` 等) を 1 箇所変更してください。実機検証は ValhallaMMO の handheld 武器など 1 件で十分です。
 
-**既知の制限（妥協を明示）:**
-- ブロックモデル（非 `item/`）は対象外
+**既知の制限 (妥協を明示):**
+- ブロックモデル (非 `item/`) は対象外
 - マテリアル指定は `entity_alphatest` 固定
-- `display.head` / `display.ground` / `display.fixed` は未対応（手持ち時の slot のみ）
-- `mode=full` の per-face UV は Bedrock 側で単一 UV pair に集約（Java と異なるテクスチャ位置のリスクあり）
+- `display.head` / `display.ground` / `display.fixed` は未対応 (手持ち時の slot のみ)
+- 複数 texture variable (`#layer0` 以外) を使うモデルは default texture のみ反映 (Bedrock `material_instances` 未実装、Phase 7 候補)
+- Java face 単位の `rotation: 90/180/270` (テクスチャ回転) は Bedrock 1.16.0 per-face UV 形式に native equivalent が無いため、該当 face は **non-rendered + WARN ログ**。可視化したい場合は PNG 側でテクスチャを pre-rotate して JSON 側の rotation を 0 に。
+- `faces` が空 (または全 face が rotation で skip) の element は **invisible として cube 自体を omit**。Mojang セマンティクス準拠。
 
 完全な 3D 表現や複雑な multi-layer テクスチャが必要な場合は、別途 [Kas-tle/java2bedrock](https://github.com/Kas-tle/java2bedrock.sh) などの外部コンバータの出力を `plugins/Geyser-Spigot/packs/` に配置することで自動パックを上書きできます。
 
