@@ -451,11 +451,11 @@ public final class JavaPackResolver {
                             + "serving previous cache for " + sourceLabel);
                         return extractZip(cacheZip, sourceLabel + " (no-network)", extractSubdir);
                     }
-                    logger.info("[JavaPack] network disabled on primary thread; "
+                    logger.fine("[JavaPack] network disabled on primary thread; "
                         + "skipping " + sourceLabel + " until next async refresh");
                     return null;
                 }
-                logger.info("[JavaPack] downloading resource pack from " + url);
+                logger.fine("[JavaPack] downloading resource pack from " + url);
 
                 // Phase: download into a .partial sibling first so a half-written
                 // body never replaces the previous good cache file. Without this,
@@ -508,10 +508,10 @@ public final class JavaPackResolver {
                     Files.move(partial, cacheZip, StandardCopyOption.REPLACE_EXISTING);
                 }
                 Files.writeString(hashSidecar, actualHash, StandardCharsets.US_ASCII);
-                logger.info("[JavaPack] cached " + sourceLabel + " ("
+                logger.fine("[JavaPack] cached " + sourceLabel + " ("
                     + Files.size(cacheZip) + " bytes, sha1=" + actualHash + ")");
             } else {
-                logger.info("[JavaPack] reusing cached pack " + sourceLabel
+                logger.fine("[JavaPack] reusing cached pack " + sourceLabel
                     + " (no fresh download needed)");
             }
         } catch (IOException ex) {
@@ -522,7 +522,7 @@ public final class JavaPackResolver {
             // Stale-if-error: if a previous cacheZip still exists, serve it so
             // a transient network failure does not blank-out the pack.
             if (Files.isRegularFile(cacheZip)) {
-                logger.info("[JavaPack] serving previous cached pack " + sourceLabel
+                logger.fine("[JavaPack] serving previous cached pack " + sourceLabel
                     + " due to refresh error");
                 return extractZip(cacheZip, sourceLabel + " (stale-if-error)", extractSubdir);
             }
@@ -690,7 +690,7 @@ public final class JavaPackResolver {
                     zis.closeEntry();
                 }
             }
-            logger.info("[JavaPack] extracted " + extracted + " files from "
+            logger.fine("[JavaPack] extracted " + extracted + " files from "
                 + sourceLabel + (skipped > 0 ? " (skipped " + skipped + " unsafe entries)" : ""));
             return extractDir;
         } catch (IOException ex) {

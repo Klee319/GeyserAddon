@@ -60,6 +60,7 @@ public final class ItemMappingRegistry {
      * the mapping has a non-blank {@link CustomItemMapping#pdcIdentifier()}.</p>
      */
     private final Map<String, CustomItemMapping> mappingsByPdcKey;
+    private final Map<String, CustomItemMapping> mappingsByItemModel;
 
     /**
      * Lock for batch operations that require consistency across multiple maps.
@@ -73,6 +74,7 @@ public final class ItemMappingRegistry {
         this.mappingsByName = new ConcurrentHashMap<>();
         this.mappingsByModelData = new ConcurrentHashMap<>();
         this.mappingsByPdcKey = new ConcurrentHashMap<>();
+        this.mappingsByItemModel = new ConcurrentHashMap<>();
         this.batchLock = new ReentrantReadWriteLock();
     }
 
@@ -102,6 +104,10 @@ public final class ItemMappingRegistry {
                     String oldPdcKey = createPdcKey(existing.baseItem(), existing.pdcIdentifier());
                     mappingsByPdcKey.remove(oldPdcKey);
                 }
+                if (existing.hasItemModelId()) {
+                    mappingsByItemModel.remove(createItemModelKey(
+                        existing.baseItem(), existing.itemModelId()));
+                }
             }
 
             // Register in primary storage
@@ -117,6 +123,10 @@ public final class ItemMappingRegistry {
             if (mapping.hasPdcIdentifier()) {
                 String newPdcKey = createPdcKey(mapping.baseItem(), mapping.pdcIdentifier());
                 mappingsByPdcKey.put(newPdcKey, mapping);
+            }
+            if (mapping.hasItemModelId()) {
+                mappingsByItemModel.put(createItemModelKey(
+                    mapping.baseItem(), mapping.itemModelId()), mapping);
             }
 
             LOGGER.fine(() -> "Registered item mapping: " + mapping.name());
@@ -153,6 +163,10 @@ public final class ItemMappingRegistry {
                         String oldPdcKey = createPdcKey(existing.baseItem(), existing.pdcIdentifier());
                         mappingsByPdcKey.remove(oldPdcKey);
                     }
+                    if (existing.hasItemModelId()) {
+                        mappingsByItemModel.remove(createItemModelKey(
+                            existing.baseItem(), existing.itemModelId()));
+                    }
                 }
 
                 mappingsByName.put(mapping.name(), mapping);
@@ -164,6 +178,10 @@ public final class ItemMappingRegistry {
                 if (mapping.hasPdcIdentifier()) {
                     String newPdcKey = createPdcKey(mapping.baseItem(), mapping.pdcIdentifier());
                     mappingsByPdcKey.put(newPdcKey, mapping);
+                }
+                if (mapping.hasItemModelId()) {
+                    mappingsByItemModel.put(createItemModelKey(
+                        mapping.baseItem(), mapping.itemModelId()), mapping);
                 }
             }
 
@@ -194,6 +212,10 @@ public final class ItemMappingRegistry {
                 if (removed.hasPdcIdentifier()) {
                     String pdcKey = createPdcKey(removed.baseItem(), removed.pdcIdentifier());
                     mappingsByPdcKey.remove(pdcKey);
+                }
+                if (removed.hasItemModelId()) {
+                    mappingsByItemModel.remove(createItemModelKey(
+                        removed.baseItem(), removed.itemModelId()));
                 }
                 LOGGER.fine(() -> "Unregistered item mapping: " + name);
             }
@@ -258,6 +280,13 @@ public final class ItemMappingRegistry {
         return Optional.ofNullable(mappingsByPdcKey.get(key));
     }
 
+    public Optional<CustomItemMapping> getByItemModel(String baseItem, String itemModelId) {
+        Objects.requireNonNull(baseItem, "baseItem must not be null");
+        Objects.requireNonNull(itemModelId, "itemModelId must not be null");
+        return Optional.ofNullable(mappingsByItemModel.get(
+            createItemModelKey(baseItem, itemModelId)));
+    }
+
     /**
      * Gets all mappings for a specific base item.
      *
@@ -317,6 +346,7 @@ public final class ItemMappingRegistry {
             mappingsByName.clear();
             mappingsByModelData.clear();
             mappingsByPdcKey.clear();
+            mappingsByItemModel.clear();
             LOGGER.fine("Cleared all item mappings");
         } finally {
             batchLock.writeLock().unlock();
@@ -382,7 +412,7 @@ public final class ItemMappingRegistry {
             }
 
             Files.writeString(path, json);
-            LOGGER.info(() -> "Saved " + mappingsByName.size() + " item mappings to " + path);
+            LOGGER.fine(() -> "Saved " + mappingsByName.size() + " item mappings to " + path);
         } finally {
             batchLock.readLock().unlock();
         }
@@ -426,6 +456,9 @@ public final class ItemMappingRegistry {
         // to hasComponent("minecraft:custom_data") when registering with Geyser.
         if (mapping.hasPdcIdentifier()) {
             json.put("pdc_identifier", mapping.pdcIdentifier());
+        }
+        if (mapping.hasItemModelId()) {
+            json.put("item_model", mapping.itemModelId());
         }
 
         // Phase 7a: armor metadata (slot + asset_id). Persisted so the
@@ -474,6 +507,7 @@ public final class ItemMappingRegistry {
             mappingsByName.clear();
             mappingsByModelData.clear();
             mappingsByPdcKey.clear();
+            mappingsByItemModel.clear();
 
             for (CustomItemMapping mapping : mappings) {
                 if (mapping != null) {
@@ -486,10 +520,14 @@ public final class ItemMappingRegistry {
                         String pdcKey = createPdcKey(mapping.baseItem(), mapping.pdcIdentifier());
                         mappingsByPdcKey.put(pdcKey, mapping);
                     }
+                    if (mapping.hasItemModelId()) {
+                        mappingsByItemModel.put(createItemModelKey(
+                            mapping.baseItem(), mapping.itemModelId()), mapping);
+                    }
                 }
             }
 
-            LOGGER.info(() -> "Loaded " + mappingsByName.size() + " item mappings from " + path);
+            LOGGER.fine(() -> "Loaded " + mappingsByName.size() + " item mappings from " + path);
         } finally {
             batchLock.writeLock().unlock();
         }
@@ -568,6 +606,7 @@ public final class ItemMappingRegistry {
             boolean register = getBooleanOrDefault(itemDef, "register", true);
             // Optional PDC identifier — null for legacy CMD-only JSON files.
             String pdcIdentifier = getStringOrNull(itemDef, "pdc_identifier");
+            String itemModelId = getStringOrNull(itemDef, "item_model");
 
             // Phase 7a: optional armor metadata. Older JSON files lack the
             // "armor" object, in which case the mapping carries no armor data
@@ -579,7 +618,9 @@ public final class ItemMappingRegistry {
             // Java item at runtime. Older builds occasionally wrote CMD=0
             // sentinels into custom_items.json; drop those entries here rather
             // than letting them survive into the registry.
-            if (customModelData <= 0 && (pdcIdentifier == null || pdcIdentifier.isBlank())) {
+            if (customModelData <= 0
+                && (pdcIdentifier == null || pdcIdentifier.isBlank())
+                && (itemModelId == null || itemModelId.isBlank())) {
                 LOGGER.fine(() -> "Skipping mapping '" + name
                     + "' (base=" + baseItem + ") — no CMD and no PDC identifier");
                 return null;
@@ -596,7 +637,8 @@ public final class ItemMappingRegistry {
                 creativeGroup,
                 register,
                 pdcIdentifier,
-                armor
+                armor,
+                itemModelId
             );
         } catch (Exception e) {
             LOGGER.warning(() -> "Failed to parse item definition: " + e.getMessage());
@@ -699,5 +741,9 @@ public final class ItemMappingRegistry {
      */
     private String createPdcKey(String baseItem, String pdcIdentifier) {
         return baseItem + "::pdc::" + pdcIdentifier;
+    }
+
+    private String createItemModelKey(String baseItem, String itemModelId) {
+        return baseItem + "::item_model::" + itemModelId;
     }
 }

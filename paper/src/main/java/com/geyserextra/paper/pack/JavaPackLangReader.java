@@ -127,7 +127,7 @@ public final class JavaPackLangReader {
             }
         }
 
-        logger.info("[JavaPackLang] loaded " + totalKeys + " translation keys across "
+        logger.fine("[JavaPackLang] loaded " + totalKeys + " translation keys across "
             + byLocale.size() + " locale file(s) (primary locale: " + primaryLocale + ")");
         return new JavaPackLangReader(byLocale, primaryLocale, logger);
     }

@@ -287,7 +287,7 @@ public final class SkullRegistry {
                 }
             }
 
-            LOGGER.info(() -> "Loaded " + skullsByHash.size() + " skull data entries from " + path);
+            LOGGER.fine(() -> "Loaded " + skullsByHash.size() + " skull data entries from " + path);
         } finally {
             batchLock.writeLock().unlock();
         }

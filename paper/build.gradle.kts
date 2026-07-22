@@ -1,9 +1,33 @@
+import java.net.URI
+
 plugins {
     id("com.gradleup.shadow")
 }
 
+val minecraftDataVersion = "1.21.11"
+// Bedrock protocol version dir in minecraft-data carrying blocksJ2B.json
+// (Java block id -> Bedrock block id renames like cobweb -> web).
+val minecraftDataBedrockVersion = "1.21.111"
+val bedrockSamplesBase =
+    "https://raw.githubusercontent.com/Mojang/bedrock-samples/main/resource_pack"
+val minecraftDataBase =
+    "https://raw.githubusercontent.com/PrismarineJS/minecraft-data/master/data/pc/$minecraftDataVersion"
+val minecraftDataBedrockBase =
+    "https://raw.githubusercontent.com/PrismarineJS/minecraft-data/master/data/bedrock/$minecraftDataBedrockVersion"
+val bedrockSamplesCacheDir = layout.buildDirectory.dir("bedrock-samples-cache")
+val minecraftDataCacheDir = layout.buildDirectory.dir("minecraft-data-cache/$minecraftDataVersion")
+val generatedResourcesDir = layout.buildDirectory.dir("generated/resources")
+val generatedVanillaTexturePaths = generatedResourcesDir.map { it.file("bedrock/vanilla_texture_paths.json") }
+
+sourceSets {
+    create("generate") {
+        java.srcDir("src/generate/java")
+    }
+}
+
 dependencies {
     implementation(project(":core"))
+    "generateImplementation"("com.google.code.gson:gson:2.10.1")
     compileOnly("io.papermc.paper:paper-api:1.21.11-R0.1-SNAPSHOT")
     // Why 2.10.0-SNAPSHOT: matches the extension module so both halves of the plugin
     // compile against the same Geyser API surface. The v2 custom item types
@@ -24,6 +48,110 @@ dependencies {
 
 tasks.test {
     useJUnitPlatform()
+}
+
+val refreshBedrockSamples = providers.gradleProperty("refreshBedrockSamples")
+    .map { it.equals("true", ignoreCase = true) }
+    .orElse(false)
+val refreshMinecraftData = providers.gradleProperty("refreshMinecraftData")
+    .map { it.equals("true", ignoreCase = true) }
+    .orElse(false)
+
+val downloadBedrockSamples by tasks.registering {
+    val itemTexture = bedrockSamplesCacheDir.map { it.file("item_texture.json") }
+    val terrainTexture = bedrockSamplesCacheDir.map { it.file("terrain_texture.json") }
+    val manifest = bedrockSamplesCacheDir.map { it.file("manifest.json") }
+    outputs.files(itemTexture, terrainTexture, manifest)
+
+    doLast {
+        val cache = bedrockSamplesCacheDir.get().asFile
+        val forceRefresh = refreshBedrockSamples.get()
+        cache.mkdirs()
+        listOf(
+            "textures/item_texture.json" to itemTexture.get().asFile,
+            "textures/terrain_texture.json" to terrainTexture.get().asFile,
+            "manifest.json" to manifest.get().asFile
+        ).forEach { (remotePath, localFile) ->
+            if (forceRefresh || !localFile.exists()) {
+                URI("$bedrockSamplesBase/$remotePath").toURL().openStream().use { input ->
+                    localFile.outputStream().use { output -> input.copyTo(output) }
+                }
+            }
+        }
+    }
+}
+
+val downloadMinecraftData by tasks.registering {
+    val itemsJson = minecraftDataCacheDir.map { it.file("items.json") }
+    val blocksJson = minecraftDataCacheDir.map { it.file("blocks.json") }
+    val blocksJ2BJson = minecraftDataCacheDir.map { it.file("blocksJ2B.json") }
+    outputs.files(itemsJson, blocksJson, blocksJ2BJson)
+
+    doLast {
+        val cache = minecraftDataCacheDir.get().asFile
+        val forceRefresh = refreshMinecraftData.get()
+        cache.mkdirs()
+        listOf(
+            "$minecraftDataBase/items.json" to itemsJson.get().asFile,
+            "$minecraftDataBase/blocks.json" to blocksJson.get().asFile,
+            "$minecraftDataBedrockBase/blocksJ2B.json" to blocksJ2BJson.get().asFile
+        ).forEach { (remoteUrl, localFile) ->
+            if (forceRefresh || !localFile.exists()) {
+                URI(remoteUrl).toURL().openStream().use { input ->
+                    localFile.outputStream().use { output -> input.copyTo(output) }
+                }
+            }
+        }
+    }
+}
+
+val generateVanillaTexturePaths by tasks.registering(JavaExec::class) {
+    group = "build"
+    description = "Generate bedrock/vanilla_texture_paths.json from Mojang bedrock-samples"
+    dependsOn("compileGenerateJava", downloadBedrockSamples, downloadMinecraftData)
+    classpath = sourceSets["generate"].runtimeClasspath
+    mainClass.set("com.geyserextra.paper.pack.generate.BedrockVanillaTextureMapGenerator")
+    val itemTexture = bedrockSamplesCacheDir.map { it.file("item_texture.json") }
+    val terrainTexture = bedrockSamplesCacheDir.map { it.file("terrain_texture.json") }
+    val manifest = bedrockSamplesCacheDir.map { it.file("manifest.json") }
+    val itemsJson = minecraftDataCacheDir.map { it.file("items.json") }
+    val blocksJson = minecraftDataCacheDir.map { it.file("blocks.json") }
+    val blocksJ2BJson = minecraftDataCacheDir.map { it.file("blocksJ2B.json") }
+    args(
+        itemTexture.get().asFile,
+        terrainTexture.get().asFile,
+        manifest.get().asFile,
+        itemsJson.get().asFile,
+        blocksJson.get().asFile,
+        blocksJ2BJson.get().asFile,
+        generatedVanillaTexturePaths.get().asFile
+    )
+    inputs.files(
+        itemTexture,
+        terrainTexture,
+        manifest,
+        itemsJson,
+        blocksJson,
+        blocksJ2BJson,
+        sourceSets.named("generate").map { it.allJava }
+    )
+    inputs.property("minecraftDataVersion", minecraftDataVersion)
+    inputs.property("minecraftDataBedrockVersion", minecraftDataBedrockVersion)
+    outputs.file(generatedVanillaTexturePaths)
+}
+
+sourceSets.named("main") {
+    resources {
+        srcDir(generatedResourcesDir)
+    }
+}
+
+tasks.named("compileJava") {
+    dependsOn(generateVanillaTexturePaths)
+}
+
+tasks.named<ProcessResources>("processResources") {
+    dependsOn(generateVanillaTexturePaths)
 }
 
 // Surface every deprecated / marked-for-removal API call at build time so

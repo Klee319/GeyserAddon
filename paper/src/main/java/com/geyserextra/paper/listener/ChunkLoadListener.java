@@ -103,7 +103,7 @@ public final class ChunkLoadListener implements Listener {
             int discovered = scanner.scanChunk(chunk);
 
             if (discovered > 0 && plugin.getGeyserExtraConfig().general().debugMode()) {
-                plugin.getLogger().info(() -> String.format(
+                plugin.getLogger().fine(() -> String.format(
                     "Chunk [%d, %d] in %s: discovered %d skulls",
                     chunk.getX(),
                     chunk.getZ(),

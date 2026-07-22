@@ -47,7 +47,7 @@ public final class WorldSkullScanner {
 
         for (World world : Bukkit.getWorlds()) {
             if (plugin.getGeyserExtraConfig().general().debugMode()) {
-                plugin.getLogger().info("[WorldSkullScanner] Scanning world: " + world.getName());
+                plugin.getLogger().fine("[WorldSkullScanner] Scanning world: " + world.getName());
             }
 
             for (Chunk chunk : world.getLoadedChunks()) {
@@ -58,7 +58,7 @@ public final class WorldSkullScanner {
             }
         }
 
-        plugin.getLogger().info("[WorldSkullScanner] Scanned " + totalChunks + " chunks, found "
+        plugin.getLogger().fine("[WorldSkullScanner] Scanned " + totalChunks + " chunks, found "
             + totalSkulls + " skull blocks, discovered " + totalDiscovered + " unique textures");
 
         return totalDiscovered;
@@ -119,21 +119,12 @@ public final class WorldSkullScanner {
      */
     public void scheduleDelayedScan(long delayTicks) {
         plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
-            plugin.getLogger().info("Scanning all worlds for custom skulls...");
+            plugin.getLogger().fine("Scanning all worlds for custom skulls...");
             int discovered = scanAllWorlds();
-            plugin.getLogger().info("World skull scan complete. Discovered " + discovered + " unique skull textures.");
+            plugin.getLogger().fine("World skull scan complete. Discovered " + discovered + " unique skull textures.");
 
-            // Save to shared folder
-            plugin.getServer().getScheduler().runTaskAsynchronously(plugin, () -> {
-                try {
-                    plugin.getSkullRegistry().save(
-                        plugin.getSharedFolder().resolve("skulls.json")
-                    );
-                    plugin.getLogger().info("Saved skulls to shared folder.");
-                } catch (Exception e) {
-                    plugin.getLogger().warning("Failed to save skulls: " + e.getMessage());
-                }
-            });
+            // Save through the shared serializer without rebuilding the live ZIP.
+            plugin.saveRegistryMetadataAsync();
         }, delayTicks);
     }
 }

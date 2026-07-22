@@ -35,6 +35,19 @@ CustomModelDataを持つアイテムを自動検出し、Bedrockプレイヤー�
 
 これにより Bedrock プレイヤーも **Java と同じ 2D アイテムテクスチャ**で表示されます。
 
+Modern pack の直接 `minecraft:item_model` にも対応します。たとえば
+`assets/trinityforge/items/gui/node_locked.json` は
+`trinityforge:gui/node_locked` として再帰走査されます。リソースパックだけでは
+Java のベースアイテムを特定できないため、GUI・レシピ・プレイヤー所持品で実際の
+ItemStackを初めて検出した時に `(base item, item_model)` mappingを保存し、次回の
+サーバー再起動でGeyser登録とテクスチャ配信を有効にします。
+
+**自動パックの更新タイミング:** Paper側は稼働中の配信済みZIPを変更せず、
+`geyserextra_auto.pending.zip` を次回起動用に生成します。次回のGeyser
+pre-initializeで内容を検証してからactive ZIPへ昇格するため、キャッシュ済み
+hash/sizeと配信バイト列の不一致を防ぎます。新規item_modelを初めて検出した場合は、
+mappingとpending packの生成後にサーバー全体を再起動してください。
+
 **設定例:**
 ```json
 {
@@ -55,11 +68,27 @@ CustomModelDataを持つアイテムを自動検出し、Bedrockプレイヤー�
 GeyserExtra は Java の `display` ブロックと Blockbench `elements` を Bedrock 用 attachable / geometry / animation JSON に自動変換します。プレイヤーが手に持った時の角度・位置・形状が Java に近づくように生成されます。
 
 - `customItems.attachableGeneration.mode`:
-  - `offsets_only` (**既定**) — display transform を反映、3D 形状は 1 枚 quad で 2D アイコンを Java と同じ角度・位置で持つ。手持ち姿勢は Java と一致、形状はインベントリと同じフラットアイコン。
-  - `full` — `elements` 由来の 3D 形状も反映 (opt-in)。Phase 6 で per-face UV 変換を実装したため、各面が Java の `faces[*].uv` に対応する正しいテクスチャ位置をサンプリング。高解像度テクスチャ (32×32 / 64×64 等) も `texture_width` / `texture_height` を実 PNG 寸法で declared することで正確にスケール。
+  - `offsets_only` (**既定**) — display transform を反映。`elements` があるモデルは手持ち時の大きな移動量を正しく扱うため3D形状へ自動昇格し、`elements` がないモデルのみフラットアイコンを使用。
+  - `full` — `elements` 由来の 3D 形状を反映。Phase 6 で per-face UV 変換を実装したため、各面が Java の `faces[*].uv` に対応する正しいテクスチャ位置をサンプリング。高解像度テクスチャ (32×32 / 64×64 等) も `texture_width` / `texture_height` を実 PNG 寸法で declared することで正確にスケール。
   - `off` — attachable 生成を完全に無効化。pre-feature 版とバイナリ完全一致 (緊急ロールバック)。
 - `customItems.attachableGeneration.force_first_person_only` — `hold_third_person` アニメを書き出さない緊急回避フラグ
 - `customItems.attachableGeneration.debug_dump_artifacts` — 生成 JSON を `<plugin>/debug/auto_pack/` に複製保存（将来拡張用、現状は未使用）
+- **一人称／三人称の変換方式**: `elements` を持つ 3D モデルは、GeyserMC 公式コンバータ [Rainbow](https://github.com/GeyserMC/Rainbow) と同型の**単一 bone**（`binding` + 変換後キューブ bounds 中心 pivot + cubes）に、FP/TP 両方の AnimationMapper 式を載せます。FP: rotation `(-90+ry, -rz, rx)` / position `(-ty, 12.5+tz, tx)`。TP: rotation `(90, -rz, -ry)` / position `(-tx, 12.5+tz, -ty)`。固定 pivot `[0,8,0]` の多段チェーンは使いません。平面アイテム (elements なし、`texture_meshes` 系) と、`firstPersonBasePose` を明示したエスケープハッチ時のみ従来の java2bedrock 分解を使用します。
+- `customItems.attachableGeneration.firstPersonBasePose` — 一人称視点の基準姿勢の**手動上書き**。設定すると 3D モデルも Rainbow 変換ではなくこの姿勢 + java2bedrock 分解回転で描画されます (自動変換が合わないモデル向けのエスケープハッチ)。未設定時の平面アイテム用既定値は java2bedrock 由来 (rotation `[90, 60, -40]`, position `[4, 10, 4]`, scale `1.5`):
+
+```json
+{
+  "customItems": {
+    "attachableGeneration": {
+      "firstPersonBasePose": {
+        "rotation": [90, 60, -40],
+        "position": [4, 10, 4],
+        "scale": 1.5
+      }
+    }
+  }
+}
+```
 
 軸変換が想定と異なる場合は `paper/.../pack/BedrockGeometryConverter.java` の符号定数 (`ROT_Y_SIGN`, `TRANS_Z_SIGN` 等) を 1 箇所変更してください。実機検証は ValhallaMMO の handheld 武器など 1 件で十分です。
 
@@ -70,8 +99,25 @@ GeyserExtra は Java の `display` ブロックと Blockbench `elements` を Bed
 - 複数 texture variable (`#layer0` 以外) を使うモデルは default texture のみ反映 (Bedrock `material_instances` 未実装、Phase 7 候補)
 - Java face 単位のテクスチャ rotation サポート:
   - `0` / `180` — ✓ 完全対応 (180° は Bedrock の negative uv_size で表現)
-  - `90` / `270` — ✗ Bedrock 1.16.0 per-face UV では U/V 軸入れ替えを表現できないため、該当 face は **non-rendered + WARN ログ**。可視化したい場合は PNG 側でテクスチャを pre-rotate して JSON 側の rotation を 0 に。
-- `faces` が空 (または全 face が rotation で skip) の element は **invisible として cube 自体を omit**。Mojang セマンティクス準拠。
+  - `90` / `270` — △ Bedrock 1.16.0 per-face UV では U/V 軸入れ替えを表現できないため、該当 face は **rotation 0 として近似描画** (FINE ログのみ)。正確に一致させたい場合は PNG 側でテクスチャを pre-rotate して JSON 側の rotation を 0 に。
+- `faces` が空の element は **invisible として cube 自体を omit**。Mojang セマンティクス準拠。
+
+**インベントリアイコンの `display.gui` 焼き込み:**
+
+Java はインベントリアイコンも 3D モデルを `display.gui` の変換 (scale / rotation / translation) 付きでレンダリングしますが、Bedrock はスプライト PNG を等倍表示するだけです。GeyserExtra はパック生成時に `display.gui` の 2D 表現可能成分 (X/Y scale, Z rotation, X/Y translation) をアイコン PNG に焼き込み、Java 版とアイコンサイズが揃うようにします (例: ValhallaMMO 武器の gui scale `1.3913`)。X/Y 軸の rotation 成分は平面スプライトでは表現できないため無視されます (正面向き `[90, 0, 0]` 等は元々 no-op)。
+
+**カスタムアイテムのCTチャージゲージ:**
+
+GeyserExtra は各 CMD/PDC マッピングに `geyserextra:<mapping名>` という固有の Bedrock cooldown category を割り当てます。Bedrock プレイヤーに限り、次のCTを使用中／直前使用のカスタムアイテム固有 category へミラーします。
+
+- `Player#setCooldown(Material, ticks)`（および素材 group `minecraft:<item>`）
+- 任意プラグインの `NamespacedKey` group（例: `someplugin:ability`）— 手持ち・直近のインタラクト／近接攻撃で帰属したカスタムアイテムへミラー
+
+これにより、同じ `golden_sword` 素材を使う別CMD武器の白いインベントリゲージが同期せず、独自 group の武器CTも Bedrock に表示されます。サーバー側の実際の使用制限は元プラグインが設定したCTをそのまま維持します。
+
+**ブロック系カスタムアイコン:**
+
+Geyser v2 の公開APIでは `BLOCK_PLACER` / `useBlockIcon` は non-vanilla item 専用で、バニラ派生 definition には使えません。Java パック由来または明示指定のカスタム PNG があれば、その独自アイコンを登録します。カスタム PNG がない場合、通常アイテムは安全な Bedrock バニラ平面テクスチャだけを別名参照し、ブロックアイテムやバニラアイコンを安全に解決できないアイテムはカスタム定義を登録せず、Geyser の元のバニラアイテム表示へフォールバックします。`textures/blocks/<id>` はブロック面であってアイテムアイコンではないため使用しません。
 
 完全な 3D 表現や複雑な multi-layer テクスチャが必要な場合は、別途 [Kas-tle/java2bedrock](https://github.com/Kas-tle/java2bedrock.sh) などの外部コンバータの出力を `plugins/Geyser-Spigot/packs/` に配置することで自動パックを上書きできます。
 
@@ -86,7 +132,7 @@ GeyserExtra は Java の `display` ブロックと Blockbench `elements` を Bed
 
 **API 制約による注意:** Geyser v2 API には「特定 PDC キー一致」predicate が無いため、`hasComponent("minecraft:custom_data")` を採用しています。**同じベースマテリアル（例: stick）を共有する複数の PDC アイテムは、Bedrock 側でアイコン/3D モデルが最初に登録された定義に集約されます。** ただし `display.Name` (アイテム名) は Geyser の標準機能で個別に転送されるため、Bedrock のレシピブック / ホバー時には個別の名前で区別可能です。
 
-衝突が発生している場合は extension の起動ログに `[CustomItems] PDC collision on minecraft:<base>: N PDC-identified items share this base material...` という WARN 行が 1 件出力されるので、`custom_items.json` を確認して衝突状態を把握できます。
+衝突が発生している場合は extension の起動ログに `[CustomItems] PDC collisions on N base material(s): ...` という集約 WARN が1件出力されるので、`custom_items.json` を確認して衝突状態を把握できます。`N base material(s)` はAPIがN種類に限定されるという意味ではなく、その起動時点で実際に衝突しているベースマテリアルの種類数です。
 
 ### 動的 URL リソースパック対応
 
@@ -108,7 +154,7 @@ GeyserExtra は Java の `display` ブロックと Blockbench `elements` を Bed
 - SHA-1 未指定 → 24 時間 TTL ベースのキャッシュ
 - HTTP 失敗 / 不正 ZIP / SHA-1 mismatch は WARN ログ + 該当エントリのみ skip。前回成功時のキャッシュがあれば継続利用、他エントリは並行処理。
 - **ダウンロードは `.partial` 経由 + atomic move:** HTTP エラーや SHA-1 不一致でも既存 cache は破壊されず、TTL 期間内の poisoned cache を回避。
-- **メインスレッド非ブロック化:** Server tick 上 (`onEnable` / `onDisable`) からの呼び出しはキャッシュのみ参照、HTTP fetch は行わない。`onEnable` 後 2 秒の非同期タスクで初回 fetch + auto-pack 再生成。`customItems.autoReload=true` のときは定期非同期タスクで cache 更新を継続。
+- **メインスレッド非ブロック化:** Server tick 上 (`onEnable` / `onDisable`) からの呼び出しはキャッシュのみ参照し、HTTP fetch は行いません。`onEnable` 後2秒の非同期タスクで初回fetchとcache更新を行いますが、Geyserが起動時に読み込んだauto-pack ZIPは置換しません。取得した新しい内容のパック反映にはサーバー再起動が必要です。`customItems.autoReload=true` のときは定期非同期タスクでcache更新を継続します。
 
 **自動検出について:** VillagerBucket のように内部で URL を保持しているプラグインから自動取得する API は現状存在しないため、運用者が当該プラグインの config 等から URL を確認して上記設定に書き写してください。将来 `JavaResourcePackProvider` SPI 経由での自動連携 (interface 宣言済み、本体結線は次フェーズ) を予定しています。
 
@@ -121,6 +167,36 @@ GeyserExtra は Java の `display` ブロックと Blockbench `elements` を Bed
 
 **ログ出力:**
 PDC無しで自動生成名を使ったアイテムは、スキャンバースト終息後に1行のINFOサマリ（例: `[CustomItems] Auto-registered 50 item(s) without PDC identifier`）として出力。詳細表示は `customItems.pdcWarning` で `FULL` / `COMPACT` / `DISABLED` を選択可能。
+
+### item_model ヒントによる事前登録（1.21.4+ モダン形式パック向け）
+
+1.21.4+ の direct item model 定義（`assets/<ns>/items/<name>.json`）は「どのベースアイテムに適用されるか」の情報を持たないため、パックを配置しただけでは CMD オーバーライドのような自動事前登録ができません（Geyser のカスタムアイテム登録は Java ベースアイテム単位のため）。既定では実行時スキャナが `minecraft:item_model` コンポーネント付き ItemStack を一度観測して初めて登録され、テクスチャの反映にはさらに再起動が必要です。
+
+**ヒントファイル**を置くと、この実行時観測を待たずに初回起動からペアを事前登録できます:
+
+`plugins/GeyserExtra/item_model_hints/<任意名>.json`
+
+```json
+{
+  "entries": [
+    {
+      "item_model": "myplugin:gui/icon_save",
+      "base_item": "minecraft:paper",
+      "display_name": "セーブ"
+    }
+  ]
+}
+```
+
+- ディレクトリ内の `*.json` を全て読み込み（ファイル名順）。他プラグインが自身のヒントファイルを配置する運用も可能
+- `item_model` は namespace 必須。`minecraft:` namespace はバニラ定義予約のため不可
+- `base_item` は `minecraft:paper` 形式または `PAPER` のような素材名（自動で `minecraft:` 正規化）
+- `display_name` は任意
+- 同一 `(base_item, item_model)` ペアの重複は先勝ち + WARN
+- 設定済み Java パックに該当 item model 定義が存在しないヒントは WARN 付きで skip（テクスチャ無し登録による magenta 表示を防止）
+- 同じ `item_model` を複数の `base_item` で使う場合はエントリを複数書く
+
+事前登録されたマッピングは既存パイプライン（direct item model のテクスチャコピー → auto-pack → Extension 登録）にそのまま乗るため、GUI 専用アイテム等プレイヤーが直接触れないアイテムでも初回ビルドから Bedrock に反映されます。
 
 ### 2. カスタムスカル自動マッピング
 

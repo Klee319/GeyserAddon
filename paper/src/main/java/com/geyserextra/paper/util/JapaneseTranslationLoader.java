@@ -98,7 +98,7 @@ public final class JapaneseTranslationLoader {
         }
 
         // Cache miss or outdated: download from Mojang API
-        logger.info("Downloading Japanese translations from Mojang...");
+        logger.fine("Downloading Japanese translations from Mojang...");
         DownloadResult result = downloadJaJpJson();
 
         // Save to cache
@@ -132,7 +132,7 @@ public final class JapaneseTranslationLoader {
             if (translations.isEmpty()) {
                 return null;
             }
-            logger.info("Loaded " + translations.size()
+            logger.fine("Loaded " + translations.size()
                     + " Japanese translations from cache.");
             return translations;
         } catch (Exception e) {
@@ -277,7 +277,7 @@ public final class JapaneseTranslationLoader {
         }
 
         GlobalTranslator.translator().addSource(registry);
-        logger.info("Loaded " + registered + " Japanese translations.");
+        logger.fine("Loaded " + registered + " Japanese translations.");
     }
 
     /**

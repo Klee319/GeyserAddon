@@ -86,6 +86,21 @@ class BedrockGeometryConverterTest {
         }
 
         @Test
+        @DisplayName("up/down faces are point-mirrored (java2bedrock X-mirror convention)")
+        void verticalFacesPointMirrored() {
+            JavaModelGeometry.Element element = singleFaceCube(
+                "up", new float[]{0f, 0f, 16f, 16f}, 0);
+            List<Map<String, Object>> cubes =
+                BedrockGeometryConverter.convertElementsToCubes(
+                    new JavaModelGeometry(List.of(element)), 16, 16, null);
+
+            Map<?, ?> faceUv = (Map<?, ?>) ((Map<?, ?>) cubes.get(0).get("uv")).get("up");
+            // X-mirrored geometry flips top/bottom UV orientation: anchor at
+            // (u2,v2) and walk backwards with negative sizes.
+            assertUv(faceUv, 16f, 16f, -16f, -16f);
+        }
+
+        @Test
         @DisplayName("missing UV defaults to whole texture [0,0,16,16]")
         void missingUvDefault() {
             JavaModelGeometry.Element element = singleFaceCube("north", null, 0);
@@ -160,41 +175,45 @@ class BedrockGeometryConverterTest {
     }
 
     @Nested
-    @DisplayName("rotation 90 / 270 (Bedrock 1.16.0 cannot express -> face skipped)")
+    @DisplayName("rotation 90 / 270 (Bedrock 1.16.0 cannot express -> rendered unrotated)")
     class RotationNinetyAndTwoSeventy {
 
         @Test
-        @DisplayName("rotation=90: face is omitted from output, no exception thrown")
-        void rotation90Skipped() {
+        @DisplayName("rotation=90: face renders with unrotated UV (approximation, no hole)")
+        void rotation90RenderedUnrotated() {
             JavaModelGeometry.Element element = singleFaceCube(
                 "north", new float[]{0f, 0f, 16f, 16f}, 90);
             List<Map<String, Object>> cubes =
                 BedrockGeometryConverter.convertElementsToCubes(
                     new JavaModelGeometry(List.of(element)), 16, 16, null);
 
-            // Element had a face declared but it was rotated 90 -> skipped ->
-            // no surviving faces -> cube itself is omitted (matches Java
-            // "missing face = invisible" semantic that Codex round 2 flagged).
-            assertThat(cubes).isEmpty();
+            // 90° cannot be expressed in per-face UV, but a hole in the model
+            // is far more visible than a mis-rotated texture — the face is
+            // kept and sampled as if rotation were 0.
+            assertThat(cubes).hasSize(1);
+            Map<?, ?> faceUv = (Map<?, ?>) ((Map<?, ?>) cubes.get(0).get("uv")).get("north");
+            assertUv(faceUv, 0f, 0f, 16f, 16f);
         }
 
         @Test
-        @DisplayName("rotation=270: same skip behavior as 90")
-        void rotation270Skipped() {
+        @DisplayName("rotation=270: same unrotated-approximation behavior as 90")
+        void rotation270RenderedUnrotated() {
             JavaModelGeometry.Element element = singleFaceCube(
                 "north", new float[]{0f, 0f, 16f, 16f}, 270);
             List<Map<String, Object>> cubes =
                 BedrockGeometryConverter.convertElementsToCubes(
                     new JavaModelGeometry(List.of(element)), 16, 16, null);
 
-            assertThat(cubes).isEmpty();
+            assertThat(cubes).hasSize(1);
+            Map<?, ?> faceUv = (Map<?, ?>) ((Map<?, ?>) cubes.get(0).get("uv")).get("north");
+            assertUv(faceUv, 0f, 0f, 16f, 16f);
         }
 
         @Test
-        @DisplayName("mixed rotation: rotated face skipped, unrotated face survives")
+        @DisplayName("mixed rotation: both faces render, rotated one falls back to 0")
         void mixedRotationPartial() {
             // Two faces on the same cube: north rotation=0, south rotation=90.
-            // Expected: cube survives with only the north face declared.
+            // Expected: both faces survive; south uses the unrotated UV.
             JavaModelGeometry.Element element = new JavaModelGeometry.Element(
                 new float[]{0f, 0f, 0f}, new float[]{16f, 16f, 16f}, null,
                 Map.of(
@@ -209,7 +228,8 @@ class BedrockGeometryConverterTest {
             @SuppressWarnings("unchecked")
             Map<String, Object> uvMap = (Map<String, Object>) cubes.get(0).get("uv");
             assertThat(uvMap).containsKey("north");
-            assertThat(uvMap).doesNotContainKey("south");
+            assertThat(uvMap).containsKey("south");
+            assertUv((Map<?, ?>) uvMap.get("south"), 0f, 0f, 16f, 16f);
         }
     }
 

@@ -68,6 +68,9 @@ public final class ItemListener implements Listener {
             // Run on main thread to safely access inventory
             plugin.getServer().getScheduler().runTask(plugin, () -> {
                 scanPlayerInventory(player);
+                // Persist newly discovered mappings for the next restart.
+                // The live resource-pack ZIP remains immutable after startup.
+                plugin.saveRegistryMetadataAsync();
             });
         }, 20L);  // Delay 1 second to allow inventory to fully load
 
@@ -113,7 +116,7 @@ public final class ItemListener implements Listener {
         }
 
         if (plugin.getGeyserExtraConfig().general().debugMode()) {
-            plugin.getLogger().info("[InventorySync] Forced inventory update for: " + player.getName()
+            plugin.getLogger().fine("[InventorySync] Forced inventory update for: " + player.getName()
                 + " (Bedrock: " + isBedrockPlayer + ")");
         }
     }
@@ -167,7 +170,7 @@ public final class ItemListener implements Listener {
 
             if (discoveredItems > 0 || discoveredSkulls > 0) {
                 if (plugin.getGeyserExtraConfig().general().debugMode()) {
-                    plugin.getLogger().info(() -> String.format(
+                    plugin.getLogger().fine(() -> String.format(
                         "[GUI Scan] Inventory type: %s, discovered %d items, %d skulls",
                         inventory.getType(),
                         discoveredItems,
@@ -176,6 +179,9 @@ public final class ItemListener implements Listener {
                 }
 
                 // Save immediately if new skulls were discovered
+                if (discoveredItems > 0) {
+                    saveItemsAsync();
+                }
                 if (discoveredSkulls > 0) {
                     saveSkullsAsync();
                 }
@@ -202,7 +208,7 @@ public final class ItemListener implements Listener {
         // Scan the craft result - this catches items where PDC is set at craft time
         scanner.scanItem(result).ifPresent(mapping -> {
             if (plugin.getGeyserExtraConfig().general().debugMode()) {
-                plugin.getLogger().info("[CraftScan] Discovered custom item from craft: " + mapping.name());
+                plugin.getLogger().fine("[CraftScan] Discovered custom item from craft: " + mapping.name());
             }
 
             // Save immediately when new item is discovered
@@ -228,15 +234,7 @@ public final class ItemListener implements Listener {
             return; // Another thread is already saving
         }
 
-        plugin.getServer().getScheduler().runTaskAsynchronously(plugin, () -> {
-            try {
-                plugin.getItemMappingRegistry().save(
-                    plugin.getSharedFolder().resolve("custom_items.json")
-                );
-            } catch (Exception e) {
-                plugin.getLogger().warning("Failed to save custom items: " + e.getMessage());
-            }
-        });
+        plugin.saveRegistryMetadataAsync();
     }
 
     /**
@@ -254,15 +252,7 @@ public final class ItemListener implements Listener {
             return;
         }
 
-        plugin.getServer().getScheduler().runTaskAsynchronously(plugin, () -> {
-            try {
-                plugin.getSkullRegistry().save(
-                    plugin.getSharedFolder().resolve("skulls.json")
-                );
-            } catch (Exception e) {
-                plugin.getLogger().warning("Failed to save skulls: " + e.getMessage());
-            }
-        });
+        plugin.saveRegistryMetadataAsync();
     }
 
     /**
@@ -289,7 +279,7 @@ public final class ItemListener implements Listener {
         // Scan the held item immediately (lightweight operation)
         scanner.scanItem(heldItem).ifPresent(mapping -> {
             if (plugin.getGeyserExtraConfig().general().debugMode()) {
-                plugin.getLogger().info(() -> String.format(
+                plugin.getLogger().fine(() -> String.format(
                     "Player %s held custom item: %s",
                     player.getName(),
                     mapping.name()
@@ -311,14 +301,14 @@ public final class ItemListener implements Listener {
         PlayerInventory inventory = player.getInventory();
 
         if (plugin.getGeyserExtraConfig().general().debugMode()) {
-            plugin.getLogger().info("[ScanDebug] Scanning " + player.getName() + " inventory, size: " + inventory.getSize());
+            plugin.getLogger().fine("[ScanDebug] Scanning " + player.getName() + " inventory, size: " + inventory.getSize());
             int itemCount = 0;
             for (ItemStack item : inventory.getContents()) {
                 if (item != null && item.getType() != Material.AIR) {
                     itemCount++;
                 }
             }
-            plugin.getLogger().info("[ScanDebug] Non-empty slots: " + itemCount);
+            plugin.getLogger().fine("[ScanDebug] Non-empty slots: " + itemCount);
         }
 
         int discoveredItems = scanner.scanInventory(inventory);
@@ -342,7 +332,7 @@ public final class ItemListener implements Listener {
         if (plugin.getGeyserExtraConfig().general().debugMode()) {
             if (discoveredItems > 0) {
                 int finalDiscoveredItems = discoveredItems;
-                plugin.getLogger().info(() -> String.format(
+                plugin.getLogger().fine(() -> String.format(
                     "Scanned player %s inventory, discovered %d custom items",
                     player.getName(),
                     finalDiscoveredItems
@@ -350,7 +340,7 @@ public final class ItemListener implements Listener {
             }
             if (discoveredSkulls > 0) {
                 int finalDiscoveredSkulls = discoveredSkulls;
-                plugin.getLogger().info(() -> String.format(
+                plugin.getLogger().fine(() -> String.format(
                     "Scanned player %s inventory, discovered %d custom skulls",
                     player.getName(),
                     finalDiscoveredSkulls

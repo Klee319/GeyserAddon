@@ -61,11 +61,12 @@ public final class DiscordSRVSkinHook implements Listener {
      * Scheduling registration 2 seconds later ensures DiscordSRV.api is available.
      */
     public void tryRegister() {
-        try {
-            Class.forName("github.scarsz.discordsrv.DiscordSRV");
-            LOGGER.fine("[DiscordSRV] DiscordSRV class found, initializing avatar hook...");
-        } catch (ClassNotFoundException e) {
-            LOGGER.info("[DiscordSRV] DiscordSRV not installed, skipping avatar hook");
+        // isPluginEnabled (not Class.forName): the DiscordSRV JAR being on
+        // disk is not enough — if the plugin failed to start (e.g. missing
+        // bot token) its classloader is closed and any static reference to
+        // DiscordSRV.api later throws NoClassDefFoundError.
+        if (!plugin.getServer().getPluginManager().isPluginEnabled("DiscordSRV")) {
+            LOGGER.fine("[DiscordSRV] DiscordSRV not installed or not enabled, skipping avatar hook");
             return;
         }
 
@@ -75,13 +76,24 @@ public final class DiscordSRVSkinHook implements Listener {
 
         // Delay DiscordSRV API registration to ensure it's fully initialized
         plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
+            // DiscordSRV may have been disabled during the 2-second window
+            // (it self-disables on failed Discord connections). Re-check so
+            // we don't touch a class from a closed plugin classloader.
+            if (!plugin.getServer().getPluginManager().isPluginEnabled("DiscordSRV")) {
+                LOGGER.fine("[DiscordSRV] DiscordSRV disabled before hook registration, skipping");
+                return;
+            }
             try {
                 DiscordSRV.api.subscribe(this);
                 registered = true;
-                LOGGER.info("[DiscordSRV] Avatar hook registered for Bedrock players");
-            } catch (Exception e) {
-                LOGGER.warning("[DiscordSRV] Failed to register avatar hook: " + e.getMessage());
-                e.printStackTrace();
+                LOGGER.fine("[DiscordSRV] Avatar hook registered for Bedrock players");
+            } catch (Exception | LinkageError e) {
+                // LinkageError covers NoClassDefFoundError when DiscordSRV's
+                // classloader vanished between the check and the call. One
+                // compact line — the avatar hook is cosmetic, not critical.
+                LOGGER.warning("[DiscordSRV] Failed to register avatar hook ("
+                    + e.getClass().getSimpleName() + ": " + e.getMessage()
+                    + ") — Bedrock avatar replacement disabled.");
             }
         }, 40L); // 2 second delay
     }
@@ -95,8 +107,8 @@ public final class DiscordSRVSkinHook implements Listener {
         try {
             DiscordSRV.api.unsubscribe(this);
             registered = false;
-        } catch (Exception e) {
-            // DiscordSRV may already be unloaded
+        } catch (Exception | LinkageError e) {
+            // DiscordSRV may already be unloaded (classloader closed)
         }
     }
 

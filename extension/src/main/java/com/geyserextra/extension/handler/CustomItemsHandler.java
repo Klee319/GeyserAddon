@@ -4,6 +4,7 @@
  */
 package com.geyserextra.extension.handler;
 
+import com.geyserextra.core.util.CustomItemCooldownGroups;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
@@ -14,6 +15,8 @@ import org.geysermc.geyser.api.extension.Extension;
 import org.geysermc.geyser.api.item.custom.NonVanillaCustomItemData;
 import org.geysermc.geyser.api.item.custom.v2.CustomItemBedrockOptions;
 import org.geysermc.geyser.api.item.custom.v2.CustomItemDefinition;
+import org.geysermc.geyser.api.item.custom.v2.component.java.JavaItemDataComponents;
+import org.geysermc.geyser.api.item.custom.v2.component.java.JavaUseCooldown;
 import org.geysermc.geyser.api.predicate.MinecraftPredicate;
 import org.geysermc.geyser.api.predicate.context.item.ItemPredicateContext;
 import org.geysermc.geyser.api.predicate.item.ItemConditionPredicate;
@@ -30,9 +33,14 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.zip.ZipFile;
 
 /**
  * Handler for loading and registering custom items from shared configuration.
@@ -60,14 +68,16 @@ import java.util.concurrent.atomic.AtomicReference;
  *
  * <p><b>Texture resolution:</b> items are registered with their generated name as
  * both the Geyser item name and the icon key. The companion
- * {@code AutoBedrockPackBuilder} (Paper module) generates a textureless BE pack
- * whose {@code item_texture.json} points each generated icon key at the matching
- * vanilla BE texture path, so BE clients fall back to bundled vanilla textures
- * without operators authoring a custom pack.</p>
+ * {@code AutoBedrockPackBuilder} (Paper module) aliases custom icon keys only
+ * when a safe flat vanilla item texture exists. Block items and unresolved
+ * vanilla atlas entries stay unregistered unless an authored custom texture
+ * exists, allowing Geyser's base-item mapping to retain the exact vanilla
+ * inventory render.</p>
  */
 public class CustomItemsHandler {
 
     private static final String ITEMS_FILE_NAME = "custom_items.json";
+    private static final String BLOCK_ICON_BASES_FILE = "block_icon_bases.json";
 
     /** Bedrock-side namespace for items registered by this extension. */
     private static final String BEDROCK_NAMESPACE = "geyserextra";
@@ -75,6 +85,17 @@ public class CustomItemsHandler {
     private final Extension extension;
     private final Path sharedFolder;
     private final List<ItemMapping> itemMappings;
+    /**
+     * Bare Java ids whose Bedrock inventory icon is a block texture fallback,
+     * mapped to the Bedrock block id ({@code cobweb → web}). Populated from
+     * the Paper-written sidecar for parity with pack generation; icons are
+     * wired through {@code item_texture.json}, not Geyser {@code useBlockIcon}.
+     */
+    private final Map<String, String> blockIconBases;
+    /** Bare Java ids with a safe flat vanilla item texture alias. */
+    private final java.util.Set<String> vanillaTextureBases;
+    /** Generated icon keys backed by authored PNGs in the current auto pack. */
+    private final java.util.Set<String> customIconKeys;
 
     /**
      * Creates a new CustomItemsHandler.
@@ -86,7 +107,11 @@ public class CustomItemsHandler {
         this.extension = extension;
         this.sharedFolder = sharedFolder;
         this.itemMappings = new ArrayList<>();
+        this.blockIconBases = new HashMap<>();
+        this.vanillaTextureBases = new java.util.HashSet<>();
+        this.customIconKeys = new java.util.HashSet<>();
         loadItemMappings();
+        loadBlockIconBases();
     }
 
     /**
@@ -139,7 +164,7 @@ public class CustomItemsHandler {
             String content = Files.readString(itemsFile, StandardCharsets.UTF_8);
             JsonObject root = JsonParser.parseString(content).getAsJsonObject();
             parseItemMappings(root);
-            extension.logger().info("Loaded " + itemMappings.size()
+            extension.logger().debug("Loaded " + itemMappings.size()
                 + " custom item mapping(s) from " + itemsFile.getFileName());
         } catch (IOException e) {
             extension.logger().error("Failed to read custom_items.json ("
@@ -148,6 +173,129 @@ public class CustomItemsHandler {
             extension.logger().error("Failed to parse custom_items.json ("
                 + e.getClass().getSimpleName() + "): " + e.getMessage());
         }
+    }
+
+    private void loadBlockIconBases() {
+        blockIconBases.clear();
+        vanillaTextureBases.clear();
+        customIconKeys.clear();
+        // Bundled generated data is the source of truth for safe flat vanilla
+        // aliases. The runtime sidecar only adds this boot's authored icons.
+        loadBlockIconBasesFromClasspath();
+
+        Path file = sharedFolder.resolve(BLOCK_ICON_BASES_FILE);
+        if (Files.exists(file)) {
+            try {
+            String content = Files.readString(file, StandardCharsets.UTF_8);
+            JsonObject root = JsonParser.parseString(content).getAsJsonObject();
+            JsonElement entries = root.get("useBlockIcon");
+            if (entries != null && entries.isJsonObject()) {
+                // Current form: { "javaName": "bedrockBlockId", ... }
+                JsonObject obj = entries.getAsJsonObject();
+                for (String key : obj.keySet()) {
+                    blockIconBases.put(
+                        key.toLowerCase(Locale.ROOT),
+                        obj.get(key).getAsString().toLowerCase(Locale.ROOT));
+                }
+            } else if (entries != null && entries.isJsonArray()) {
+                // Legacy form (pre Bedrock-id mapping): plain array of Java
+                // names. A stale file from an older Paper jar may survive one
+                // boot; assume the ids match across editions until Paper
+                // rewrites the file.
+                for (JsonElement el : entries.getAsJsonArray()) {
+                    String name = el.getAsString().toLowerCase(Locale.ROOT);
+                    blockIconBases.put(name, name);
+                }
+            }
+            JsonElement customIcons = root.get("customIcons");
+            if (customIcons != null && customIcons.isJsonArray()) {
+                for (JsonElement el : customIcons.getAsJsonArray()) {
+                    customIconKeys.add(el.getAsString().toLowerCase(Locale.ROOT));
+                }
+            }
+            extension.logger().debug("Loaded " + blockIconBases.size()
+                + " block base(s) and " + customIconKeys.size()
+                + " authored icon(s) from " + file.getFileName());
+            } catch (Exception e) {
+                extension.logger().warning("Failed to read " + BLOCK_ICON_BASES_FILE + ": "
+                    + e.getClass().getSimpleName() + ": " + e.getMessage());
+            }
+        }
+        loadCustomIconsFromActivePack();
+    }
+
+    private void loadCustomIconsFromActivePack() {
+        Path pack = sharedFolder.resolve("packs").resolve("geyserextra_auto.zip");
+        if (!Files.isRegularFile(pack)) {
+            return;
+        }
+        try (ZipFile zip = new ZipFile(pack.toFile())) {
+            var entry = zip.getEntry("textures/item_texture.json");
+            if (entry == null) {
+                return;
+            }
+            try (var reader = new java.io.InputStreamReader(
+                zip.getInputStream(entry), StandardCharsets.UTF_8)) {
+                JsonObject root = JsonParser.parseReader(reader).getAsJsonObject();
+                JsonObject textureData = root.getAsJsonObject("texture_data");
+                if (textureData != null) {
+                    for (String key : textureData.keySet()) {
+                        customIconKeys.add(key.toLowerCase(Locale.ROOT));
+                    }
+                }
+            }
+        } catch (Exception e) {
+            extension.logger().warning("Failed to inspect active auto pack icons: "
+                + e.getMessage());
+        }
+    }
+
+    /**
+     * Reads the {@code useBlockIcon} map from the build-time-generated
+     * {@code bedrock/vanilla_texture_paths.json} baked into this jar.
+     * Same data Paper uses, so first-boot behaviour matches later boots.
+     */
+    private void loadBlockIconBasesFromClasspath() {
+        try (var in = CustomItemsHandler.class
+                .getResourceAsStream("/bedrock/vanilla_texture_paths.json")) {
+            if (in == null) {
+                extension.logger().warning("No " + BLOCK_ICON_BASES_FILE
+                    + " sidecar and no bundled vanilla_texture_paths.json — "
+                    + "block-base custom items may lack 3D icons until Paper rebuilds the auto pack.");
+                return;
+            }
+            JsonObject root = JsonParser.parseReader(
+                new java.io.InputStreamReader(in, StandardCharsets.UTF_8)).getAsJsonObject();
+            JsonObject obj = root.getAsJsonObject("useBlockIcon");
+            if (obj != null) {
+                for (String key : obj.keySet()) {
+                    blockIconBases.put(
+                        key.toLowerCase(Locale.ROOT),
+                        obj.get(key).getAsString().toLowerCase(Locale.ROOT));
+                }
+            }
+            JsonObject paths = root.getAsJsonObject("paths");
+            if (paths != null) {
+                for (String key : paths.keySet()) {
+                    vanillaTextureBases.add(key.toLowerCase(Locale.ROOT));
+                }
+            }
+            extension.logger().debug("Loaded " + blockIconBases.size()
+                + " block base(s) and " + vanillaTextureBases.size()
+                + " flat vanilla texture base(s) from bundled defaults");
+        } catch (Exception e) {
+            extension.logger().warning("Failed to read bundled vanilla_texture_paths.json: "
+                + e.getClass().getSimpleName() + ": " + e.getMessage());
+        }
+    }
+
+    private static String bareBaseItemName(String baseItem) {
+        if (baseItem == null) {
+            return "";
+        }
+        int colon = baseItem.indexOf(':');
+        String bare = colon >= 0 ? baseItem.substring(colon + 1) : baseItem;
+        return bare.toLowerCase(Locale.ROOT);
     }
 
     /**
@@ -195,7 +343,7 @@ public class CustomItemsHandler {
 
             boolean register = getBooleanOrDefault(itemDef, "register", true);
             if (!register) {
-                extension.logger().info("Skipping item '" + name + "': register=false");
+                extension.logger().debug("Skipping item '" + name + "': register=false");
                 return null;
             }
 
@@ -203,7 +351,11 @@ public class CustomItemsHandler {
             boolean unbreakable = getBooleanOrDefault(itemDef, "unbreakable", false);
             int damagePredicate = getIntOrDefault(itemDef, "damage_predicate", -1);
             String displayName = getStringOrDefault(itemDef, "display_name", name);
-            String icon = getStringOrDefault(itemDef, "icon", name);
+            // Null means no authored icon was requested. Keeping that
+            // distinction lets registration preserve the exact vanilla base
+            // item render instead of manufacturing a broken custom icon key.
+            String rawIcon = getStringOrDefault(itemDef, "icon", null);
+            String icon = sanitizeIdentifierValue(rawIcon, "icon");
             boolean allowOffhand = getBooleanOrDefault(itemDef, "allow_offhand", true);
             int textureSize = getIntOrDefault(itemDef, "texture_size", 16);
             int creativeCategory = getIntOrDefault(itemDef, "creative_category", 0);
@@ -213,12 +365,13 @@ public class CustomItemsHandler {
             // means the entry is still CMD-only and registers via the legacy
             // legacyCustomModelData predicate path.
             String pdcIdentifier = getStringOrDefault(itemDef, "pdc_identifier", null);
+            String itemModelId = getStringOrDefault(itemDef, "item_model", null);
 
             return new ItemMapping(
                 baseItem, name, customModelData, unbreakable, damagePredicate,
                 displayName, icon, allowOffhand, textureSize,
                 false, null, 0, creativeCategory, creativeGroup,
-                pdcIdentifier);
+                pdcIdentifier, itemModelId);
         } catch (Exception e) {
             extension.logger().warning("Failed to parse item definition: " + e.getMessage());
             return null;
@@ -238,7 +391,8 @@ public class CustomItemsHandler {
             String name = sanitizeIdentifierValue(rawName, "name");
 
             String displayName = getStringOrDefault(itemDef, "display_name", name);
-            String icon = getStringOrDefault(itemDef, "icon", name);
+            String rawIcon = getStringOrDefault(itemDef, "icon", name);
+            String icon = sanitizeIdentifierValue(rawIcon, "icon");
             boolean allowOffhand = getBooleanOrDefault(itemDef, "allow_offhand", true);
             int textureSize = getIntOrDefault(itemDef, "texture_size", 16);
             int creativeCategory = getIntOrDefault(itemDef, "creative_category", 0);
@@ -275,7 +429,10 @@ public class CustomItemsHandler {
      * restart.</p>
      */
     public void registerItems(GeyserDefineCustomItemsEvent event) {
-        extension.logger().info("=== Custom Items Registration ===");
+        // Paper may have just rewritten block_icon_bases.json during this boot.
+        loadBlockIconBases();
+
+        extension.logger().debug("=== Custom Items Registration ===");
         // Fail-safe re-read with rollback.
         // Why snapshot + rollback: loadItemMappings catches I/O / parse errors
         // internally and returns silently with an empty itemMappings list.
@@ -311,7 +468,7 @@ public class CustomItemsHandler {
         }
         int afterCount = itemMappings.size();
         if (afterCount != beforeCount) {
-            extension.logger().info("Mapping count changed after re-read: "
+            extension.logger().debug("Mapping count changed after re-read: "
                 + beforeCount + " -> " + afterCount
                 + " (likely cause: Paper plugin completed its initial scan "
                 + "after this extension was constructed)");
@@ -344,7 +501,9 @@ public class CustomItemsHandler {
                     continue;
                 }
 
-                if (mapping.customModelData <= 0 && !mapping.hasPdcIdentifier()) {
+                if (mapping.customModelData <= 0
+                    && !mapping.hasPdcIdentifier()
+                    && !mapping.hasItemModelId()) {
                     // Vanilla items with CMD<=0 and no PDC identifier would
                     // be registered with no predicate at all, which Geyser
                     // treats as a wholesale override of the base vanilla item
@@ -358,6 +517,19 @@ public class CustomItemsHandler {
                     extension.logger().warning("Skipping " + mapping.name()
                         + " (base=" + mapping.baseItem + ", CMD=" + mapping.customModelData
                         + "): would override the vanilla item itself without a predicate");
+                    skippedDuplicate++;
+                    continue;
+                }
+
+                if (shouldUseVanillaBaseFallback(mapping)) {
+                    // No authored texture and no safe flat vanilla alias.
+                    // Registering a custom Bedrock id would force an icon key
+                    // that either does not exist or represents one block face.
+                    // Leaving the definition absent makes Geyser translate the
+                    // stack through its original vanilla mapping instead.
+                    extension.logger().debug("Leaving " + mapping.name()
+                        + " on vanilla base-item rendering (base="
+                        + mapping.baseItem() + ", no authored flat icon)");
                     skippedDuplicate++;
                     continue;
                 }
@@ -386,7 +558,7 @@ public class CustomItemsHandler {
                 String exClass = t.getClass().getSimpleName();
                 boolean expectedDedup = "CustomItemDefinitionRegisterException".equals(exClass);
                 if (expectedDedup) {
-                    extension.logger().info(
+                    extension.logger().debug(
                         "Skipping " + mapping.name()
                             + " (CMD=" + mapping.customModelData() + "): "
                             + (message != null ? message : exClass));
@@ -405,8 +577,24 @@ public class CustomItemsHandler {
             }
         }
 
-        extension.logger().info("=== Registration Complete: " + registered + " registered, "
+        extension.logger().debug("=== Registration Complete: " + registered + " registered, "
             + skippedDuplicate + " duplicate-skipped, " + failed + " failed ===");
+    }
+
+    /**
+     * Whether registering this mapping would replace a correct vanilla icon
+     * with a missing key or a single terrain face.
+     */
+    private boolean shouldUseVanillaBaseFallback(ItemMapping mapping) {
+        if (mapping.icon() != null && !mapping.icon().isBlank()) {
+            return false;
+        }
+        String generatedIcon = mapping.name().toLowerCase(Locale.ROOT);
+        if (customIconKeys.contains(generatedIcon)) {
+            return false;
+        }
+        String base = bareBaseItemName(mapping.baseItem());
+        return blockIconBases.containsKey(base) || !vanillaTextureBases.contains(base);
     }
 
     /**
@@ -432,17 +620,27 @@ public class CustomItemsHandler {
                 .computeIfAbsent(mapping.baseItem(), k -> new ArrayList<>())
                 .add(mapping.name() + " (pdc=" + mapping.pdcIdentifier() + ")");
         }
+        List<String> collidingBases = new ArrayList<>();
         for (Map.Entry<String, List<String>> entry : pdcByBase.entrySet()) {
             List<String> names = entry.getValue();
             if (names.size() <= 1) {
                 continue;
             }
-            extension.logger().warning(
+            collidingBases.add(entry.getKey() + " (" + names.size() + ")");
+            // Full per-item detail stays available at debug level.
+            extension.logger().debug(
                 "[CustomItems] PDC collision on " + entry.getKey() + ": "
-                    + names.size() + " PDC-identified items share this base material. "
-                    + "Bedrock will render all of them as the first registered definition "
-                    + "(API limitation: Geyser v2 has no PDC-value predicate). "
-                    + "Affected entries: " + String.join(", ", names));
+                    + String.join(", ", names));
+        }
+        if (!collidingBases.isEmpty()) {
+            // One compact line per boot instead of one paragraph per base:
+            // the limitation is static (Geyser v2 has no PDC-value predicate)
+            // so repeating the explanation for every material adds no signal.
+            extension.logger().warning(
+                "[CustomItems] PDC collisions on " + collidingBases.size()
+                    + " base material(s): " + String.join(", ", collidingBases)
+                    + " — multiple PDC items share a base, Bedrock renders the first "
+                    + "registered one (Geyser API limitation; details at debug level)");
         }
     }
 
@@ -457,7 +655,7 @@ public class CustomItemsHandler {
             Map<Identifier, Collection<CustomItemDefinition>> map = event.customItemDefinitions();
             return map != null ? map : Collections.emptyMap();
         } catch (Throwable t) {
-            extension.logger().info(
+            extension.logger().debug(
                 "customItemDefinitions() unavailable; pre-check disabled ("
                     + t.getClass().getSimpleName() + ")");
             return Collections.emptyMap();
@@ -477,9 +675,15 @@ public class CustomItemsHandler {
         CustomItemBedrockOptions.Builder bedrockOptions = CustomItemBedrockOptions.builder()
             .allowOffhand(mapping.allowOffhand);
 
-        if (mapping.icon != null && !mapping.icon.isBlank()) {
-            bedrockOptions.icon(mapping.icon);
-        }
+        // Geyser's public v2 API intentionally marks BLOCK_PLACER as a
+        // non-vanilla-only component. These definitions extend vanilla Java
+        // items, so attempting to attach it always throws
+        // "That component cannot be used for vanilla items" even on current
+        // Geyser builds. Use the generated flat icon instead.
+        String iconKey = (mapping.icon != null && !mapping.icon.isBlank())
+            ? mapping.icon
+            : mapping.name;
+        bedrockOptions.icon(iconKey);
 
         CreativeCategory creativeCategory = mapCreativeCategory(mapping.creativeCategory);
         if (creativeCategory != null) {
@@ -489,14 +693,21 @@ public class CustomItemsHandler {
             }
         }
 
-        CustomItemDefinition.Builder builder = CustomItemDefinition.builder(bedrockId, baseId)
+        Identifier modelId = mapping.hasItemModelId()
+            ? Identifier.of(mapping.itemModelId())
+            : baseId;
+        CustomItemDefinition.Builder builder = CustomItemDefinition.builder(bedrockId, modelId)
             .bedrockOptions(bedrockOptions);
+
+        applyCooldownCategory(builder, mapping);
 
         if (mapping.displayName != null && !mapping.displayName.isBlank()) {
             builder.displayName(mapping.displayName);
         }
 
-        if (mapping.customModelData > 0) {
+        if (mapping.hasItemModelId()) {
+            // The base-item + item-model pair is already the selector.
+        } else if (mapping.customModelData > 0) {
             builder.predicate(ItemRangeDispatchPredicate.legacyCustomModelData(mapping.customModelData));
         } else if (mapping.hasPdcIdentifier()) {
             // PDC-only path: no CMD predicate exists, so we match on the
@@ -521,6 +732,55 @@ public class CustomItemsHandler {
         // / ERROR paths for genuine failures.
         event.register(baseId, builder.build());
         return true;
+    }
+
+    /**
+     * Whether the running Geyser build accepts {@code USE_COOLDOWN} on
+     * vanilla-based definitions. Older builds flag all Java data components
+     * as non-vanilla-only and throw IllegalArgumentException("That component
+     * cannot be used for vanilla items"); newer builds allow them. Detected
+     * on the first failed attempt and disabled for the rest of the run so a
+     * single compact log line replaces 500 stack traces.
+     */
+    private boolean cooldownComponentSupported = true;
+
+    /**
+     * Gives each Bedrock custom item its own {@code minecraft:cooldown}
+     * category.
+     *
+     * <p>The Paper-side cooldown bridge mirrors the base-material cooldown
+     * packet into this mapping-specific group. Using the base material here
+     * would make every CMD/PDC item on that material animate together.</p>
+     *
+     * <p>The 0.05s duration is deliberately near-zero: it is only the
+     * client-side <em>prediction</em> window started whenever the item is
+     * used, and must stay invisible for items that have no real cooldown.
+     * The actual visible duration always comes from the server packet.</p>
+     */
+    private void applyCooldownCategory(CustomItemDefinition.Builder builder, ItemMapping mapping) {
+        if (!cooldownComponentSupported) {
+            return;
+        }
+        String group = CustomItemCooldownGroups.forMapping(mapping.name());
+        if (group == null) {
+            return;
+        }
+        try {
+            builder.component(
+                JavaItemDataComponents.USE_COOLDOWN,
+                JavaUseCooldown.builder()
+                    .seconds(0.05f)
+                    .cooldownGroup(Identifier.of(group))
+                    .build());
+        } catch (IllegalArgumentException e) {
+            // The builder throws before mutating its component map, so the
+            // definition stays valid — the item just loses the cooldown
+            // overlay. Disable further attempts and tell the operator once.
+            cooldownComponentSupported = false;
+            extension.logger().warning("This Geyser build rejects the use_cooldown component on "
+                + "vanilla-based custom items (" + e.getMessage() + "). Cooldown charge overlays "
+                + "for custom items are disabled; update Geyser to a newer build to enable them.");
+        }
     }
 
     /**
@@ -737,9 +997,11 @@ public class CustomItemsHandler {
         if (value == null) {
             return null;
         }
-        String sanitized = value.toLowerCase().replaceAll("[^a-z0-9_\\-./]", "_");
+        String sanitized = value.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9_\\-./]", "_");
         if (!sanitized.equals(value)) {
-            extension.logger().warning("Sanitized " + fieldName + " '" + value + "' -> '" + sanitized
+            // Routine and expected for namespaced ids (foo:bar → foo_bar);
+            // debug-level so 500-item servers don't get a wall of warnings.
+            extension.logger().debug("Sanitized " + fieldName + " '" + value + "' -> '" + sanitized
                 + "' (invalid characters replaced with '_')");
         }
         return sanitized;
@@ -797,7 +1059,8 @@ public class CustomItemsHandler {
         int javaId,
         int creativeCategory,
         String creativeGroup,
-        String pdcIdentifier
+        String pdcIdentifier,
+        String itemModelId
     ) {
         /**
          * Backward-compatible 14-arg constructor used by call sites that
@@ -824,12 +1087,39 @@ public class CustomItemsHandler {
             this(baseItem, name, customModelData, unbreakable, damagePredicate,
                  displayName, icon, allowOffhand, textureSize,
                  isNonVanilla, identifier, javaId, creativeCategory, creativeGroup,
-                 null);
+                 null, null);
+        }
+
+        public ItemMapping(
+            String baseItem,
+            String name,
+            int customModelData,
+            boolean unbreakable,
+            int damagePredicate,
+            String displayName,
+            String icon,
+            boolean allowOffhand,
+            int textureSize,
+            boolean isNonVanilla,
+            String identifier,
+            int javaId,
+            int creativeCategory,
+            String creativeGroup,
+            String pdcIdentifier
+        ) {
+            this(baseItem, name, customModelData, unbreakable, damagePredicate,
+                displayName, icon, allowOffhand, textureSize, isNonVanilla,
+                identifier, javaId, creativeCategory, creativeGroup,
+                pdcIdentifier, null);
         }
 
         /** True when this mapping is identified by a stable PDC value rather than CMD. */
         public boolean hasPdcIdentifier() {
             return pdcIdentifier != null && !pdcIdentifier.isBlank();
+        }
+
+        public boolean hasItemModelId() {
+            return itemModelId != null && !itemModelId.isBlank();
         }
     }
 }

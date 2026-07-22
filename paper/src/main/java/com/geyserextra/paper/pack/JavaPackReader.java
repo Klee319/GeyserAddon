@@ -129,11 +129,68 @@ public final class JavaPackReader {
             }
         }
 
-        logger.info("[JavaPack] scanned " + result.size()
+        logger.fine("[JavaPack] scanned " + result.size()
             + " custom_model_data entries from " + packRoot.getFileName()
             + " (modern: " + modernResolved + "/" + modernAttempted + " resolved, "
             + "legacy: " + legacyResolved + "/" + legacyAttempted + " resolved)");
         return result;
+    }
+
+    /**
+     * Resolves direct 1.21.4+ item-model definitions. The returned key is the
+     * value stored in the Java {@code minecraft:item_model} component.
+     */
+    public Map<String, JavaModelDefinition> scanDirectItemModels() {
+        Path assets = packRoot.resolve("assets");
+        if (!Files.isDirectory(assets)) {
+            return Map.of();
+        }
+        if (textureBasenameIndex.isEmpty()) {
+            textureBasenameIndex = buildTextureBasenameIndex(assets);
+        }
+        Map<String, JavaModelDefinition> result = new HashMap<>();
+        for (Path namespaceDir : listSubdirectories(assets)) {
+            String namespace = namespaceDir.getFileName().toString();
+            Path itemsDir = namespaceDir.resolve("items");
+            if (!Files.isDirectory(itemsDir)) {
+                continue;
+            }
+            for (Path jsonFile : listJsonFilesRecursive(itemsDir)) {
+                try {
+                    Map<String, Object> root = readJsonObject(jsonFile);
+                    Object rawModel = root.get("model");
+                    if (!(rawModel instanceof Map<?, ?>)) {
+                        continue;
+                    }
+                    List<String> modelRefs = new ArrayList<>();
+                    collectModelRefs(rawModel, jsonFile.toString(),
+                        modelRefs, 0);
+                    if (modelRefs.isEmpty()) {
+                        continue;
+                    }
+                    String relative = itemsDir.relativize(jsonFile).toString()
+                        .replace('\\', '/');
+                    relative = stripJsonExtension(relative);
+                    String itemModelId = namespace + ":" + relative;
+                    JavaModelDefinition resolved = null;
+                    for (String modelRef : modelRefs) {
+                        resolved = resolveSingleModelRef(
+                            itemModelId, 0, modelRef);
+                        if (resolved != null) {
+                            break;
+                        }
+                    }
+                    if (resolved != null) {
+                        result.put(itemModelId, resolved);
+                    }
+                } catch (Exception ex) {
+                    logger.log(Level.WARNING,
+                        "[JavaPack] failed to parse direct item model "
+                            + jsonFile + ": " + ex.getMessage(), ex);
+                }
+            }
+        }
+        return Map.copyOf(result);
     }
 
     // Per-scan counters; reset at the top of scan() and incremented inside
@@ -223,7 +280,7 @@ public final class JavaPackReader {
                 // occasionally ship a CMD 0 entry as the "fallback model", so
                 // dropping it here is the correct behaviour for our use case.
                 if (debug) {
-                    logger.info("[JavaPack-legacy] skipped CMD<=0 override on "
+                    logger.fine("[JavaPack-legacy] skipped CMD<=0 override on "
                         + baseItem + " (would clobber the vanilla item itself)");
                 }
                 continue;
@@ -232,7 +289,7 @@ public final class JavaPackReader {
             JavaModelDefinition resolved = resolveSingleModelRef(baseItem, cmd, modelRef);
             if (resolved == null) {
                 if (debug) {
-                    logger.info("[JavaPack-legacy] no texture resolved for "
+                    logger.fine("[JavaPack-legacy] no texture resolved for "
                         + baseItem + " CMD=" + cmd + " -> " + modelRef);
                 }
                 continue;
@@ -242,7 +299,7 @@ public final class JavaPackReader {
             out.put(key, resolved);
             legacyResolved++;
             if (debug) {
-                logger.info("[JavaPack-legacy] " + key + " -> " + resolved.textureFile());
+                logger.fine("[JavaPack-legacy] " + key + " -> " + resolved.textureFile());
             }
         }
     }
@@ -343,7 +400,7 @@ public final class JavaPackReader {
             collectModelRefs(innerModelObj, contextLabel, modelRefs, 0);
             if (modelRefs.isEmpty()) {
                 if (debug) {
-                    logger.info("[JavaPack-modern] no model refs collected for "
+                    logger.fine("[JavaPack-modern] no model refs collected for "
                         + contextLabel);
                 }
                 continue;
@@ -368,7 +425,7 @@ public final class JavaPackReader {
             }
             if (resolved == null) {
                 if (debug) {
-                    logger.info("[JavaPack-modern] no texture resolved for "
+                    logger.fine("[JavaPack-modern] no texture resolved for "
                         + contextLabel + " (" + modelRefs.size()
                         + " model ref(s) tried, last=" + lastTriedRef + ")");
                 }
@@ -379,7 +436,7 @@ public final class JavaPackReader {
             out.put(key, resolved);
             modernResolved++;
             if (debug) {
-                logger.info("[JavaPack-modern] " + key + " -> " + resolved.textureFile());
+                logger.fine("[JavaPack-modern] " + key + " -> " + resolved.textureFile());
             }
         }
     }
@@ -591,7 +648,7 @@ public final class JavaPackReader {
         Path indexed = basename != null ? textureBasenameIndex.get(basename) : null;
         if (indexed != null) {
             if (debug) {
-                logger.info("[JavaPack] " + baseItem + "#" + cmd
+                logger.fine("[JavaPack] " + baseItem + "#" + cmd
                     + ": resolved via basename-index fallback (modelRef=" + modelRef
                     + " -> " + indexed + ")");
             }
@@ -609,7 +666,7 @@ public final class JavaPackReader {
                 .resolve("models").resolve(parts[1] + ".json");
             Path expectedTexture = packRoot.resolve("assets").resolve(parts[0])
                 .resolve("textures").resolve(parts[1] + ".png");
-            logger.info("[JavaPack] " + baseItem + "#" + cmd
+            logger.fine("[JavaPack] " + baseItem + "#" + cmd
                 + ": all resolution paths failed for modelRef=" + modelRef
                 + " — tried model JSON at " + expectedModel
                 + " | direct texture at " + expectedTexture
@@ -650,7 +707,7 @@ public final class JavaPackReader {
                     + " — deep fallback disabled this scan", ex);
         }
         if (debug) {
-            logger.info("[JavaPack] basename index built: " + out.size()
+            logger.fine("[JavaPack] basename index built: " + out.size()
                 + " unique PNG basenames under " + assets);
         }
         return Map.copyOf(out);
@@ -1236,6 +1293,18 @@ public final class JavaPackReader {
             logger.log(Level.WARNING, "[JavaPack] failed to list " + dir, ex);
         }
         return out;
+    }
+
+    private List<Path> listJsonFilesRecursive(Path dir) {
+        try (Stream<Path> walk = Files.walk(dir)) {
+            return walk.filter(Files::isRegularFile)
+                .filter(path -> path.getFileName().toString().endsWith(".json"))
+                .sorted()
+                .toList();
+        } catch (IOException ex) {
+            logger.log(Level.WARNING, "[JavaPack] failed to walk " + dir, ex);
+            return List.of();
+        }
     }
 
     @SuppressWarnings("unchecked")

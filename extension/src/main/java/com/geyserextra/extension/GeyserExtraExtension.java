@@ -22,6 +22,7 @@ import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.util.zip.ZipFile;
 
 /**
  * Main extension class for GeyserExtra.
@@ -50,10 +51,13 @@ public class GeyserExtraExtension implements Extension {
      */
     @Subscribe
     public void onPreInitialize(GeyserPreInitializeEvent event) {
-        logger().info("GeyserExtra pre-initializing...");
+        logger().debug("GeyserExtra pre-initializing...");
 
         Path dataFolder = dataFolder();
-        logger().info("Extension data folder: " + dataFolder.toAbsolutePath());
+        logger().debug("Extension data folder: " + dataFolder.toAbsolutePath());
+
+        promotePendingAutoPack(
+            dataFolder.resolve("packs").resolve("geyserextra_auto.zip"));
 
         // Load unified config (shared with Paper plugin)
         loadConfiguration(dataFolder);
@@ -63,7 +67,7 @@ public class GeyserExtraExtension implements Extension {
         // Initialize handlers with data folder path
         initializeHandlers(dataFolder);
 
-        logger().info("GeyserExtra handlers initialized.");
+        logger().debug("GeyserExtra handlers initialized.");
     }
 
     /**
@@ -88,16 +92,16 @@ public class GeyserExtraExtension implements Extension {
             return;
         }
 
-        logger().info("Applying configuration settings...");
-        logger().info("Feature status:");
-        logger().info("  - Custom Items: " + (config.customItems().enabled() ? "enabled" : "disabled"));
-        logger().info("  - Custom Skulls: " + (config.skulls().enabled() ? "enabled" : "disabled"));
-        logger().info("  - Enchantment Display (Custom): " + (config.enchantment().showCustomEnchantments() ? "enabled" : "disabled"));
-        logger().info("  - Enchantment Display (Over): " + (config.enchantment().showOverEnchantments() ? "enabled" : "disabled"));
-        logger().info("  - Anvil Over-Enchant Protection: " + (config.enchantment().overEnchantmentProtectionEnabled() ? "enabled" : "disabled"));
-        logger().info("  - Anvil Over-Enchant Level-Up: " + (config.enchantment().overEnchantmentLevelUpEnabled() ? "enabled" : "disabled"));
-        logger().info("  - Invisible Glow Frames Pack: " + (config.resourcePacks().invisibleGlowFramesEnabled() ? "enabled" : "disabled"));
-        logger().info("  - Debug Mode: enabled");
+        logger().debug("Applying configuration settings...");
+        logger().debug("Feature status:");
+        logger().debug("  - Custom Items: " + (config.customItems().enabled() ? "enabled" : "disabled"));
+        logger().debug("  - Custom Skulls: " + (config.skulls().enabled() ? "enabled" : "disabled"));
+        logger().debug("  - Enchantment Display (Custom): " + (config.enchantment().showCustomEnchantments() ? "enabled" : "disabled"));
+        logger().debug("  - Enchantment Display (Over): " + (config.enchantment().showOverEnchantments() ? "enabled" : "disabled"));
+        logger().debug("  - Anvil Over-Enchant Protection: " + (config.enchantment().overEnchantmentProtectionEnabled() ? "enabled" : "disabled"));
+        logger().debug("  - Anvil Over-Enchant Level-Up: " + (config.enchantment().overEnchantmentLevelUpEnabled() ? "enabled" : "disabled"));
+        logger().debug("  - Invisible Glow Frames Pack: " + (config.resourcePacks().invisibleGlowFramesEnabled() ? "enabled" : "disabled"));
+        logger().debug("  - Debug Mode: enabled");
     }
 
     /**
@@ -109,22 +113,22 @@ public class GeyserExtraExtension implements Extension {
         boolean debug = config.general().debugMode();
 
         if (debug) {
-            logger().info("=== Initializing Handlers ===");
-            logger().info("Config loaded: " + (config != null));
+            logger().debug("=== Initializing Handlers ===");
+            logger().debug("Config loaded: " + (config != null));
             if (config != null) {
-                logger().info("  customItems.enabled: " + config.customItems().enabled());
-                logger().info("  skulls.enabled: " + config.skulls().enabled());
+                logger().debug("  customItems.enabled: " + config.customItems().enabled());
+                logger().debug("  skulls.enabled: " + config.skulls().enabled());
             }
         }
 
         // Initialize custom items handler if enabled
         if (config.customItems().enabled()) {
             if (debug) {
-                logger().info("Initializing CustomItemsHandler...");
+                logger().debug("Initializing CustomItemsHandler...");
             }
             this.customItemsHandler = new CustomItemsHandler(this, dataFolder);
             if (debug) {
-                logger().info("CustomItemsHandler initialized: " + (customItemsHandler != null));
+                logger().debug("CustomItemsHandler initialized: " + (customItemsHandler != null));
             }
         } else {
             logger().warning("Custom items feature is DISABLED in config.");
@@ -133,18 +137,18 @@ public class GeyserExtraExtension implements Extension {
         // Initialize custom skulls handler if enabled
         if (config.skulls().enabled()) {
             if (debug) {
-                logger().info("Initializing CustomSkullsHandler...");
+                logger().debug("Initializing CustomSkullsHandler...");
             }
             this.customSkullsHandler = new CustomSkullsHandler(this, dataFolder);
             if (debug) {
-                logger().info("CustomSkullsHandler initialized: " + (customSkullsHandler != null));
+                logger().debug("CustomSkullsHandler initialized: " + (customSkullsHandler != null));
             }
         } else {
             logger().warning("Custom skulls feature is disabled in config.");
         }
 
         if (debug) {
-            logger().info("=== Handler Initialization Complete ===");
+            logger().debug("=== Handler Initialization Complete ===");
         }
     }
 
@@ -156,8 +160,8 @@ public class GeyserExtraExtension implements Extension {
      */
     @Subscribe
     public void onPostInitialize(GeyserPostInitializeEvent event) {
-        logger().info("GeyserExtra fully initialized!");
-        logger().info("Data folder: " + dataFolder().toAbsolutePath());
+        logger().debug("GeyserExtra fully initialized!");
+        logger().debug("Data folder: " + dataFolder().toAbsolutePath());
     }
 
     /**
@@ -192,19 +196,62 @@ public class GeyserExtraExtension implements Extension {
      */
     private void registerAutoCustomItemsPack(GeyserDefineResourcePacksEvent event) {
         Path packFile = dataFolder().resolve("packs").resolve("geyserextra_auto.zip");
+        promotePendingAutoPack(packFile);
         if (!Files.exists(packFile)) {
-            logger().info("Auto custom items pack not present yet: " + packFile);
+            logger().debug("Auto custom items pack not present yet: " + packFile);
             return;
         }
         try {
             PackCodec codec = PackCodec.path(packFile);
             ResourcePack pack = ResourcePack.create(codec);
             event.register(pack);
-            logger().info("Registered auto custom items pack: " + packFile);
+            logger().debug("Registered auto custom items pack: " + packFile);
         } catch (IllegalArgumentException e) {
             logger().debug("Auto custom items pack already registered: " + packFile);
         } catch (Exception e) {
             logger().warning("Failed to register auto custom items pack: " + e.getMessage());
+        }
+    }
+
+    private void promotePendingAutoPack(Path activePack) {
+        Path pendingPack = activePack.resolveSibling("geyserextra_auto.pending.zip");
+        if (!Files.isRegularFile(pendingPack)) {
+            return;
+        }
+        try (ZipFile zip = new ZipFile(pendingPack.toFile())) {
+            if (zip.getEntry("manifest.json") == null
+                || zip.getEntry("textures/item_texture.json") == null) {
+                logger().warning("Pending auto custom items pack is incomplete; "
+                    + "keeping the current active pack.");
+                return;
+            }
+        } catch (IOException invalid) {
+            logger().warning("Pending auto custom items pack is invalid; "
+                + "keeping the current active pack: " + invalid.getMessage());
+            return;
+        }
+
+        try {
+            Files.createDirectories(activePack.getParent());
+            try {
+                Files.move(pendingPack, activePack,
+                    StandardCopyOption.ATOMIC_MOVE,
+                    StandardCopyOption.REPLACE_EXISTING);
+            } catch (IOException noAtomicMove) {
+                Files.move(pendingPack, activePack,
+                    StandardCopyOption.REPLACE_EXISTING);
+            }
+
+            Path pendingSidecar = dataFolder().resolve("block_icon_bases.pending.json");
+            Path activeSidecar = dataFolder().resolve("block_icon_bases.json");
+            if (Files.isRegularFile(pendingSidecar)) {
+                Files.move(pendingSidecar, activeSidecar,
+                    StandardCopyOption.REPLACE_EXISTING);
+            }
+            logger().debug("Promoted pending auto custom items pack.");
+        } catch (IOException promotionFailure) {
+            logger().warning("Failed to promote pending auto custom items pack: "
+                + promotionFailure.getMessage());
         }
     }
 
@@ -239,7 +286,7 @@ public class GeyserExtraExtension implements Extension {
             ResourcePack pack = ResourcePack.create(codec);
             try {
                 event.register(pack);
-                logger().info("Registered resource pack: " + packName);
+                logger().debug("Registered resource pack: " + packName);
             } catch (IllegalArgumentException e) {
                 // Pack already registered (e.g., after Geyser reload) — safe to ignore
                 logger().debug("Resource pack already registered: " + packName);
@@ -261,8 +308,8 @@ public class GeyserExtraExtension implements Extension {
     @Subscribe
     public void onDefineCustomItems(GeyserDefineCustomItemsEvent event) {
         if (config.general().debugMode()) {
-            logger().info("=== GeyserDefineCustomItemsEvent triggered ===");
-            logger().info("customItemsHandler initialized: " + (customItemsHandler != null));
+            logger().debug("=== GeyserDefineCustomItemsEvent triggered ===");
+            logger().debug("customItemsHandler initialized: " + (customItemsHandler != null));
         }
         if (customItemsHandler != null) {
             customItemsHandler.registerItems(event);

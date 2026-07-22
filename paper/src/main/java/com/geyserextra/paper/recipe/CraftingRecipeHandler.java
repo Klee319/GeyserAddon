@@ -57,10 +57,10 @@ public final class CraftingRecipeHandler implements Listener {
             api = FloodgateApi.getInstance();
             isEnabled = api != null;
             if (isEnabled) {
-                plugin.getLogger().info("CraftingRecipeHandler: Floodgate detected, Bedrock crafting sync enabled");
+                plugin.getLogger().fine("CraftingRecipeHandler: Floodgate detected, Bedrock crafting sync enabled");
             }
         } catch (NoClassDefFoundError | Exception e) {
-            plugin.getLogger().info("CraftingRecipeHandler: Floodgate not available, handler disabled");
+            plugin.getLogger().fine("CraftingRecipeHandler: Floodgate not available, handler disabled");
         }
 
         this.floodgateApi = api;
@@ -121,7 +121,7 @@ public final class CraftingRecipeHandler implements Listener {
                     ));
 
                     if (plugin.getGeyserExtraConfig().general().debugMode()) {
-                        plugin.getLogger().info("[CraftingSync] Cached result for " + player.getName()
+                        plugin.getLogger().fine("[CraftingSync] Cached result for " + player.getName()
                             + ": " + result.getType() + " x" + result.getAmount()
                             + " (custom recipe: " + (recipe != null) + ")");
                     }
@@ -185,7 +185,7 @@ public final class CraftingRecipeHandler implements Listener {
                 // ingredients for.
                 if (!matrixesMatch(cached.matrix(), craftingInv.getMatrix())) {
                     if (plugin.getGeyserExtraConfig().general().debugMode()) {
-                        plugin.getLogger().info("[CraftingSync] Discarding stale cache for "
+                        plugin.getLogger().fine("[CraftingSync] Discarding stale cache for "
                             + player.getName() + " — grid changed since cache was set");
                     }
                     craftResultCache.remove(player.getUniqueId());
@@ -197,7 +197,7 @@ public final class CraftingRecipeHandler implements Listener {
                 // If current result differs from cached, apply the cached one
                 if (currentResult == null || !currentResult.isSimilar(cached.result())) {
                     if (plugin.getGeyserExtraConfig().general().debugMode()) {
-                        plugin.getLogger().info("[CraftingSync] Correcting result for " + player.getName()
+                        plugin.getLogger().fine("[CraftingSync] Correcting result for " + player.getName()
                             + ": " + cached.result().getType());
                     }
 

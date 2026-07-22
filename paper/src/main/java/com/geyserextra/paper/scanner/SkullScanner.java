@@ -176,7 +176,7 @@ public final class SkullScanner {
 
         if (discovered > 0 && plugin.getGeyserExtraConfig().general().debugMode()) {
             final int discoveredCount = discovered;
-            plugin.getLogger().info(() -> String.format(
+            plugin.getLogger().fine(() -> String.format(
                 "Scanned chunk [%d, %d], discovered %d skulls",
                 chunk.getX(),
                 chunk.getZ(),
@@ -197,13 +197,13 @@ public final class SkullScanner {
         PlayerProfile profile = asPaperProfile(skullMeta.getOwnerProfile());
         if (profile == null) {
             if (plugin.getGeyserExtraConfig().general().debugMode()) {
-                plugin.getLogger().info("[SkullDebug] PlayerProfile is null");
+                plugin.getLogger().fine("[SkullDebug] PlayerProfile is null");
             }
             return Optional.empty();
         }
 
         if (plugin.getGeyserExtraConfig().general().debugMode()) {
-            plugin.getLogger().info("[SkullDebug] Found profile: " + profile.getName()
+            plugin.getLogger().fine("[SkullDebug] Found profile: " + profile.getName()
                 + ", properties: " + profile.getProperties().size());
         }
 
@@ -243,7 +243,7 @@ public final class SkullScanner {
 
         if (texturesProperty.isEmpty()) {
             if (plugin.getGeyserExtraConfig().general().debugMode()) {
-                plugin.getLogger().info("[SkullDebug] No 'textures' property found. Available properties: "
+                plugin.getLogger().fine("[SkullDebug] No 'textures' property found. Available properties: "
                     + profile.getProperties().stream()
                         .map(ProfileProperty::getName)
                         .toList());
@@ -255,14 +255,14 @@ public final class SkullScanner {
         String base64Value = texturesProperty.get().getValue();
         if (base64Value == null || base64Value.isBlank()) {
             if (plugin.getGeyserExtraConfig().general().debugMode()) {
-                plugin.getLogger().info("[SkullDebug] Base64 value is null or blank");
+                plugin.getLogger().fine("[SkullDebug] Base64 value is null or blank");
             }
             // Try to register by username if profile name exists
             return registerByUsername(profile);
         }
 
         if (plugin.getGeyserExtraConfig().general().debugMode()) {
-            plugin.getLogger().info("[SkullDebug] Base64 value length: " + base64Value.length());
+            plugin.getLogger().fine("[SkullDebug] Base64 value length: " + base64Value.length());
         }
 
         // Decode base64 to extract texture URL
@@ -284,7 +284,7 @@ public final class SkullScanner {
         String username = profile.getName();
         if (username == null || username.isBlank()) {
             if (plugin.getGeyserExtraConfig().general().debugMode()) {
-                plugin.getLogger().info("[SkullDebug] Cannot register by username - name is null or blank");
+                plugin.getLogger().fine("[SkullDebug] Cannot register by username - name is null or blank");
             }
             return Optional.empty();
         }
@@ -292,7 +292,7 @@ public final class SkullScanner {
         // Check if already registered
         if (registry.contains(username)) {
             if (plugin.getGeyserExtraConfig().general().debugMode()) {
-                plugin.getLogger().info("[SkullDebug] Username already registered: " + username);
+                plugin.getLogger().fine("[SkullDebug] Username already registered: " + username);
             }
             return registry.getByTextureHash(username);
         }
@@ -307,7 +307,7 @@ public final class SkullScanner {
         registry.register(skullData);
 
         if (plugin.getGeyserExtraConfig().general().debugMode()) {
-            plugin.getLogger().info("[SkullDebug] Registered skull by username: " + username);
+            plugin.getLogger().fine("[SkullDebug] Registered skull by username: " + username);
         }
 
         return Optional.of(skullData);
@@ -325,20 +325,20 @@ public final class SkullScanner {
             String decodedJson = new String(decodedBytes, StandardCharsets.UTF_8);
 
             if (plugin.getGeyserExtraConfig().general().debugMode()) {
-                plugin.getLogger().info("[SkullDebug] Decoded JSON: " + decodedJson);
+                plugin.getLogger().fine("[SkullDebug] Decoded JSON: " + decodedJson);
             }
 
             Matcher matcher = TEXTURE_URL_PATTERN.matcher(decodedJson);
             if (matcher.find()) {
                 String url = matcher.group(1);
                 if (plugin.getGeyserExtraConfig().general().debugMode()) {
-                    plugin.getLogger().info("[SkullDebug] Extracted URL: " + url);
+                    plugin.getLogger().fine("[SkullDebug] Extracted URL: " + url);
                 }
                 return Optional.of(url);
             }
 
             if (plugin.getGeyserExtraConfig().general().debugMode()) {
-                plugin.getLogger().info("[SkullDebug] URL pattern did not match");
+                plugin.getLogger().fine("[SkullDebug] URL pattern did not match");
             }
             return Optional.empty();
         } catch (IllegalArgumentException e) {
@@ -376,7 +376,7 @@ public final class SkullScanner {
         registry.register(skullData);
 
         if (plugin.getGeyserExtraConfig().general().debugMode()) {
-            plugin.getLogger().info(() -> String.format(
+            plugin.getLogger().fine(() -> String.format(
                 "Registered skull texture: %s",
                 textureHash.substring(0, Math.min(16, textureHash.length())) + "..."
             ));

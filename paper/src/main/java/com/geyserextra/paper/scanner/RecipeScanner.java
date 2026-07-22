@@ -116,7 +116,7 @@ public final class RecipeScanner {
         }
 
         if (plugin.getGeyserExtraConfig().general().debugMode()) {
-            plugin.getLogger().info("[RecipeScanner] Scanned " + totalRecipes + " recipes, discovered " + discovered + " custom items");
+            plugin.getLogger().fine("[RecipeScanner] Scanned " + totalRecipes + " recipes, discovered " + discovered + " custom items");
         }
 
         return discovered;
@@ -220,6 +220,15 @@ public final class RecipeScanner {
         }
 
         try {
+            if (item.isDataOverridden(
+                io.papermc.paper.datacomponent.DataComponentTypes.ITEM_MODEL)) {
+                var itemModel = item.getData(
+                    io.papermc.paper.datacomponent.DataComponentTypes.ITEM_MODEL);
+                if (itemModel != null && !"minecraft".equals(itemModel.namespace())) {
+                    return "item_model:" + item.getType().getKey()
+                        + ":" + itemModel.asString();
+                }
+            }
             if (item.hasData(io.papermc.paper.datacomponent.DataComponentTypes.CUSTOM_MODEL_DATA)) {
                 var cmd = item.getData(io.papermc.paper.datacomponent.DataComponentTypes.CUSTOM_MODEL_DATA);
                 if (cmd != null) {
@@ -258,21 +267,12 @@ public final class RecipeScanner {
      */
     public void scheduleDelayedScan(long delayTicks) {
         plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
-            plugin.getLogger().info("Scanning server recipes for custom items...");
+            plugin.getLogger().fine("Scanning server recipes for custom items...");
             int discovered = scanAllRecipes();
-            plugin.getLogger().info("Recipe scan complete. Discovered " + discovered + " custom items from recipes.");
+            plugin.getLogger().fine("Recipe scan complete. Discovered " + discovered + " custom items from recipes.");
 
-            // Save to shared folder
-            plugin.getServer().getScheduler().runTaskAsynchronously(plugin, () -> {
-                try {
-                    plugin.getItemMappingRegistry().save(
-                        plugin.getSharedFolder().resolve("custom_items.json")
-                    );
-                    plugin.getLogger().info("Saved custom items to shared folder.");
-                } catch (Exception e) {
-                    plugin.getLogger().warning("Failed to save custom items: " + e.getMessage());
-                }
-            });
+            // Save through the shared serializer without rebuilding the live ZIP.
+            plugin.saveRegistryMetadataAsync();
         }, delayTicks);
     }
 }

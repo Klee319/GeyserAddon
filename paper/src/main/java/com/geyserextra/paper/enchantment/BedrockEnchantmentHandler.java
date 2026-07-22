@@ -120,12 +120,12 @@ public final class BedrockEnchantmentHandler implements Listener {
             isEnabled = api != null && enchantConfig.enabled();
             if (isEnabled) {
                 registerPacketListeners();
-                plugin.getLogger().info(
+                plugin.getLogger().fine(
                     "BedrockEnchantmentHandler: Enchantment lore injection and anvil protection enabled"
                 );
             }
         } catch (NoClassDefFoundError | Exception e) {
-            plugin.getLogger().info(
+            plugin.getLogger().fine(
                 "BedrockEnchantmentHandler: Floodgate or ProtocolLib not available, disabled"
             );
         }

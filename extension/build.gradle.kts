@@ -32,11 +32,18 @@ val zipInvisibleGlowFrames by tasks.registering(Zip::class) {
 sourceSets {
     main {
         resources.srcDir(layout.buildDirectory.dir("generated-resources"))
+        // Bake the Paper module's generated bedrock/vanilla_texture_paths.json
+        // into this jar too: on a fresh install the extension registers items
+        // before Paper writes the block_icon_bases.json sidecar, and without
+        // this classpath fallback block-base items would miss their 3D icon
+        // until the second boot.
+        resources.srcDir(project(":paper").layout.buildDirectory.dir("generated/resources"))
     }
 }
 
 tasks.processResources {
     dependsOn(zipInvisibleGlowFrames)
+    dependsOn(":paper:generateVanillaTexturePaths")
 }
 
 tasks.shadowJar {

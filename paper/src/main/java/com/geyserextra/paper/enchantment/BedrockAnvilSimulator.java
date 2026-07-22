@@ -128,11 +128,11 @@ public final class BedrockAnvilSimulator implements Listener {
             levelUp = enchantConfig.overEnchantmentLevelUpEnabled();
 
             if (isEnabled) {
-                plugin.getLogger().info(
+                plugin.getLogger().fine(
                     "BedrockAnvilSimulator: Anvil-to-chest simulation enabled (Bukkit API mode)");
             }
         } catch (NoClassDefFoundError | Exception e) {
-            plugin.getLogger().info(
+            plugin.getLogger().fine(
                 "BedrockAnvilSimulator: Floodgate not available, disabled");
         }
 

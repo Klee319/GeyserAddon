@@ -57,14 +57,14 @@ public class CustomSkullsHandler {
      * Creates the shared folder if it does not exist.
      */
     private void loadSkullRegistry() {
-        extension.logger().info("=== Loading Skull Registry ===");
+        extension.logger().debug("=== Loading Skull Registry ===");
         Path skullsFile = sharedFolder.resolve(SKULLS_FILE_NAME);
-        extension.logger().info("Skulls file path: " + skullsFile.toAbsolutePath());
+        extension.logger().debug("Skulls file path: " + skullsFile.toAbsolutePath());
 
         if (!Files.exists(sharedFolder)) {
             try {
                 Files.createDirectories(sharedFolder);
-                extension.logger().info("Created shared folder: " + sharedFolder);
+                extension.logger().debug("Created shared folder: " + sharedFolder);
             } catch (IOException e) {
                 extension.logger().error("Failed to create shared folder: " + e.getMessage());
                 return;
@@ -86,11 +86,11 @@ public class CustomSkullsHandler {
 
         try {
             String content = Files.readString(skullsFile, StandardCharsets.UTF_8);
-            extension.logger().info("Read skulls.json (" + content.length() + " bytes)");
+            extension.logger().debug("Read skulls.json (" + content.length() + " bytes)");
 
             JsonObject root = JsonParser.parseString(content).getAsJsonObject();
             parseSkullEntries(root);
-            extension.logger().info("Successfully loaded " + skullEntries.size() + " custom skull entries.");
+            extension.logger().debug("Successfully loaded " + skullEntries.size() + " custom skull entries.");
         } catch (IOException e) {
             extension.logger().error("Failed to read skulls.json: " + e.getMessage());
         } catch (Exception e) {
@@ -172,19 +172,19 @@ public class CustomSkullsHandler {
      * @param event the custom skulls definition event from Geyser
      */
     public void registerSkulls(GeyserDefineCustomSkullsEvent event) {
-        extension.logger().info("=== Custom Skulls Registration ===");
-        extension.logger().info("Loaded skull entries: " + skullEntries.size());
-        extension.logger().info("NOTE: Geyser requires 'enable-custom-content: true' in config.yml");
+        extension.logger().debug("=== Custom Skulls Registration ===");
+        extension.logger().debug("Loaded skull entries: " + skullEntries.size());
+        extension.logger().debug("NOTE: Geyser requires 'enable-custom-content: true' in config.yml");
 
         int registeredCount = 0;
 
         for (SkullEntry entry : skullEntries) {
             try {
-                extension.logger().info("Registering skull - Type: " + entry.textureType()
+                extension.logger().debug("Registering skull - Type: " + entry.textureType()
                     + ", Texture: " + truncateForLogging(entry.texture()));
                 event.register(entry.texture(), entry.textureType());
                 registeredCount++;
-                extension.logger().info("Successfully registered skull: " + truncateForLogging(entry.texture()));
+                extension.logger().debug("Successfully registered skull: " + truncateForLogging(entry.texture()));
             } catch (Exception e) {
                 extension.logger().error("Failed to register skull with texture '"
                     + truncateForLogging(entry.texture()) + "': " + e.getMessage());
@@ -192,7 +192,7 @@ public class CustomSkullsHandler {
             }
         }
 
-        extension.logger().info("=== Skull Registration Complete: " + registeredCount + " skull(s) ===");
+        extension.logger().debug("=== Skull Registration Complete: " + registeredCount + " skull(s) ===");
         if (registeredCount == 0) {
             extension.logger().warning("No skulls registered! Make sure:");
             extension.logger().warning("  1. Paper plugin has scanned skulls and saved to skulls.json");
@@ -239,7 +239,7 @@ public class CustomSkullsHandler {
 
         try {
             Files.writeString(skullsFile, GSON.toJson(sample), StandardCharsets.UTF_8);
-            extension.logger().info("Created sample skulls.json at " + skullsFile);
+            extension.logger().debug("Created sample skulls.json at " + skullsFile);
         } catch (IOException e) {
             extension.logger().warning("Failed to create sample skulls.json: " + e.getMessage());
         }

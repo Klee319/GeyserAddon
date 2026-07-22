@@ -4,6 +4,7 @@ import com.geyserextra.core.config.GeyserExtraConfig;
 import com.geyserextra.core.registry.ItemMappingRegistry;
 import com.geyserextra.core.registry.SkullRegistry;
 import com.geyserextra.paper.listener.ChunkLoadListener;
+import com.geyserextra.paper.listener.CooldownBridgeListener;
 import com.geyserextra.paper.listener.ItemListener;
 import com.geyserextra.paper.listener.ElytraFlightListener;
 import com.geyserextra.paper.listener.OffhandInteractionListener;
@@ -15,6 +16,8 @@ import com.geyserextra.paper.recipe.CraftingRecipeHandler;
 import com.geyserextra.paper.recipe.SmithingRecipeHandler;
 import com.geyserextra.core.api.CustomItemMapping;
 import com.geyserextra.paper.pack.AutoBedrockPackBuilder;
+import com.geyserextra.paper.pack.AutoPackBuildGuard;
+import com.geyserextra.paper.pack.ItemModelHintsReader;
 import com.geyserextra.paper.pack.JavaPackLangReader;
 import com.geyserextra.paper.pack.JavaPackReader;
 import com.geyserextra.paper.pack.JavaPackResolver;
@@ -95,6 +98,8 @@ public final class GeyserExtraPaper extends JavaPlugin {
     // volatile, a freshly loaded reader could still appear as the empty
     // sentinel to a packet thread that cached the field reference.
     private volatile JavaPackLangReader javaPackLangReader = JavaPackLangReader.empty();
+    private final AutoPackBuildGuard autoPackBuildGuard = new AutoPackBuildGuard();
+    private final Object registryMetadataSaveLock = new Object();
 
     @Override
     public void onEnable() {
@@ -108,7 +113,7 @@ public final class GeyserExtraPaper extends JavaPlugin {
         loadConfiguration();
 
         if (!config.general().enabled()) {
-            getLogger().info("GeyserExtra is disabled in configuration.");
+            getLogger().fine("GeyserExtra is disabled in configuration.");
             return;
         }
 
@@ -125,8 +130,15 @@ public final class GeyserExtraPaper extends JavaPlugin {
         // Initialize registries
         initializeRegistries();
 
-        // Initialize scanners
-        initializeScanners();
+        // Initialize scanners. The synchronous immediate scan may replace the
+        // pack only during a full startup before Geyser is enabled. A plugin
+        // reload and all delayed scans save metadata for the next restart only.
+        boolean geyserAlreadyEnabled =
+            getServer().getPluginManager().isPluginEnabled("Geyser-Spigot");
+        autoPackBuildGuard.runStartupScan(
+            geyserAlreadyEnabled,
+            this::initializeScanners
+        );
 
         // Initialize recipe handlers for Bedrock compatibility
         initializeRecipeHandlers();
@@ -149,7 +161,7 @@ public final class GeyserExtraPaper extends JavaPlugin {
         // Perform initial scan of all online players
         performInitialScan();
 
-        getLogger().info("GeyserExtra Paper plugin enabled successfully.");
+        getLogger().fine("GeyserExtra Paper plugin enabled successfully.");
     }
 
     @Override
@@ -194,7 +206,7 @@ public final class GeyserExtraPaper extends JavaPlugin {
         // Save registries to shared folder for Geyser extension
         saveRegistriesToSharedFolder();
 
-        getLogger().info("GeyserExtra Paper plugin disabled.");
+        getLogger().fine("GeyserExtra Paper plugin disabled.");
     }
 
     /**
@@ -235,10 +247,10 @@ public final class GeyserExtraPaper extends JavaPlugin {
         Path configPath = getExtensionDataFolder().resolve(CONFIG_FILE);
         config = GeyserExtraConfig.loadOrCreate(configPath);
 
-        getLogger().info("Config loaded from: " + configPath.toAbsolutePath());
+        getLogger().fine("Config loaded from: " + configPath.toAbsolutePath());
 
         if (config.general().debugMode()) {
-            getLogger().info("Debug mode enabled.");
+            getLogger().fine("Debug mode enabled.");
         }
     }
 
@@ -269,7 +281,7 @@ public final class GeyserExtraPaper extends JavaPlugin {
             Path geyserFolder = pluginsFolder.resolve(folderName);
             if (Files.exists(geyserFolder)) {
                 cachedExtensionDataFolder = geyserFolder.resolve("extensions").resolve("geyserextra");
-                getLogger().info("Detected Geyser folder: " + geyserFolder.toAbsolutePath());
+                getLogger().fine("Detected Geyser folder: " + geyserFolder.toAbsolutePath());
                 return cachedExtensionDataFolder;
             }
         }
@@ -293,7 +305,7 @@ public final class GeyserExtraPaper extends JavaPlugin {
     private void initializePlayerSettings() {
         Path playerDataFolder = getExtensionDataFolder().resolve("playerdata");
         playerSettingsManager = new PlayerSettingsManager(playerDataFolder, getLogger());
-        getLogger().info("Player settings manager initialized.");
+        getLogger().fine("Player settings manager initialized.");
     }
 
     /**
@@ -305,7 +317,7 @@ public final class GeyserExtraPaper extends JavaPlugin {
     private void startDisplayManager() {
         displayManager = new DisplayManager(this, playerSettingsManager);
         displayManager.start();
-        getLogger().info("Display manager started.");
+        getLogger().fine("Display manager started.");
     }
 
     /**
@@ -321,7 +333,7 @@ public final class GeyserExtraPaper extends JavaPlugin {
         itemMappingRegistry.loadIfExists(sharedFolder.resolve(CUSTOM_ITEMS_FILE));
         skullRegistry.loadIfExists(sharedFolder.resolve(SKULLS_FILE));
 
-        getLogger().info(() -> String.format(
+        getLogger().fine(() -> String.format(
             "Loaded %d custom items and %d skulls from shared folder.",
             itemMappingRegistry.size(),
             skullRegistry.size()
@@ -359,27 +371,27 @@ public final class GeyserExtraPaper extends JavaPlugin {
         // Immediate scan: Run synchronously to capture recipes already registered
         // This is critical for Geyser Extension which may load right after us
         if (config.general().debugMode()) {
-            getLogger().info("Running immediate startup scan (synchronous)...");
+            getLogger().fine("Running immediate startup scan (synchronous)...");
         }
         runStartupScans();
 
         // Second scan: 1 tick later (after all onEnable() calls complete)
         getServer().getScheduler().runTaskLater(this, () -> {
             if (config.general().debugMode()) {
-                getLogger().info("Running deferred startup scans (1 tick delay)...");
+                getLogger().fine("Running deferred startup scans (1 tick delay)...");
             }
             int prevItems = itemMappingRegistry.size();
             runStartupScans();
             int newItems = itemMappingRegistry.size() - prevItems;
             if (newItems > 0) {
-                getLogger().info("Deferred scan found " + newItems + " new items.");
+                getLogger().fine("Deferred scan found " + newItems + " new items.");
             }
         }, 1L);
 
         // Third scan: 100 ticks (5 seconds) later to catch late-registering plugins
         getServer().getScheduler().runTaskLater(this, () -> {
             if (config.general().debugMode()) {
-                getLogger().info("Running late startup scans (5 second delay)...");
+                getLogger().fine("Running late startup scans (5 second delay)...");
             }
             int prevItems = itemMappingRegistry.size();
             int prevSkulls = skullRegistry.size();
@@ -390,8 +402,8 @@ public final class GeyserExtraPaper extends JavaPlugin {
             int newSkulls = skullRegistry.size() - prevSkulls;
 
             if (newItems > 0 || newSkulls > 0) {
-                getLogger().info("Late scan found " + newItems + " new items and " + newSkulls + " new skulls.");
-                getLogger().info("NOTE: Server restart required for Geyser Extension to load new items.");
+                getLogger().fine("Late scan found " + newItems + " new items and " + newSkulls + " new skulls.");
+                getLogger().fine("NOTE: Server restart required for Geyser Extension to load new items.");
             }
         }, 100L);
     }
@@ -406,21 +418,21 @@ public final class GeyserExtraPaper extends JavaPlugin {
         if (config.customItems().enabled()) {
             int items = recipeScanner.scanAllRecipes();
             if (debug) {
-                getLogger().info("Recipe scan complete: " + items + " custom items found (total: " + itemMappingRegistry.size() + ")");
+                getLogger().fine("Recipe scan complete: " + items + " custom items found (total: " + itemMappingRegistry.size() + ")");
             }
         }
 
         if (config.skulls().enabled()) {
             int skulls = worldSkullScanner.scanAllWorlds();
             if (debug) {
-                getLogger().info("World skull scan complete: " + skulls + " unique skulls found (total: " + skullRegistry.size() + ")");
+                getLogger().fine("World skull scan complete: " + skulls + " unique skulls found (total: " + skullRegistry.size() + ")");
             }
         }
 
         // Save to shared folder
         saveRegistriesToSharedFolder();
         if (debug) {
-            getLogger().info("Startup scans complete. Data saved to shared folder.");
+            getLogger().fine("Startup scans complete. Data saved to shared folder.");
         }
     }
 
@@ -441,21 +453,21 @@ public final class GeyserExtraPaper extends JavaPlugin {
         craftingRecipeHandler = new CraftingRecipeHandler(this);
 
         if (bedrockEnchantmentHandler.isEnabled()) {
-            getLogger().info("Bedrock enchantment handler enabled (lore injection + anvil protection).");
+            getLogger().fine("Bedrock enchantment handler enabled (lore injection + anvil protection).");
         }
         if (bedrockAnvilSimulator.isEnabled()) {
-            getLogger().info("Bedrock anvil simulator enabled (chest UI spoofing, mode: "
+            getLogger().fine("Bedrock anvil simulator enabled (chest UI spoofing, mode: "
                 + config.enchantment().anvilSimulationMode() + ").");
         }
         if (smithingRecipeHandler.isEnabled()) {
-            getLogger().info("Smithing recipe handler enabled for Bedrock players.");
+            getLogger().fine("Smithing recipe handler enabled for Bedrock players.");
         }
         if (craftingRecipeHandler.isEnabled()) {
-            getLogger().info("Crafting recipe handler enabled for Bedrock players.");
+            getLogger().fine("Crafting recipe handler enabled for Bedrock players.");
         }
 
         if (config.general().debugMode()) {
-            getLogger().info("Recipe handlers initialized.");
+            getLogger().fine("Recipe handlers initialized.");
         }
     }
 
@@ -506,6 +518,10 @@ public final class GeyserExtraPaper extends JavaPlugin {
             new ItemListener(customItemScanner, skullScanner, this),
             this
         );
+        getServer().getPluginManager().registerEvents(
+            new CooldownBridgeListener(this, customItemScanner),
+            this
+        );
 
         if (config.skulls().enabled()) {
             getServer().getPluginManager().registerEvents(
@@ -552,7 +568,7 @@ public final class GeyserExtraPaper extends JavaPlugin {
                 this
             );
         } else if (config.general().debugMode()) {
-            getLogger().info("OffhandSwapListener disabled by config (general.sneakDropOffhandSwapEnabled=false)");
+            getLogger().fine("OffhandSwapListener disabled by config (general.sneakDropOffhandSwapEnabled=false)");
         }
 
         // Register elytra flight workaround for Bedrock gliding without elytra
@@ -625,7 +641,7 @@ public final class GeyserExtraPaper extends JavaPlugin {
             customItemScanner.scanAllPlayers();
 
             if (config.general().debugMode()) {
-                getLogger().info(() -> String.format(
+                getLogger().fine(() -> String.format(
                     "Initial scan complete. Found %d custom items.",
                     itemMappingRegistry.size()
                 ));
@@ -637,12 +653,12 @@ public final class GeyserExtraPaper extends JavaPlugin {
      * Saves registries to Extension data folder for Geyser extension access.
      * Config is not saved here as it's managed separately via loadConfiguration().
      */
-    private void saveRegistriesToSharedFolder() {
+    private synchronized void saveRegistriesToSharedFolder() {
         Path extensionFolder = getExtensionDataFolder();
         boolean debug = config.general().debugMode();
 
         if (debug) {
-            getLogger().info("Saving registries to: " + extensionFolder.toAbsolutePath());
+            getLogger().fine("Saving registries to: " + extensionFolder.toAbsolutePath());
         }
 
         try {
@@ -657,7 +673,12 @@ public final class GeyserExtraPaper extends JavaPlugin {
                 // pack is configured, custom textures from that pack are mirrored as well so
                 // Bedrock players see the operator-supplied 2D textures (3D models remain
                 // out of scope — see the README's converter notes).
-                Path autoPackPath = extensionFolder.resolve("packs").resolve("geyserextra_auto.zip");
+                // Never replace the ZIP currently registered with Geyser.
+                // Build the next complete generation under a pending name;
+                // the Extension promotes it before the next resource-pack
+                // definition event.
+                Path autoPackPath = extensionFolder.resolve("packs")
+                    .resolve("geyserextra_auto.pending.zip");
                 List<Path> javaPackRoots = resolveJavaPackRoots();
                 String javaPackFormat = config.customItems().javaResourcePackFormat();
 
@@ -675,13 +696,18 @@ public final class GeyserExtraPaper extends JavaPlugin {
                 // Bedrock" guarantee for items no one has picked up yet.
                 Map<JavaPackReader.CmdKey, JavaPackReader.JavaModelDefinition> javaPackEntries =
                     new HashMap<>();
+                Map<String, JavaPackReader.JavaModelDefinition> directItemModels =
+                    new HashMap<>();
                 for (Path javaPackRoot : javaPackRoots) {
                     try {
+                        JavaPackReader reader =
+                            new JavaPackReader(javaPackRoot, javaPackFormat, getLogger(), debug);
                         Map<JavaPackReader.CmdKey, JavaPackReader.JavaModelDefinition> perPack =
-                            new JavaPackReader(javaPackRoot, javaPackFormat, getLogger(), debug).scan();
+                            reader.scan();
                         // putAll: later packs overwrite earlier entries for
                         // the same key (the documented merge order).
                         javaPackEntries.putAll(perPack);
+                        directItemModels.putAll(reader.scanDirectItemModels());
                     } catch (Exception ex) {
                         getLogger().warning("[JavaPack] scan failed for " + javaPackRoot + ": "
                             + ex.getClass().getSimpleName() + ": " + ex.getMessage());
@@ -709,7 +735,7 @@ public final class GeyserExtraPaper extends JavaPlugin {
                     }
                 }
                 if (javaPackRoots.size() > 1) {
-                    getLogger().info("[JavaPack] merged " + javaPackRoots.size()
+                    getLogger().fine("[JavaPack] merged " + javaPackRoots.size()
                         + " packs (" + javaPackEntries.size() + " unique CMD entries total)");
                 }
 
@@ -723,9 +749,32 @@ public final class GeyserExtraPaper extends JavaPlugin {
                     prepopulateRegistryFromJavaPack(javaPackEntries);
                 }
 
-                itemMappingRegistry.save(itemsPath);
+                // Item-model hints: direct item-model definitions (1.21.4+
+                // packs) carry no base-item information, so a pack alone can
+                // never trigger pre-registration the way CMD overrides do
+                // above. Operators (or other plugins) declare the
+                // (base_item, item_model) pairs in
+                // <dataFolder>/item_model_hints/*.json and this call registers
+                // them up front — no player interaction or extra restart
+                // needed before the texture reaches Bedrock.
+                List<ItemModelHintsReader.ItemModelHint> itemModelHints =
+                    ItemModelHintsReader.readAll(
+                        getDataFolder().toPath()
+                            .resolve(ItemModelHintsReader.HINTS_DIR_NAME),
+                        getLogger());
+                if (!itemModelHints.isEmpty()) {
+                    ItemModelHintsReader.prepopulate(
+                        itemMappingRegistry,
+                        itemModelHints,
+                        directItemModels.keySet(),
+                        getLogger());
+                }
+
+                synchronized (registryMetadataSaveLock) {
+                    itemMappingRegistry.save(itemsPath);
+                }
                 if (debug) {
-                    getLogger().info("Saved " + itemMappingRegistry.size() + " items.");
+                    getLogger().fine("Saved " + itemMappingRegistry.size() + " items.");
                 }
 
                 // Phase 7b: scan Java pack roots for entity texture overrides
@@ -749,6 +798,7 @@ public final class GeyserExtraPaper extends JavaPlugin {
                         itemMappingRegistry,
                         autoPackPath,
                         javaPackEntries,
+                        directItemModels,
                         config.customItems().attachableGeneration(),
                         entityTextureCopies,
                         armorTextureCopies,
@@ -757,7 +807,7 @@ public final class GeyserExtraPaper extends JavaPlugin {
                         debug
                     );
                     if (debug) {
-                        getLogger().info("Built auto BE pack: " + autoPackPath
+                        getLogger().fine("Built pending auto BE pack: " + autoPackPath
                             + " (" + itemMappingRegistry.size() + " mappings"
                             + (javaPackRoots.isEmpty()
                                 ? ""
@@ -765,20 +815,50 @@ public final class GeyserExtraPaper extends JavaPlugin {
                             + ")");
                     }
                 } catch (IOException e) {
-                    getLogger().log(Level.WARNING, "Failed to build auto BE pack at " + autoPackPath, e);
+                    getLogger().log(Level.WARNING,
+                        "Failed to build pending auto BE pack at " + autoPackPath, e);
                 }
             }
 
             if (config.skulls().enabled()) {
                 Path skullsPath = extensionFolder.resolve(SKULLS_FILE);
-                skullRegistry.save(skullsPath);
+                synchronized (registryMetadataSaveLock) {
+                    skullRegistry.save(skullsPath);
+                }
                 if (debug) {
-                    getLogger().info("Saved " + skullRegistry.size() + " skulls.");
+                    getLogger().fine("Saved " + skullRegistry.size() + " skulls.");
                 }
             }
         } catch (IOException e) {
             getLogger().log(Level.WARNING, "Failed to save registries to extension folder.", e);
         }
+    }
+
+    /**
+     * Persists mappings discovered after startup without rebuilding the live
+     * resource-pack ZIP. This is used by join scans so the next full restart
+     * can generate and register those items.
+     */
+    public void saveRegistryMetadataAsync() {
+        if (!isEnabled()) {
+            return;
+        }
+        getServer().getScheduler().runTaskAsynchronously(this, () -> {
+            try {
+                Path extensionFolder = getExtensionDataFolder();
+                synchronized (registryMetadataSaveLock) {
+                    if (config.customItems().enabled()) {
+                        itemMappingRegistry.save(extensionFolder.resolve(CUSTOM_ITEMS_FILE));
+                    }
+                    if (config.skulls().enabled()) {
+                        skullRegistry.save(extensionFolder.resolve(SKULLS_FILE));
+                    }
+                }
+            } catch (IOException e) {
+                getLogger().log(Level.WARNING,
+                    "Failed to save registry metadata after inventory scan.", e);
+            }
+        });
     }
 
     /**
@@ -861,7 +941,7 @@ public final class GeyserExtraPaper extends JavaPlugin {
             added++;
         }
         if (added > 0 || skipped > 0) {
-            getLogger().info("[JavaPack] pre-registration: " + added
+            getLogger().fine("[JavaPack] pre-registration: " + added
                 + " items added from pack, " + skipped + " already in registry");
         }
     }
@@ -1088,7 +1168,7 @@ public final class GeyserExtraPaper extends JavaPlugin {
             }
         }
         if (!copies.isEmpty() || skippedNamespaces > 0) {
-            getLogger().info("[EntityTex] planned " + copies.size()
+            getLogger().fine("[EntityTex] planned " + copies.size()
                 + " entity texture override(s) from " + packRoots.size() + " pack(s)"
                 + (skippedNamespaces > 0
                     ? " (skipped " + skippedNamespaces + " non-minecraft namespace(s))"
@@ -1158,7 +1238,7 @@ public final class GeyserExtraPaper extends JavaPlugin {
             }
         }
         if (!result.isEmpty()) {
-            getLogger().info("[Armor] resolved " + result.size()
+            getLogger().fine("[Armor] resolved " + result.size()
                 + " armor texture(s) for the auto-pack");
         }
         return result;

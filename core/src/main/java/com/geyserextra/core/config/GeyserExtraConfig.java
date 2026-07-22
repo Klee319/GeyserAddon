@@ -119,7 +119,7 @@ public final class GeyserExtraConfig {
 
         String json = JsonUtil.toPrettyJson(this);
         Files.writeString(path, json);
-        LOGGER.info(() -> "Saved configuration to " + path);
+        LOGGER.fine(() -> "Saved configuration to " + path);
     }
 
     /**
@@ -145,7 +145,7 @@ public final class GeyserExtraConfig {
             return new GeyserExtraConfig();
         }
 
-        LOGGER.info(() -> "Loaded configuration from " + path);
+        LOGGER.fine(() -> "Loaded configuration from " + path);
         return config;
     }
 
@@ -764,27 +764,21 @@ public final class GeyserExtraConfig {
      * <ul>
      *   <li>{@code off} — write nothing extra. Resulting auto-pack ZIP is
      *       bit-for-bit identical to the pre-feature build. Emergency rollback.</li>
-     *   <li>{@code offsets_only} (<b>default</b>) — write attachable + a flat-quad
-     *       geometry that only encodes the Java {@code display} transform
-     *       (firstperson_righthand / thirdperson_righthand). 3D Blockbench
-     *       {@code elements} are ignored. Held-item angle/position match Java;
-     *       the shape is a flat 2D quad of the icon texture.</li>
-     *   <li>{@code full} — write attachable + full 3D geometry derived from
-     *       Java {@code elements}. Opt-in (not default) because the per-cube UV
-     *       mapping is currently a single {@code [0, 0]} pair, so most
-     *       multi-face Blockbench models will sample wrong texels on each face
-     *       compared to Java. Use when you have validated the visual output
-     *       per item, or when the Bedrock-side mismatch is acceptable.</li>
+     *   <li>{@code offsets_only} (<b>default</b>) — write attachable + display
+     *       transform animations. Models <em>without</em> Java {@code elements}
+     *       use a flat-quad icon. Models <em>with</em> {@code elements} (3D
+     *       Blockbench weapons, etc.) automatically use full 3D geometry so
+     *       large hand offsets are not applied to a 2D quad (which caused
+     *       floating / mis-oriented hammers).</li>
+     *   <li>{@code full} — always prefer full 3D geometry from Java
+     *       {@code elements} when present (same 3D path as the auto-upgrade
+     *       above). Falls back to flat-quad when the model has no elements.</li>
      * </ul>
      *
-     * <p><b>Default change history:</b> the {@code offsets_only} default was
-     * chosen after a dual-agent review flagged that {@code full} as the default
-     * (a) breaks byte-stability of the generated ZIP for existing operators
-     * even without any config change, and (b) ships untested axis-sign defaults
-     * with discarded per-face UV. {@code offsets_only} resolves both concerns:
-     * held-item pose matches Java, the 2D texture is correct because it reuses
-     * the existing flat-quad path, and operators can still opt in to {@code full}
-     * when they want experimental 3D rendering.</p>
+     * <p><b>Default change history:</b> {@code offsets_only} stayed the default
+     * for 2D icon stability; the elements auto-upgrade was added after
+     * ValhallaMMO warhammers floated off-hand under pure flat-quad + display
+     * offsets.</p>
      */
     public static final class AttachableGenerationConfig {
 
@@ -793,15 +787,16 @@ public final class GeyserExtraConfig {
         /** Write attachable with flat-quad geometry + display transform animation. Default. */
         public static final String MODE_OFFSETS_ONLY = "offsets_only";
         /**
-         * Write attachable with full 3D geometry from Java elements + display
-         * transform. <b>Not the default</b> — opt-in only because of the
-         * known per-face UV limitation documented in the class javadoc.
+         * Always prefer full 3D geometry from Java elements when present.
+         * Note: {@link #MODE_OFFSETS_ONLY} already auto-upgrades to 3D when
+         * elements exist; {@code full} forces that path explicitly.
          */
         public static final String MODE_FULL = "full";
 
         private final String mode;
         private final boolean forceFirstPersonOnly;
         private final boolean debugDumpArtifacts;
+        private final BasePose firstPersonBasePose;
 
         public AttachableGenerationConfig() {
             this(MODE_OFFSETS_ONLY, false, false);
@@ -810,9 +805,17 @@ public final class GeyserExtraConfig {
         public AttachableGenerationConfig(String mode,
                                           boolean forceFirstPersonOnly,
                                           boolean debugDumpArtifacts) {
+            this(mode, forceFirstPersonOnly, debugDumpArtifacts, null);
+        }
+
+        public AttachableGenerationConfig(String mode,
+                                          boolean forceFirstPersonOnly,
+                                          boolean debugDumpArtifacts,
+                                          BasePose firstPersonBasePose) {
             this.mode = normalizeMode(mode);
             this.forceFirstPersonOnly = forceFirstPersonOnly;
             this.debugDumpArtifacts = debugDumpArtifacts;
+            this.firstPersonBasePose = firstPersonBasePose;
         }
 
         private static String normalizeMode(String raw) {
@@ -850,6 +853,77 @@ public final class GeyserExtraConfig {
          */
         public boolean debugDumpArtifacts() {
             return debugDumpArtifacts;
+        }
+
+        /**
+         * The fixed first-person base pose applied to the attachable root
+         * bone. Bedrock's first-person arm frame differs from Java's
+         * camera-space item frame, so this constant maps one onto the other;
+         * the default is java2bedrock's empirically-tuned approximation.
+         * Operators can fine-tune per server via
+         * {@code customItems.attachableGeneration.firstPersonBasePose}.
+         * Never {@code null}.
+         */
+        public BasePose firstPersonBasePose() {
+            return firstPersonBasePose != null
+                ? firstPersonBasePose
+                : BasePose.FIRST_PERSON_DEFAULT;
+        }
+
+        /**
+         * Whether the operator explicitly configured a first-person base
+         * pose. When {@code true}, the attachable writer honours the manual
+         * pose even for 3D (elements) models instead of the automatic
+         * Rainbow-derived first-person conversion — the config acts as an
+         * escape hatch for models the automatic mapping gets wrong.
+         */
+        public boolean hasExplicitFirstPersonBasePose() {
+            return firstPersonBasePose != null;
+        }
+
+        /**
+         * A fixed bone pose (rotation degrees, position pixels, uniform scale)
+         * for attachable base-pose tuning. Missing JSON fields fall back to
+         * the java2bedrock first-person defaults.
+         */
+        public static final class BasePose {
+
+            private static final float[] DEFAULT_ROTATION = {90f, 60f, -40f};
+            private static final float[] DEFAULT_POSITION = {4f, 10f, 4f};
+            private static final float DEFAULT_SCALE = 1.5f;
+
+            /** java2bedrock's first-person main-hand constants. */
+            public static final BasePose FIRST_PERSON_DEFAULT =
+                new BasePose(DEFAULT_ROTATION.clone(), DEFAULT_POSITION.clone(), DEFAULT_SCALE);
+
+            private final float[] rotation;
+            private final float[] position;
+            private final float scale;
+
+            public BasePose(float[] rotation, float[] position, float scale) {
+                this.rotation = rotation;
+                this.position = position;
+                this.scale = scale;
+            }
+
+            public float[] rotation() {
+                return normalized(rotation, DEFAULT_ROTATION);
+            }
+
+            public float[] position() {
+                return normalized(position, DEFAULT_POSITION);
+            }
+
+            public float scale() {
+                return scale > 0f ? scale : DEFAULT_SCALE;
+            }
+
+            private static float[] normalized(float[] value, float[] fallback) {
+                if (value == null || value.length != 3) {
+                    return fallback.clone();
+                }
+                return value.clone();
+            }
         }
     }
 

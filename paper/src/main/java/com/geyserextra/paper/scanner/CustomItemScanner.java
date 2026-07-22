@@ -83,6 +83,16 @@ public final class CustomItemScanner {
             return Optional.empty();
         }
 
+        if (itemStack.isDataOverridden(DataComponentTypes.ITEM_MODEL)) {
+            net.kyori.adventure.key.Key itemModel =
+                itemStack.getData(DataComponentTypes.ITEM_MODEL);
+            if (itemModel != null
+                && !MINECRAFT_NAMESPACE.substring(0,
+                    MINECRAFT_NAMESPACE.length() - 1).equals(itemModel.namespace())) {
+                return scanItemModelItem(itemStack, itemModel.asString());
+            }
+        }
+
         if (!itemStack.hasData(DataComponentTypes.CUSTOM_MODEL_DATA)) {
             // Phase 1: route CMD-less items through the PDC path when the
             // feature flag is on. When the flag is off, behaviour is identical
@@ -162,7 +172,7 @@ public final class CustomItemScanner {
             if (wantDisplayUpgrade) reasons.append("displayName,");
             if (wantUnbreakableUpgrade) reasons.append("unbreakable,");
             if (wantCategoryUpgrade) reasons.append("category,");
-            plugin.getLogger().info("Upgraded auto-named mapping " + existing.name()
+            plugin.getLogger().fine("Upgraded auto-named mapping " + existing.name()
                 + " [+" + reasons.substring(0, reasons.length() - 1) + "]"
                 + " — continuing to register with richer metadata");
             // Fall through to register a new entry below.
@@ -206,9 +216,49 @@ public final class CustomItemScanner {
                 plugin.getLogger().fine("Auto-registered " + name + " (no PDC; CMD=" + primaryCmdValue + ")");
             }
         } else {
-            plugin.getLogger().info("Registered custom item: " + name + " (CMD: " + primaryCmdValue + ")");
+            plugin.getLogger().fine("Registered custom item: " + name + " (CMD: " + primaryCmdValue + ")");
         }
 
+        return Optional.of(mapping);
+    }
+
+    private Optional<CustomItemMapping> scanItemModelItem(
+        ItemStack itemStack,
+        String itemModelId
+    ) {
+        String baseItem = buildBaseItemIdentifier(itemStack);
+        Optional<CustomItemMapping> existing =
+            registry.getByItemModel(baseItem, itemModelId);
+        if (existing.isPresent()) {
+            return existing;
+        }
+
+        String name = "itemmodel_" + itemModelId.toLowerCase(Locale.ROOT)
+            .replaceAll("[^a-z0-9_\\-./]", "_")
+            .replace('/', '_')
+            .replace('.', '_');
+        if (registry.contains(name)) {
+            name += "_" + Integer.toHexString(
+                (baseItem + "\0" + itemModelId).hashCode() & 0xfffff);
+        }
+
+        CustomItemMapping mapping = new CustomItemMapping(
+            name,
+            baseItem,
+            0,
+            isUnbreakable(itemStack),
+            extractDisplayName(itemStack),
+            null,
+            determineCreativeCategory(itemStack.getType()),
+            null,
+            true,
+            null,
+            extractArmorData(itemStack),
+            itemModelId
+        );
+        registry.register(mapping);
+        plugin.getLogger().info("[ItemModel] Discovered " + itemModelId
+            + " on " + baseItem + "; Bedrock texture will activate after restart.");
         return Optional.of(mapping);
     }
 
@@ -235,7 +285,7 @@ public final class CustomItemScanner {
         }
 
         if (GeyserExtraConfig.CustomItemsConfig.PDC_WARNING_FULL.equals(mode)) {
-            plugin.getLogger().info(String.format(
+            plugin.getLogger().fine(String.format(
                 "[Auto] Registered without PDC: %s CMD=%d (BE will use base texture)",
                 baseItem, cmdValue));
         }
@@ -306,7 +356,7 @@ public final class CustomItemScanner {
             return;
         }
 
-        plugin.getLogger().info(String.format(
+        plugin.getLogger().fine(String.format(
             "[CustomItems] Auto-registered %d item(s) without PDC identifier "
             + "(BE clients render them as the base item via the auto-generated pack).",
             count));
@@ -375,7 +425,7 @@ public final class CustomItemScanner {
             }
         }
 
-        plugin.getLogger().info("Player scan complete. Found " + totalDiscovered
+        plugin.getLogger().fine("Player scan complete. Found " + totalDiscovered
             + " items. Registry size: " + registry.size());
     }
 
@@ -845,7 +895,7 @@ public final class CustomItemScanner {
             armorDataPdc                                  // Phase 7a armor metadata (nullable)
         );
         registry.register(mapping);
-        plugin.getLogger().info("Registered PDC custom item: " + sanitizedName
+        plugin.getLogger().fine("Registered PDC custom item: " + sanitizedName
             + " (pdc=" + pdcId + ", base=" + baseItem + ")");
         return Optional.of(mapping);
     }

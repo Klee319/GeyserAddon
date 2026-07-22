@@ -21,11 +21,26 @@ import java.util.logging.Logger;
  * the identifiers match exactly, so this is the only "wiring" needed —
  * Geyser itself has no setter for attachables in its v2 API.</p>
  *
- * <p><b>Phase 3 (this release):</b> always writes a flat-quad geometry
- * (single 16x16 quad facing the camera) and uses the Java {@code display}
- * transform on the {@code rightitem} bone's animation channels. Phase 4
- * will replace the flat quad with Java {@code elements}-derived cubes
- * when {@code mode == full} and the model has elements.</p>
+ * <p><b>Rendering scheme:</b> flat items (no Java {@code elements}) keep the
+ * field-proven <a href="https://github.com/Kas-tle/java2bedrock.sh">java2bedrock</a>
+ * four-bone chain {@code root → x → y → z} with {@code texture_meshes} on
+ * {@code z}; the root binds to the player skeleton and receives a fixed
+ * per-slot base pose while the Java display rotation is decomposed onto
+ * {@code x}/{@code y}/{@code z}.</p>
+ *
+ * <p>3D models with elements use GeyserMC
+ * <a href="https://github.com/GeyserMC/Rainbow">Rainbow</a>
+ * ({@code GeometryMapper} + {@code AnimationMapper}) unless the operator sets
+ * an explicit {@code firstPersonBasePose} (legacy escape hatch): a single
+ * bone {@code geyserextra} binds to the skeleton, pivots at the model bounds
+ * centre, holds the cubes, and receives both first- and third-person Rainbow
+ * hold poses. No {@code x}/{@code y}/{@code z}/{@code geo} chain on that
+ * path.</p>
+ *
+ * <p><b>Geometry:</b> models with Java {@code elements} emit 3D cubes under
+ * both {@code offsets_only} and {@code full} (auto-upgrade). Models without
+ * {@code elements} use a Bedrock {@code texture_meshes} entry which extrudes
+ * the PNG exactly like Java's {@code item/generated} renderer.</p>
  */
 public final class BedrockAttachableWriter {
 
@@ -35,8 +50,44 @@ public final class BedrockAttachableWriter {
     /** Sub-folder under each artifact category — keeps generated files out of operator-authored content. */
     private static final String FOLDER = "geyserextra_auto";
 
-    /** Bone name that the standard {@code controller.render.item_default} drives. */
-    private static final String HELD_BONE = "rightitem";
+    /** Root bone: binds to the player skeleton and carries the per-slot base pose. */
+    private static final String BONE_ROOT = "geyserextra";
+    /** Carries the X component of the Java display rotation plus the translation. */
+    private static final String BONE_X = "geyserextra_x";
+    /** Carries the Y component of the Java display rotation. */
+    private static final String BONE_Y = "geyserextra_y";
+    /** Carries the Z component of the Java display rotation. */
+    private static final String BONE_Z = "geyserextra_z";
+    /**
+     * Legacy leaf bone for the explicit-{@code firstPersonBasePose} escape hatch:
+     * cubes live here (child of {@code z}) with a bounds-centre pivot while
+     * hold animations still use the java2bedrock {@code x}/{@code y}/{@code z}
+     * decomposition.
+     */
+    private static final String BONE_GEO = "geyserextra_geo";
+
+    /**
+     * Molang binding that attaches the root bone to whichever player bone
+     * currently holds the item (main hand, off hand, or head). Verbatim from
+     * java2bedrock — {@code q.item_slot_to_bone_name} does not handle the
+     * head slot, hence the explicit ternary.
+     */
+    private static final String ROOT_BONE_BINDING =
+        "c.item_slot == 'head' ? 'head' : q.item_slot_to_bone_name(c.item_slot)";
+
+    /**
+     * Fixed base poses that map Bedrock's item-slot bone frame onto Java's
+     * display frame. Without these, Java display values are applied in the
+     * wrong reference frame and the model floats away from the hand.
+     * Values are java2bedrock's empirically-tuned constants. The first-person
+     * pose is operator-tunable via
+     * {@code customItems.attachableGeneration.firstPersonBasePose}.
+     */
+    private static final List<Float> THIRD_PERSON_BASE_ROTATION = List.of(90f, 0f, 0f);
+    private static final List<Float> THIRD_PERSON_BASE_POSITION = List.of(0f, 13f, -3f);
+    private static final List<Float> HEAD_BASE_POSITION = List.of(0f, 19.9f, 0f);
+    /** Java scales head-slot rendering to 62.5% of the model's declared size. */
+    private static final float HEAD_SCALE = 0.625f;
 
     private BedrockAttachableWriter() {}
 
@@ -131,20 +182,30 @@ public final class BedrockAttachableWriter {
         int safeTw = textureWidth > 0 ? textureWidth : 16;
         int safeTh = textureHeight > 0 ? textureHeight : 16;
 
-        // full mode + non-empty elements → emit real 3D cubes with per-face UV.
-        // offsets_only or empty elements → fall back to the flat-quad geometry.
-        boolean useFullGeometry = AttachableGenerationConfig.MODE_FULL.equals(mode)
-            && geometry != null
-            && geometry.hasElements();
+        // full mode + elements → 3D cubes with per-face UV.
+        // offsets_only + elements → also use 3D cubes: Valhalla-style weapons
+        // ship large display translations meant for the voxel mesh; applying
+        // those offsets to a flat 16x16 quad makes the item float / face the
+        // wrong way in-hand. Auto-upgrade only when elements exist so plain
+        // 2D icon overrides keep the lightweight flat-quad path.
+        // offsets_only / full with empty elements → flat-quad geometry.
+        boolean useFullGeometry = geometry != null
+            && geometry.hasElements()
+            && (AttachableGenerationConfig.MODE_FULL.equals(mode)
+                || AttachableGenerationConfig.MODE_OFFSETS_ONLY.equals(mode));
+        boolean rainbowSingleBone = useFullGeometry
+            && !config.hasExplicitFirstPersonBasePose();
 
         Map<String, String> out = new LinkedHashMap<>();
         out.put(attachableEntryPath(iconKey),
-                JsonUtil.toPrettyJson(buildAttachableJson(iconKey, textureRelativePath, config)));
+                JsonUtil.toPrettyJson(buildAttachableJson(iconKey, textureRelativePath, display, config)));
         out.put(geometryEntryPath(iconKey),
                 JsonUtil.toPrettyJson(buildGeometryJson(
-                    iconKey, useFullGeometry ? geometry : null, safeTw, safeTh, logger)));
+                    iconKey, useFullGeometry ? geometry : null, safeTw, safeTh,
+                    rainbowSingleBone, logger)));
         out.put(animationEntryPath(iconKey),
-                JsonUtil.toPrettyJson(buildAnimationJson(iconKey, display, config)));
+                JsonUtil.toPrettyJson(buildAnimationJson(
+                    iconKey, display, config, rainbowSingleBone)));
         return out;
     }
 
@@ -244,7 +305,10 @@ public final class BedrockAttachableWriter {
     // ---------------------------------------------------------------------
 
     private static Map<String, Object> buildAttachableJson(
-        String iconKey, String textureRelativePath, AttachableGenerationConfig config
+        String iconKey,
+        String textureRelativePath,
+        JavaModelDisplay display,
+        AttachableGenerationConfig config
     ) {
         // Path written to attachable.textures must omit the trailing extension
         // (Bedrock appends .png automatically). The auto-pack writes the PNG
@@ -264,21 +328,39 @@ public final class BedrockAttachableWriter {
             "enchanted", "textures/misc/enchanted_item_glint"));
         description.put("geometry", Map.of("default", "geometry." + NAMESPACE + "." + iconKey));
 
+        boolean withThirdPerson = !config.forceFirstPersonOnly();
+        boolean withHead = display.head() != null;
+        String animPrefix = "animation." + NAMESPACE + "." + iconKey + ".";
+
         Map<String, String> animations = new LinkedHashMap<>();
-        animations.put("hold_first_person",
-            "animation." + NAMESPACE + "." + iconKey + ".first_person");
-        if (!config.forceFirstPersonOnly()) {
-            animations.put("hold_third_person",
-                "animation." + NAMESPACE + "." + iconKey + ".third_person");
+        List<Map<String, String>> animate = new ArrayList<>();
+        if (withThirdPerson) {
+            animations.put("thirdperson_main_hand", animPrefix + "thirdperson_main_hand");
+            animations.put("thirdperson_off_hand", animPrefix + "thirdperson_off_hand");
+            animate.add(Map.of("thirdperson_main_hand", "v.main_hand && !c.is_first_person"));
+            animate.add(Map.of("thirdperson_off_hand", "v.off_hand && !c.is_first_person"));
+        }
+        animations.put("firstperson_main_hand", animPrefix + "firstperson_main_hand");
+        animations.put("firstperson_off_hand", animPrefix + "firstperson_off_hand");
+        animate.add(Map.of("firstperson_main_hand", "v.main_hand && c.is_first_person"));
+        animate.add(Map.of("firstperson_off_hand", "v.off_hand && c.is_first_person"));
+        if (withHead) {
+            animations.put("thirdperson_head", animPrefix + "head");
+            animations.put("firstperson_head", animPrefix + "disable");
+            animate.add(Map.of("thirdperson_head", "v.head && !c.is_first_person"));
+            // The vanilla first-person camera never shows the player's own
+            // head slot; without the disable animation the mesh floats in view.
+            animate.add(Map.of("firstperson_head", "c.is_first_person && v.head"));
         }
         description.put("animations", animations);
 
-        List<Map<String, String>> scripts = new ArrayList<>();
-        scripts.add(Map.of("hold_first_person", "context.is_first_person == 1.0"));
-        if (!config.forceFirstPersonOnly()) {
-            scripts.add(Map.of("hold_third_person", "context.is_first_person == 0.0"));
-        }
-        description.put("scripts", Map.of("animate", scripts));
+        Map<String, Object> scripts = new LinkedHashMap<>();
+        scripts.put("pre_animation", List.of(
+            "v.main_hand = c.item_slot == 'main_hand';",
+            "v.off_hand = c.item_slot == 'off_hand';",
+            "v.head = c.item_slot == 'head';"));
+        scripts.put("animate", animate);
+        description.put("scripts", scripts);
 
         description.put("render_controllers", List.of("controller.render.item_default"));
 
@@ -292,67 +374,83 @@ public final class BedrockAttachableWriter {
         JavaModelGeometry fullGeometry,
         int textureWidth,
         int textureHeight,
+        boolean rainbowSingleBone,
         Logger logger
     ) {
-        // Phase 3 baseline: a single 16x16 quad in the XY plane, hinged at
-        // the bone pivot. Phase 4/6: when fullGeometry is non-null we use the
-        // converter's element-derived cubes with per-face UV scaled to the
-        // actual texture dimensions, giving Bedrock a Java-accurate 3D
-        // representation of the model.
         Map<String, Object> descriptor = new LinkedHashMap<>();
         descriptor.put("identifier", "geometry." + NAMESPACE + "." + iconKey);
         descriptor.put("texture_width", textureWidth);
         descriptor.put("texture_height", textureHeight);
-        descriptor.put("visible_bounds_width", 2);
-        descriptor.put("visible_bounds_height", 2);
-        descriptor.put("visible_bounds_offset", List.of(0, 0.5, 0));
+        // Generous bounds (java2bedrock values) so oversized weapons are not
+        // frustum-culled while swinging at the edge of the screen.
+        descriptor.put("visible_bounds_width", 4);
+        descriptor.put("visible_bounds_height", 4.5);
+        descriptor.put("visible_bounds_offset", List.of(0, 0.75, 0));
 
-        List<Map<String, Object>> cubes;
+        // Bone chain root → x → y → z (all pivot [0,8,0]): the root binds to
+        // the player skeleton, the x/y/z bones each carry one axis of the
+        // Java display rotation so the three rotations compose in Java's
+        // application order — a single Euler triple on one bone cannot
+        // reproduce that order in Bedrock's rotation convention.
+        Map<String, Object> root = new LinkedHashMap<>();
+        root.put("name", BONE_ROOT);
+        root.put("binding", ROOT_BONE_BINDING);
+        root.put("pivot", List.of(0, 8, 0));
+
+        Map<String, Object> boneX = new LinkedHashMap<>();
+        boneX.put("name", BONE_X);
+        boneX.put("parent", BONE_ROOT);
+        boneX.put("pivot", List.of(0, 8, 0));
+
+        Map<String, Object> boneY = new LinkedHashMap<>();
+        boneY.put("name", BONE_Y);
+        boneY.put("parent", BONE_X);
+        boneY.put("pivot", List.of(0, 8, 0));
+
+        Map<String, Object> boneZ = new LinkedHashMap<>();
+        boneZ.put("name", BONE_Z);
+        boneZ.put("parent", BONE_Y);
+        boneZ.put("pivot", List.of(0, 8, 0));
+
+        List<Map<String, Object>> bones;
         if (fullGeometry != null && fullGeometry.hasElements()) {
-            cubes = BedrockGeometryConverter.convertElementsToCubes(
+            List<Map<String, Object>> cubes = BedrockGeometryConverter.convertElementsToCubes(
                 fullGeometry, textureWidth, textureHeight, logger);
-        } else {
-            // Flat-quad fallback (Phase 3 path). Use a single uv_size pair
-            // matching the actual texture dims so non-16x16 PNGs are sampled
-            // in full rather than cropped to the top-left 16x16 corner.
-            Map<String, Object> flatQuad = new LinkedHashMap<>();
-            flatQuad.put("origin", List.of(-8, 0, 0));
-            flatQuad.put("size", List.of(16, 16, 0));
-            if (textureWidth == 16 && textureHeight == 16) {
-                // Keep the simple form for the vanilla case so the generated
-                // JSON stays byte-identical to pre-Phase-6 for 16x16 icons.
-                flatQuad.put("uv", List.of(0, 0));
-            } else {
-                // Per-face UV form lets us pin the sample region to the full
-                // texture extent regardless of PNG resolution.
-                //
-                // For a {@code size: [16, 16, 0]} flat quad both the north
-                // (-Z) and south (+Z) faces are non-degenerate; depending on
-                // the camera angle the player may see either, so declaring
-                // both keeps the icon visible from every viewpoint and
-                // matches the simple-UV form's rendering behaviour. Faces
-                // with zero area (east/west/up/down for a 0-depth quad) are
-                // intentionally omitted — Bedrock skips them anyway.
-                Map<String, Object> uvMap = new LinkedHashMap<>();
-                for (String face : List.of("north", "south")) {
-                    Map<String, Object> faceUv = new LinkedHashMap<>();
-                    faceUv.put("uv", List.of(0, 0));
-                    faceUv.put("uv_size", List.of(textureWidth, textureHeight));
-                    uvMap.put(face, faceUv);
-                }
-                flatQuad.put("uv", uvMap);
-            }
-            cubes = List.of(flatQuad);
-        }
+            float[] pivot = BedrockGeometryConverter.computeBoundsCentrePivot(cubes);
 
-        Map<String, Object> bone = new LinkedHashMap<>();
-        bone.put("name", HELD_BONE);
-        bone.put("pivot", List.of(0, 0, 0));
-        bone.put("cubes", cubes);
+            if (rainbowSingleBone) {
+                // Rainbow GeometryMapper: one bound bone at bounds-centre pivot.
+                root.put("pivot", List.of(pivot[0], pivot[1], pivot[2]));
+                root.put("cubes", cubes);
+                bones = List.of(root);
+            } else {
+                // Explicit firstPersonBasePose escape hatch: java2bedrock chain +
+                // geo leaf at bounds centre (cubes only; hold anim uses x/y/z).
+                Map<String, Object> boneGeo = new LinkedHashMap<>();
+                boneGeo.put("name", BONE_GEO);
+                boneGeo.put("parent", BONE_Z);
+                boneGeo.put("pivot", List.of(pivot[0], pivot[1], pivot[2]));
+                boneGeo.put("cubes", cubes);
+                bones = List.of(root, boneX, boneY, boneZ, boneGeo);
+            }
+        } else {
+            // No Java elements → the model is item/generated style. Bedrock's
+            // texture_meshes extrudes the PNG into a voxel mesh exactly like
+            // Java's own item renderer, which both looks correct from every
+            // angle and keeps the base-pose constants valid (they were tuned
+            // against this mesh orientation in java2bedrock).
+            Map<String, Object> textureMesh = new LinkedHashMap<>();
+            textureMesh.put("texture", "default");
+            textureMesh.put("position", List.of(0, 8, 0));
+            textureMesh.put("rotation", List.of(90, 0, -180));
+            textureMesh.put("local_pivot", List.of(8, 0.5, 8));
+            boneZ.put("texture_meshes", List.of(textureMesh));
+            bones = List.of(root, boneX, boneY, boneZ);
+        }
 
         Map<String, Object> geometry = new LinkedHashMap<>();
         geometry.put("description", descriptor);
-        geometry.put("bones", List.of(bone));
+        geometry.put("bones", bones);
 
         return linkedMap(
             "format_version", "1.16.0",
@@ -360,39 +458,182 @@ public final class BedrockAttachableWriter {
     }
 
     private static Map<String, Object> buildAnimationJson(
-        String iconKey, JavaModelDisplay display, AttachableGenerationConfig config
+        String iconKey,
+        JavaModelDisplay display,
+        AttachableGenerationConfig config,
+        boolean rainbowSingleBone
     ) {
+        String animPrefix = "animation." + NAMESPACE + "." + iconKey + ".";
+        JavaModelDisplay.Transform hand3rd = orIdentity(display.handTransformFor(false));
+        JavaModelDisplay.Transform hand1st = orIdentity(display.handTransformFor(true));
+
+        AttachableGenerationConfig.BasePose firstPersonPose = config.firstPersonBasePose();
+
         Map<String, Object> animations = new LinkedHashMap<>();
-        animations.put(
-            "animation." + NAMESPACE + "." + iconKey + ".first_person",
-            buildHoldAnimation(display.handTransformFor(true)));
         if (!config.forceFirstPersonOnly()) {
-            animations.put(
-                "animation." + NAMESPACE + "." + iconKey + ".third_person",
-                buildHoldAnimation(display.handTransformFor(false)));
+            animations.put(animPrefix + "thirdperson_main_hand",
+                buildHoldAnimation(hand3rd, false, false, firstPersonPose, rainbowSingleBone));
+            // Java models rarely declare left-hand slots; vanilla mirrors the
+            // right-hand transform, and the off-hand sign matrix in
+            // convertTranslation performs exactly that mirror.
+            animations.put(animPrefix + "thirdperson_off_hand",
+                buildHoldAnimation(hand3rd, false, true, firstPersonPose, rainbowSingleBone));
+        }
+        animations.put(animPrefix + "firstperson_main_hand",
+            buildHoldAnimation(hand1st, true, false, firstPersonPose, rainbowSingleBone));
+        animations.put(animPrefix + "firstperson_off_hand",
+            buildHoldAnimation(hand1st, true, true, firstPersonPose, rainbowSingleBone));
+        if (display.head() != null) {
+            animations.put(animPrefix + "head",
+                buildHeadAnimation(display.head(), rainbowSingleBone));
+            animations.put(animPrefix + "disable", buildDisableAnimation());
         }
         return linkedMap(
             "format_version", "1.8.0",
             "animations", animations);
     }
 
-    private static Map<String, Object> buildHoldAnimation(JavaModelDisplay.Transform transform) {
-        JavaModelDisplay.Transform t = transform != null
-            ? transform
-            : JavaModelDisplay.Transform.identity();
+    private static JavaModelDisplay.Transform orIdentity(JavaModelDisplay.Transform t) {
+        return t != null ? t : JavaModelDisplay.Transform.identity();
+    }
 
-        float[] rotation = BedrockGeometryConverter.convertRotation(t.rotation());
-        float[] position = BedrockGeometryConverter.convertTranslation(t.translation());
-        float[] scale = BedrockGeometryConverter.convertScale(t.scale());
+    /**
+     * Builds one held-item animation: the root bone gets the fixed per-slot
+     * base pose, the x bone gets X rotation + translation + scale, and the
+     * y/z bones get their single rotation axis (java2bedrock decomposition).
+     *
+     * <p><b>3D Rainbow path</b> ({@code rainbowSingleBone}): GeyserMC
+     * {@code AnimationMapper} axis-permutation on {@link #BONE_ROOT} (the
+     * same bone that binds to the skeleton and holds the cubes). Translations
+     * are already in Bedrock pixel units in this codebase.</p>
+     * <pre>
+     *   First person:
+     *     rotation = (-90 + javaRot.y, -javaRot.z, javaRot.x)
+     *     position = (-javaTrans.y, 12.5 + javaTrans.z, javaTrans.x)
+     *   Third person:
+     *     rotation = (90, -javaRot.z, -javaRot.y)
+     *     position = (-javaTrans.x, 12.5 + javaTrans.z, -javaTrans.y)
+     *   scale = javaScale (per axis, unchanged) for both slots
+     * </pre>
+     * <p>Bedrock cannot address left/right hands separately in first person
+     * (Rainbow limitation), so off-hand animations reuse the right-hand
+     * values verbatim on this path (third-person off-hand included).</p>
+     */
+    private static Map<String, Object> buildHoldAnimation(
+        JavaModelDisplay.Transform transform,
+        boolean firstPerson,
+        boolean offHand,
+        AttachableGenerationConfig.BasePose firstPersonPose,
+        boolean rainbowSingleBone
+    ) {
+        if (rainbowSingleBone) {
+            float[] jr = transform.rotation();
+            float[] jt = transform.translation();
+            float[] js = transform.scale();
 
-        Map<String, Object> bone = new LinkedHashMap<>();
-        bone.put("rotation", List.of(rotation[0], rotation[1], rotation[2]));
-        bone.put("position", List.of(position[0], position[1], position[2]));
-        bone.put("scale", List.of(scale[0], scale[1], scale[2]));
+            Map<String, Object> rootBone = new LinkedHashMap<>();
+            if (firstPerson) {
+                rootBone.put("rotation", List.of(-90f + jr[1], -jr[2], jr[0]));
+                rootBone.put("position", List.of(-jt[1], 12.5f + jt[2], jt[0]));
+            } else {
+                rootBone.put("rotation", List.of(90f, -jr[2], -jr[1]));
+                rootBone.put("position", List.of(-jt[0], 12.5f + jt[2], -jt[1]));
+            }
+            rootBone.put("scale", List.of(js[0], js[1], js[2]));
+
+            Map<String, Object> animation = new LinkedHashMap<>();
+            animation.put("loop", true);
+            animation.put("bones", Map.of(BONE_ROOT, rootBone));
+            return animation;
+        }
+
+        float[] rotation = BedrockGeometryConverter.convertRotation(transform.rotation());
+        float[] position = BedrockGeometryConverter.convertTranslation(
+            transform.translation(), firstPerson, offHand);
+        float[] scale = BedrockGeometryConverter.convertScale(transform.scale());
+
+        Map<String, Object> boneX = new LinkedHashMap<>();
+        if (firstPerson && rotation[0] == 0f && rotation[1] == 0f && rotation[2] == 0f) {
+            // java2bedrock quirk: a genuinely zero first-person rotation keeps
+            // the animation channel inactive on some client versions; the
+            // 0.1° epsilon forces it active without a visible pose change.
+            boneX.put("rotation", List.of(0.1f, 0.1f, 0.1f));
+        } else {
+            boneX.put("rotation", List.of(rotation[0], 0f, 0f));
+        }
+        boneX.put("position", List.of(position[0], position[1], position[2]));
+        boneX.put("scale", List.of(scale[0], scale[1], scale[2]));
+
+        Map<String, Object> bones = new LinkedHashMap<>();
+        bones.put(BONE_X, boneX);
+        bones.put(BONE_Y, Map.of("rotation", List.of(0f, rotation[1], 0f)));
+        bones.put(BONE_Z, Map.of("rotation", List.of(0f, 0f, rotation[2])));
+        Map<String, Object> root = new LinkedHashMap<>();
+        if (firstPerson) {
+            float[] baseRot = firstPersonPose.rotation();
+            float[] basePos = firstPersonPose.position();
+            root.put("rotation", List.of(baseRot[0], baseRot[1], baseRot[2]));
+            root.put("position", List.of(basePos[0], basePos[1], basePos[2]));
+            root.put("scale", firstPersonPose.scale());
+        } else {
+            root.put("rotation", THIRD_PERSON_BASE_ROTATION);
+            root.put("position", THIRD_PERSON_BASE_POSITION);
+        }
+        bones.put(BONE_ROOT, root);
 
         Map<String, Object> animation = new LinkedHashMap<>();
-        animation.put("loop", "hold_on_last_frame");
-        animation.put("bones", Map.of(HELD_BONE, bone));
+        animation.put("loop", true);
+        animation.put("bones", bones);
+        return animation;
+    }
+
+    /** Third-person head-slot pose: Java renders head items at 62.5% scale. */
+    private static Map<String, Object> buildHeadAnimation(
+        JavaModelDisplay.Transform transform,
+        boolean rainbowSingleBone
+    ) {
+        float[] rotation = BedrockGeometryConverter.convertRotation(transform.rotation());
+        float[] translation = transform.translation();
+        float[] scale = BedrockGeometryConverter.convertScale(transform.scale());
+
+        Map<String, Object> bones = new LinkedHashMap<>();
+        if (rainbowSingleBone) {
+            Map<String, Object> root = new LinkedHashMap<>();
+            root.put("rotation", List.of(rotation[0], rotation[1], rotation[2]));
+            root.put("position", List.of(
+                HEAD_BASE_POSITION.get(0) - translation[0] * HEAD_SCALE,
+                HEAD_BASE_POSITION.get(1) + translation[1] * HEAD_SCALE,
+                HEAD_BASE_POSITION.get(2) + translation[2] * HEAD_SCALE));
+            root.put("scale", List.of(
+                scale[0] * HEAD_SCALE, scale[1] * HEAD_SCALE, scale[2] * HEAD_SCALE));
+            bones.put(BONE_ROOT, root);
+        } else {
+            Map<String, Object> boneX = new LinkedHashMap<>();
+            boneX.put("rotation", List.of(rotation[0], 0f, 0f));
+            boneX.put("position", List.of(
+                -translation[0] * HEAD_SCALE,
+                translation[1] * HEAD_SCALE,
+                translation[2] * HEAD_SCALE));
+            boneX.put("scale", List.of(
+                scale[0] * HEAD_SCALE, scale[1] * HEAD_SCALE, scale[2] * HEAD_SCALE));
+            bones.put(BONE_X, boneX);
+            bones.put(BONE_Y, Map.of("rotation", List.of(0f, rotation[1], 0f)));
+            bones.put(BONE_Z, Map.of("rotation", List.of(0f, 0f, rotation[2])));
+            bones.put(BONE_ROOT, Map.of("position", HEAD_BASE_POSITION));
+        }
+
+        Map<String, Object> animation = new LinkedHashMap<>();
+        animation.put("loop", true);
+        animation.put("bones", bones);
+        return animation;
+    }
+
+    /** Hides the mesh (first-person head slot — the camera is inside the head). */
+    private static Map<String, Object> buildDisableAnimation() {
+        Map<String, Object> animation = new LinkedHashMap<>();
+        animation.put("loop", true);
+        animation.put("override_previous_animation", true);
+        animation.put("bones", Map.of(BONE_ROOT, Map.of("scale", 0)));
         return animation;
     }
 

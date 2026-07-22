@@ -4,11 +4,9 @@ main: com.geyserextra.paper.GeyserExtraPaper
 api-version: '1.21'
 # Required dependencies - plugin will not work without these
 depend: [ProtocolLib, floodgate]
-# Optional dependencies - load before us if present, but not required
-# Geyser-Spigot is softdepend so GeyserExtra Paper loads BEFORE Geyser
-# This ensures custom_items.json is ready when Geyser Extension reads it
-softdepend: [Geyser-Spigot, ItemsAdder, Oraxen]
-# Load before Geyser-Spigot to ensure data is ready for Extension
+# Optional item providers load before us if present, but are not required
+softdepend: [ItemsAdder, Oraxen]
+# GeyserExtra must load before Geyser caches the generated pack and mappings
 loadbefore: [Geyser-Spigot]
 description: Enhanced Bedrock player experience on Paper servers
 authors: [GeyserExtra]

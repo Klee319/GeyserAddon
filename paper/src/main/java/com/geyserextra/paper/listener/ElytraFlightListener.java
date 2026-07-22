@@ -265,7 +265,7 @@ public final class ElytraFlightListener implements Listener {
         removeArmorModifiers(player);
         savePersistence();
 
-        logger.info("[ElytraFlight] Restored crash-recovery chestplate for: "
+        logger.fine("[ElytraFlight] Restored crash-recovery chestplate for: "
                 + player.getName());
     }
 
@@ -364,7 +364,7 @@ public final class ElytraFlightListener implements Listener {
                 MONITOR_INTERVAL_TICKS,
                 MONITOR_INTERVAL_TICKS
         );
-        logger.info("[ElytraFlight] Gliding monitor task started (interval: "
+        logger.fine("[ElytraFlight] Gliding monitor task started (interval: "
                 + MONITOR_INTERVAL_TICKS + " ticks).");
     }
 
@@ -433,7 +433,7 @@ public final class ElytraFlightListener implements Listener {
         // Delete persistence file after successful cleanup
         deletePersistenceFile();
 
-        logger.info("[ElytraFlight] Cleanup complete — all gliding states restored.");
+        logger.fine("[ElytraFlight] Cleanup complete — all gliding states restored.");
     }
 
     // ── Core Logic ──────────────────────────────────────────────────
@@ -854,7 +854,7 @@ public final class ElytraFlightListener implements Listener {
             }
 
             if (restoredCount > 0) {
-                logger.info("[ElytraFlight] Loaded " + restoredCount
+                logger.fine("[ElytraFlight] Loaded " + restoredCount
                         + " pending chestplate restoration(s) from crash recovery.");
             }
         } catch (IOException e) {

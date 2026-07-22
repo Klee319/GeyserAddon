@@ -55,10 +55,10 @@ public final class SmithingRecipeHandler implements Listener {
             api = FloodgateApi.getInstance();
             isEnabled = api != null;
             if (isEnabled) {
-                plugin.getLogger().info("SmithingRecipeHandler: Floodgate detected, Bedrock smithing support enabled");
+                plugin.getLogger().fine("SmithingRecipeHandler: Floodgate detected, Bedrock smithing support enabled");
             }
         } catch (NoClassDefFoundError | Exception e) {
-            plugin.getLogger().info("SmithingRecipeHandler: Floodgate not available, handler disabled");
+            plugin.getLogger().fine("SmithingRecipeHandler: Floodgate not available, handler disabled");
         }
 
         this.floodgateApi = api;
@@ -95,7 +95,7 @@ public final class SmithingRecipeHandler implements Listener {
      */
     public void registerRecipe(String id, SmithingRecipe recipe) {
         customRecipes.put(id, recipe);
-        plugin.getLogger().info("Registered custom smithing recipe: " + id);
+        plugin.getLogger().fine("Registered custom smithing recipe: " + id);
     }
 
     /**
@@ -155,7 +155,7 @@ public final class SmithingRecipeHandler implements Listener {
                     event.setResult(result);
 
                     if (plugin.getGeyserExtraConfig().general().debugMode()) {
-                        plugin.getLogger().info("Applied custom smithing recipe: "
+                        plugin.getLogger().fine("Applied custom smithing recipe: "
                             + (template != null ? template.getType() : "null") + " + "
                             + baseItem.getType() + " + "
                             + (addition != null ? addition.getType() : "null"));

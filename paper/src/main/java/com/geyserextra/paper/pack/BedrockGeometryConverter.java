@@ -12,11 +12,11 @@ import java.util.logging.Logger;
  * the matching Bedrock edition representation.
  *
  * <p>This class is the single source of truth for axis-sign conventions
- * between the two engines. Java models use a right-handed coordinate system;
- * Bedrock entity geometry uses a left-handed one. The constants below encode
- * the empirically-determined axis flips so that "this is how to flip" lives
- * in exactly one place — when implementation revealed a sign was wrong, only
- * this file needs editing.</p>
+ * between the two engines. The conventions are ported verbatim from the
+ * field-proven <a href="https://github.com/Kas-tle/java2bedrock.sh">java2bedrock</a>
+ * converter (the standard Geyser companion tool): Bedrock's attachable frame
+ * mirrors Java's X axis, so geometry is X-mirrored ({@code origin.x = 8 - to.x})
+ * and display rotations flip sign on X and Y while Z stays as-is.</p>
  *
  * <p><b>Phase 3:</b> display-transform conversion (used by animations).</p>
  * <p><b>Phase 4:</b> {@link #convertElementsToCubes} converts Java
@@ -25,23 +25,14 @@ import java.util.logging.Logger;
 public final class BedrockGeometryConverter {
 
     /**
-     * Java rotation in (x, y, z) degrees with right-handed convention →
-     * Bedrock animation bone rotation in degrees, left-handed convention.
-     * Empirically Bedrock's animation framework matches Java's pose when
-     * Y and Z degrees are negated; X stays as-is.
+     * Java display rotation (x, y, z degrees) → Bedrock animation bone
+     * rotation. java2bedrock convention: X and Y negate, Z keeps its sign
+     * (the X-mirrored geometry flips the apparent handedness of the X and Y
+     * axes but not Z).
      */
-    private static final float ROT_X_SIGN = +1f;
+    private static final float ROT_X_SIGN = -1f;
     private static final float ROT_Y_SIGN = -1f;
-    private static final float ROT_Z_SIGN = -1f;
-
-    /**
-     * Java translation in pixels (Y-up) → Bedrock animation bone position
-     * in pixels (Y-up, Z reversed). Negating Z aligns the in-hand depth
-     * direction between the two engines.
-     */
-    private static final float TRANS_X_SIGN = +1f;
-    private static final float TRANS_Y_SIGN = +1f;
-    private static final float TRANS_Z_SIGN = -1f;
+    private static final float ROT_Z_SIGN = +1f;
 
     private BedrockGeometryConverter() {}
 
@@ -62,17 +53,32 @@ public final class BedrockGeometryConverter {
     }
 
     /**
-     * Converts a Java {@code display.*.translation} array into Bedrock animation
-     * bone {@code position} (pixel units in both systems). Returns a fresh array.
+     * Converts a Java {@code display.*.translation} array into Bedrock
+     * animation bone {@code position} (pixel units in both systems).
+     *
+     * <p>java2bedrock sign matrix — X negates for the main hand (mirrored
+     * frame) but not for the off hand (Java itself mirrors left-hand
+     * rendering, so the two mirrors cancel); Z negates only in first person
+     * where Bedrock's camera-space depth axis points the other way:</p>
+     * <ul>
+     *   <li>third-person main hand: {@code (-x, y, z)}</li>
+     *   <li>third-person off hand: {@code (x, y, z)}</li>
+     *   <li>first-person main hand: {@code (-x, y, -z)}</li>
+     *   <li>first-person off hand: {@code (x, y, -z)}</li>
+     * </ul>
      */
-    public static float[] convertTranslation(float[] javaTranslation) {
+    public static float[] convertTranslation(
+        float[] javaTranslation, boolean firstPerson, boolean offHand
+    ) {
         if (javaTranslation == null || javaTranslation.length < 3) {
             return new float[]{0f, 0f, 0f};
         }
+        float xSign = offHand ? +1f : -1f;
+        float zSign = firstPerson ? -1f : +1f;
         return new float[]{
-            TRANS_X_SIGN * javaTranslation[0],
-            TRANS_Y_SIGN * javaTranslation[1],
-            TRANS_Z_SIGN * javaTranslation[2]
+            xSign * javaTranslation[0],
+            javaTranslation[1],
+            zSign * javaTranslation[2]
         };
     }
 
@@ -221,13 +227,11 @@ public final class BedrockGeometryConverter {
         float ty = Math.max(from[1], to[1]);
         float tz = Math.max(from[2], to[2]);
 
-        // Java cube corner (negative-Z) maps to Bedrock origin (negative-Z).
-        // The Z reverse — taking (java.from.z - 8) rather than (8 - java.to.z)
-        // — keeps the cube on the same side of the held-item bone that Java's
-        // own renderer puts it on. We verified this empirically against
-        // ValhallaMMO weapons; if a future model shows the cube on the wrong
-        // side, only this offset and convertElementRotation below need touching.
-        float originX = fx - 8f;
+        // java2bedrock mapping: Bedrock's attachable frame mirrors Java's X
+        // axis, so the cube origin (Bedrock's smallest-XYZ corner) takes the
+        // mirrored LARGEST Java X corner: origin.x = -to.x + 8. Y is shared;
+        // Z shifts by -8 to centre depth on the bone pivot.
+        float originX = -tx + 8f;
         float originY = fy;
         float originZ = fz - 8f;
 
@@ -257,17 +261,16 @@ public final class BedrockGeometryConverter {
 
         Map<String, Object> faceUvs = buildPerFaceUvMap(faces, textureWidth, textureHeight, logger);
         if (faceUvs.isEmpty()) {
-            // Every face was either rotated (skipped at convert time), zero-area,
-            // or otherwise unrenderable. Omit the cube rather than promoting to
-            // cube-level UV — promoting would make the cube fully visible and
-            // contradict the operator's intent of having no usable faces.
+            // Every face was zero-area or otherwise unrenderable. Omit the
+            // cube rather than promoting to cube-level UV — promoting would
+            // make the cube fully visible and contradict the operator's
+            // intent of having no usable faces.
             if (logger != null) {
                 logger.warning("[BedrockGeometry] element from " + java.util.Arrays.toString(from)
                     + " to " + java.util.Arrays.toString(to)
                     + " produced no renderable Bedrock faces — skipping cube. "
-                    + "Common causes: every face had non-zero rotation, every "
-                    + "UV had zero width or height, or the texture mapping was "
-                    + "otherwise malformed.");
+                    + "Common causes: every UV had zero width or height, or "
+                    + "the texture mapping was otherwise malformed.");
             }
             return null;
         }
@@ -342,18 +345,22 @@ public final class BedrockGeometryConverter {
         //   - 90°/270° → not expressible in Bedrock 1.16.0 per-face UV (would
         //            require swapping the texture's u/v axes relative to the
         //            face axes; Bedrock per-face uv has no rotation field).
-        //            Skip the face with a clear WARN so operators can either
-        //            pre-rotate the source PNG or accept the missing face.
+        //            Render the face UNROTATED as the closest approximation —
+        //            a hole in the model (the previous skip behaviour) is far
+        //            more visible than a texture rotated 90° off, especially
+        //            on thin weapon parts whose textures are near-uniform.
+        //            Logged at FINE so it never spams the server console.
         int rotation = face.rotation();
         if (rotation != 0 && rotation != 180) {
             if (logger != null) {
-                logger.warning("[BedrockGeometry] face " + faceName + " has Java rotation "
+                logger.fine("[BedrockGeometry] face " + faceName + " has Java rotation "
                     + rotation + "° which Bedrock 1.16.0 per-face UV cannot express "
-                    + "(only 0°/180° supported via negative uv_size) — the face will "
-                    + "not be rendered on Bedrock. To restore visibility, pre-rotate "
-                    + "the texture in the source PNG and set the model face rotation to 0.");
+                    + "(only 0°/180° supported via negative uv_size) — rendering the "
+                    + "face with unrotated UV as an approximation. For an exact match, "
+                    + "pre-rotate the texture region in the source PNG and set the "
+                    + "model face rotation to 0.");
             }
-            return null;
+            rotation = 0;
         }
 
         // Default UV when not specified: [0, 0, 16, 16] (whole texture).
@@ -374,16 +381,23 @@ public final class BedrockGeometryConverter {
         float scaleX = textureWidth / 16f;
         float scaleY = textureHeight / 16f;
 
+        // java2bedrock samples up/down faces point-mirrored (uv anchored at
+        // the (u2,v2) corner with negative sizes): the X-mirrored geometry
+        // flips how Bedrock orients top/bottom face UVs relative to Java.
+        // A Java 180° face rotation is the same point-mirror, so the two
+        // compose via XOR (180° on an up/down face cancels back to identity).
+        boolean verticalFace = "up".equals(faceName) || "down".equals(faceName);
+        boolean pointMirror = (rotation == 180) ^ verticalFace;
+
         float bedrockU;
         float bedrockV;
         float bedrockUSize;
         float bedrockVSize;
-        if (rotation == 180) {
-            // 180° rotation = point-symmetric remap. The face's top-left
-            // corner samples from what was the texture region's bottom-right
-            // corner, and uv_size walks "backwards" via negative values.
-            // Bedrock honours negative uv_size as a flip in that axis, so
-            // double-negating produces a clean 180° rotation visually.
+        if (pointMirror) {
+            // Point-symmetric remap: the face's top-left corner samples from
+            // what was the texture region's bottom-right corner, and uv_size
+            // walks "backwards" via negative values. Bedrock honours negative
+            // uv_size as a flip in that axis.
             bedrockU = u2 * scaleX;
             bedrockV = v2 * scaleY;
             bedrockUSize = -(u2 - u1) * scaleX;
@@ -416,6 +430,8 @@ public final class BedrockGeometryConverter {
     private static float[] convertElementRotation(JavaModelGeometry.ElementRotation rotation) {
         String axis = rotation.axis() != null ? rotation.axis().toLowerCase(Locale.ROOT) : "y";
         float angle = rotation.angle();
+        // Same sign matrix as display rotations (java2bedrock): X/Y negate
+        // because the geometry frame is X-mirrored, Z keeps its sign.
         return switch (axis) {
             case "x" -> new float[]{ROT_X_SIGN * angle, 0f, 0f};
             case "z" -> new float[]{0f, 0f, ROT_Z_SIGN * angle};
@@ -423,12 +439,86 @@ public final class BedrockGeometryConverter {
         };
     }
 
+    /**
+     * Default bone pivot used when a model produces no renderable cubes.
+     * Mirrors the historical java2bedrock fixed pivot so flat / degenerate
+     * models keep their previous behaviour.
+     */
+    private static final float[] DEFAULT_PIVOT = {0f, 8f, 0f};
+
+    /**
+     * Computes the geometric centre of the axis-aligned bounding box that
+     * encloses every converted cube — the pivot Java rotates a held-item
+     * display transform around.
+     *
+     * <p>Ported from GeyserMC/Rainbow's {@code GeometryMapper}: the bone that
+     * carries the cubes must pivot at {@code min + (max - min) / 2} (over the
+     * cubes' {@code origin} and {@code origin + size}) so that display
+     * rotations swing the model around its centre rather than a fixed point.
+     * Using a fixed pivot makes an asymmetric model (e.g. a great-axe whose
+     * bounds are not centred on the origin) rotate about the wrong location,
+     * throwing off the first-person pose.</p>
+     *
+     * @param cubes converted Bedrock cubes (each with {@code origin} and
+     *              {@code size} length-3 numeric lists); {@code null} / empty
+     *              yields {@link #DEFAULT_PIVOT}
+     * @return the bounds-centre pivot {@code [x, y, z]}
+     */
+    public static float[] computeBoundsCentrePivot(List<Map<String, Object>> cubes) {
+        if (cubes == null || cubes.isEmpty()) {
+            return DEFAULT_PIVOT.clone();
+        }
+        float minX = Float.MAX_VALUE, minY = Float.MAX_VALUE, minZ = Float.MAX_VALUE;
+        float maxX = -Float.MAX_VALUE, maxY = -Float.MAX_VALUE, maxZ = -Float.MAX_VALUE;
+        boolean any = false;
+        for (Map<String, Object> cube : cubes) {
+            float[] origin = readFloat3(cube.get("origin"));
+            float[] size = readFloat3(cube.get("size"));
+            if (origin == null || size == null) {
+                continue;
+            }
+            any = true;
+            minX = Math.min(minX, origin[0]);
+            minY = Math.min(minY, origin[1]);
+            minZ = Math.min(minZ, origin[2]);
+            maxX = Math.max(maxX, origin[0] + size[0]);
+            maxY = Math.max(maxY, origin[1] + size[1]);
+            maxZ = Math.max(maxZ, origin[2] + size[2]);
+        }
+        if (!any) {
+            return DEFAULT_PIVOT.clone();
+        }
+        return new float[]{
+            minX + (maxX - minX) / 2f,
+            minY + (maxY - minY) / 2f,
+            minZ + (maxZ - minZ) / 2f
+        };
+    }
+
+    /**
+     * Reads a length-3 numeric list (a cube {@code origin} / {@code size})
+     * into a float array. Returns {@code null} when the value is missing or
+     * not a 3-element numeric list so callers can skip malformed cubes.
+     */
+    private static float[] readFloat3(Object value) {
+        if (!(value instanceof List<?> list) || list.size() < 3) {
+            return null;
+        }
+        if (!(list.get(0) instanceof Number x)
+            || !(list.get(1) instanceof Number y)
+            || !(list.get(2) instanceof Number z)) {
+            return null;
+        }
+        return new float[]{x.floatValue(), y.floatValue(), z.floatValue()};
+    }
+
     private static float[] convertElementPivot(float[] javaOrigin) {
         if (javaOrigin == null || javaOrigin.length < 3) {
             return new float[]{0f, 0f, 0f};
         }
+        // Pivot X mirrors like cube origins (java2bedrock: -origin.x + 8).
         return new float[]{
-            javaOrigin[0] - 8f,
+            -javaOrigin[0] + 8f,
             javaOrigin[1],
             javaOrigin[2] - 8f
         };

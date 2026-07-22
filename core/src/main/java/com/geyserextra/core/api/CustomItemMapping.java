@@ -34,7 +34,8 @@ public record CustomItemMapping(
     String creativeGroup,
     boolean register,
     String pdcIdentifier,
-    ArmorData armor
+    ArmorData armor,
+    String itemModelId
 ) {
     /**
      * Bedrock creative inventory categories.
@@ -85,7 +86,7 @@ public record CustomItemMapping(
      * @param customModelData The CustomModelData predicate value
      */
     public CustomItemMapping(String name, String baseItem, int customModelData) {
-        this(name, baseItem, customModelData, false, null, null, CREATIVE_CATEGORY_NONE, null, false, null, null);
+        this(name, baseItem, customModelData, false, null, null, CREATIVE_CATEGORY_NONE, null, false, null, null, null);
     }
 
     /**
@@ -97,7 +98,7 @@ public record CustomItemMapping(
      * @param creativeCategory Creative category (1-5) for recipe book
      */
     public CustomItemMapping(String name, String baseItem, int customModelData, int creativeCategory) {
-        this(name, baseItem, customModelData, false, null, null, creativeCategory, null, false, null, null);
+        this(name, baseItem, customModelData, false, null, null, creativeCategory, null, false, null, null, null);
     }
 
     /**
@@ -121,7 +122,7 @@ public record CustomItemMapping(
         boolean register
     ) {
         this(name, baseItem, customModelData, unbreakable, displayName, iconPath,
-             creativeCategory, creativeGroup, register, null, null);
+             creativeCategory, creativeGroup, register, null, null, null);
     }
 
     /**
@@ -142,7 +143,27 @@ public record CustomItemMapping(
         String pdcIdentifier
     ) {
         this(name, baseItem, customModelData, unbreakable, displayName, iconPath,
-             creativeCategory, creativeGroup, register, pdcIdentifier, null);
+             creativeCategory, creativeGroup, register, pdcIdentifier, null, null);
+    }
+
+    /**
+     * Backward-compatible constructor used before direct item-model mappings.
+     */
+    public CustomItemMapping(
+        String name,
+        String baseItem,
+        int customModelData,
+        boolean unbreakable,
+        String displayName,
+        String iconPath,
+        int creativeCategory,
+        String creativeGroup,
+        boolean register,
+        String pdcIdentifier,
+        ArmorData armor
+    ) {
+        this(name, baseItem, customModelData, unbreakable, displayName, iconPath,
+             creativeCategory, creativeGroup, register, pdcIdentifier, armor, null);
     }
 
     /**
@@ -152,7 +173,7 @@ public record CustomItemMapping(
      * @return A new CustomItemMapping instance with the updated display name
      */
     public CustomItemMapping withDisplayName(String newDisplayName) {
-        return new CustomItemMapping(name, baseItem, customModelData, unbreakable, newDisplayName, iconPath, creativeCategory, creativeGroup, register, pdcIdentifier, armor);
+        return new CustomItemMapping(name, baseItem, customModelData, unbreakable, newDisplayName, iconPath, creativeCategory, creativeGroup, register, pdcIdentifier, armor, itemModelId);
     }
 
     /**
@@ -162,7 +183,7 @@ public record CustomItemMapping(
      * @return A new CustomItemMapping instance with the updated icon path
      */
     public CustomItemMapping withIconPath(String newIconPath) {
-        return new CustomItemMapping(name, baseItem, customModelData, unbreakable, displayName, newIconPath, creativeCategory, creativeGroup, register, pdcIdentifier, armor);
+        return new CustomItemMapping(name, baseItem, customModelData, unbreakable, displayName, newIconPath, creativeCategory, creativeGroup, register, pdcIdentifier, armor, itemModelId);
     }
 
     /**
@@ -172,7 +193,7 @@ public record CustomItemMapping(
      * @return A new CustomItemMapping instance with the updated unbreakable flag
      */
     public CustomItemMapping withUnbreakable(boolean newUnbreakable) {
-        return new CustomItemMapping(name, baseItem, customModelData, newUnbreakable, displayName, iconPath, creativeCategory, creativeGroup, register, pdcIdentifier, armor);
+        return new CustomItemMapping(name, baseItem, customModelData, newUnbreakable, displayName, iconPath, creativeCategory, creativeGroup, register, pdcIdentifier, armor, itemModelId);
     }
 
     /**
@@ -183,7 +204,7 @@ public record CustomItemMapping(
      * @return A new CustomItemMapping instance with the updated creative category
      */
     public CustomItemMapping withCreativeCategory(int newCreativeCategory) {
-        return new CustomItemMapping(name, baseItem, customModelData, unbreakable, displayName, iconPath, newCreativeCategory, creativeGroup, register, pdcIdentifier, armor);
+        return new CustomItemMapping(name, baseItem, customModelData, unbreakable, displayName, iconPath, newCreativeCategory, creativeGroup, register, pdcIdentifier, armor, itemModelId);
     }
 
     /**
@@ -193,7 +214,7 @@ public record CustomItemMapping(
      * @return A new CustomItemMapping instance with the updated creative group
      */
     public CustomItemMapping withCreativeGroup(String newCreativeGroup) {
-        return new CustomItemMapping(name, baseItem, customModelData, unbreakable, displayName, iconPath, creativeCategory, newCreativeGroup, register, pdcIdentifier, armor);
+        return new CustomItemMapping(name, baseItem, customModelData, unbreakable, displayName, iconPath, creativeCategory, newCreativeGroup, register, pdcIdentifier, armor, itemModelId);
     }
 
     /**
@@ -203,7 +224,7 @@ public record CustomItemMapping(
      * @return A new CustomItemMapping instance with the updated PDC identifier
      */
     public CustomItemMapping withPdcIdentifier(String newPdcIdentifier) {
-        return new CustomItemMapping(name, baseItem, customModelData, unbreakable, displayName, iconPath, creativeCategory, creativeGroup, register, newPdcIdentifier, armor);
+        return new CustomItemMapping(name, baseItem, customModelData, unbreakable, displayName, iconPath, creativeCategory, creativeGroup, register, newPdcIdentifier, armor, itemModelId);
     }
 
     /**
@@ -214,7 +235,7 @@ public record CustomItemMapping(
      * @return A new CustomItemMapping instance with the updated armor data
      */
     public CustomItemMapping withArmor(ArmorData newArmor) {
-        return new CustomItemMapping(name, baseItem, customModelData, unbreakable, displayName, iconPath, creativeCategory, creativeGroup, register, pdcIdentifier, newArmor);
+        return new CustomItemMapping(name, baseItem, customModelData, unbreakable, displayName, iconPath, creativeCategory, creativeGroup, register, pdcIdentifier, newArmor, itemModelId);
     }
 
     /**
@@ -261,6 +282,16 @@ public record CustomItemMapping(
      */
     public boolean hasPdcIdentifier() {
         return pdcIdentifier != null && !pdcIdentifier.isBlank();
+    }
+
+    public boolean hasItemModelId() {
+        return itemModelId != null && !itemModelId.isBlank();
+    }
+
+    public CustomItemMapping withItemModelId(String newItemModelId) {
+        return new CustomItemMapping(name, baseItem, customModelData, unbreakable,
+            displayName, iconPath, creativeCategory, creativeGroup, register,
+            pdcIdentifier, armor, newItemModelId);
     }
 
     /**
