@@ -115,9 +115,9 @@ public final class BedrockGeometryConverter {
      *       are clamped to a non-negative minimum so a degenerate cube
      *       doesn't crash the Bedrock renderer.</li>
      *   <li>Element rotation: {@code axis} → matching slot in Bedrock's
-     *       three-component rotation; Y and Z are sign-flipped to match
-     *       the same handedness rule used by display transforms above.
-     *       Pivot maps similarly to origin (X centred, Z shifted).</li>
+     *       three-component rotation; only X negates (Rainbow build-39+
+     *       convention). Pivot maps similarly to origin (X centred,
+     *       Z shifted).</li>
      * </ul>
      *
      * <p>UV: this phase ignores per-face UV data. Each cube gets a single
@@ -157,13 +157,13 @@ public final class BedrockGeometryConverter {
      *   <li>Bedrock cube size: {@code java.to - java.from} per axis;
      *       clamped non-negative.</li>
      *   <li>Element rotation: {@code axis} maps to matching Bedrock cube
-     *       rotation slot; Y and Z signs are flipped to match the same
-     *       handedness convention as display transforms.</li>
+     *       rotation slot; only X negates (Rainbow build-39+ convention),
+     *       Y and Z keep their sign.</li>
      *   <li>Per-face UV: {@code java.uv = [u1, v1, u2, v2]} (0..16 abstract)
      *       becomes Bedrock {@code uv: [u1·sx, v1·sy], uv_size: [(u2-u1)·sx, (v2-v1)·sy]}
      *       where {@code sx = textureWidth/16} and {@code sy = textureHeight/16}.
-     *       Missing UV defaults to the whole 0..16 square (matches Mojang's
-     *       runtime default for items).</li>
+     *       Missing UV is derived from the element's from/to coordinates
+     *       (Mojang's {@code FaceBakery.defaultFaceUV} "UV lock" rule).</li>
      * </ul>
      *
      * <p><b>Known limitations</b> (logged at FINE, not failure):</p>
@@ -259,7 +259,8 @@ public final class BedrockGeometryConverter {
             return null;
         }
 
-        Map<String, Object> faceUvs = buildPerFaceUvMap(faces, textureWidth, textureHeight, logger);
+        Map<String, Object> faceUvs = buildPerFaceUvMap(
+            faces, from, to, textureWidth, textureHeight, logger);
         if (faceUvs.isEmpty()) {
             // Every face was zero-area or otherwise unrenderable. Omit the
             // cube rather than promoting to cube-level UV — promoting would
@@ -303,6 +304,8 @@ public final class BedrockGeometryConverter {
      */
     private static Map<String, Object> buildPerFaceUvMap(
         Map<String, JavaModelGeometry.Face> faces,
+        float[] elementFrom,
+        float[] elementTo,
         int textureWidth,
         int textureHeight,
         Logger logger
@@ -315,7 +318,8 @@ public final class BedrockGeometryConverter {
             if (face == null) {
                 continue;
             }
-            Map<String, Object> bedrockFace = convertFace(face, faceName, textureWidth, textureHeight, logger);
+            Map<String, Object> bedrockFace = convertFace(
+                face, faceName, elementFrom, elementTo, textureWidth, textureHeight, logger);
             if (bedrockFace != null) {
                 out.put(faceName, bedrockFace);
             }
@@ -333,6 +337,8 @@ public final class BedrockGeometryConverter {
     private static Map<String, Object> convertFace(
         JavaModelGeometry.Face face,
         String faceName,
+        float[] elementFrom,
+        float[] elementTo,
         int textureWidth,
         int textureHeight,
         Logger logger
@@ -363,8 +369,11 @@ public final class BedrockGeometryConverter {
             rotation = 0;
         }
 
-        // Default UV when not specified: [0, 0, 16, 16] (whole texture).
-        // This matches Mojang's runtime default for missing-UV faces on items.
+        // Default UV when not specified: Mojang derives it from the element's
+        // from/to coordinates per face (FaceBakery.defaultFaceUV — the "UV
+        // lock" behaviour; Rainbow invokes the same method via mixin). The
+        // previous whole-texture [0,0,16,16] fallback only coincided with
+        // Mojang's default for full 16x16x16 cubes.
         float u1, v1, u2, v2;
         if (face.hasUv()) {
             float[] uv = face.uv();
@@ -373,7 +382,8 @@ public final class BedrockGeometryConverter {
             u2 = uv[2];
             v2 = uv[3];
         } else {
-            u1 = 0; v1 = 0; u2 = 16; v2 = 16;
+            float[] def = defaultFaceUv(faceName, elementFrom, elementTo);
+            u1 = def[0]; v1 = def[1]; u2 = def[2]; v2 = def[3];
         }
 
         // Scale Java's 0..16 abstract space to Bedrock pixel space.
@@ -427,15 +437,50 @@ public final class BedrockGeometryConverter {
         return out;
     }
 
+    /**
+     * Mojang's position-derived default UV for a face that declares no
+     * {@code uv} array (FaceBakery.defaultFaceUV). The element's raw
+     * {@code from}/{@code to} coordinates (unnormalised, matching Mojang's
+     * reading order) project onto the texture plane of each face:
+     * <pre>
+     *   down:  [from.x, 16-to.z,  to.x,      16-from.z]
+     *   up:    [from.x, from.z,   to.x,      to.z]
+     *   north: [16-to.x, 16-to.y, 16-from.x, 16-from.y]
+     *   south: [from.x, 16-to.y,  to.x,      16-from.y]
+     *   west:  [from.z, 16-to.y,  to.z,      16-from.y]
+     *   east:  [16-to.z, 16-to.y, 16-from.z, 16-from.y]
+     * </pre>
+     */
+    private static float[] defaultFaceUv(String faceName, float[] from, float[] to) {
+        if (from == null || to == null || from.length < 3 || to.length < 3) {
+            return new float[]{0f, 0f, 16f, 16f};
+        }
+        return switch (faceName) {
+            case "down"  -> new float[]{from[0], 16f - to[2], to[0], 16f - from[2]};
+            case "up"    -> new float[]{from[0], from[2], to[0], to[2]};
+            case "north" -> new float[]{16f - to[0], 16f - to[1], 16f - from[0], 16f - from[1]};
+            case "south" -> new float[]{from[0], 16f - to[1], to[0], 16f - from[1]};
+            case "west"  -> new float[]{from[2], 16f - to[1], to[2], 16f - from[1]};
+            case "east"  -> new float[]{16f - to[2], 16f - to[1], 16f - from[2], 16f - from[1]};
+            default      -> new float[]{0f, 0f, 16f, 16f};
+        };
+    }
+
     private static float[] convertElementRotation(JavaModelGeometry.ElementRotation rotation) {
         String axis = rotation.axis() != null ? rotation.axis().toLowerCase(Locale.ROOT) : "y";
         float angle = rotation.angle();
-        // Same sign matrix as display rotations (java2bedrock): X/Y negate
-        // because the geometry frame is X-mirrored, Z keeps its sign.
+        // Rainbow GeometryMapper.getBedrockRotation (build 39+): only the X
+        // angle negates in the X-mirrored geometry frame; Y and Z keep their
+        // sign. This deliberately differs from the display-rotation sign
+        // matrix above (ROT_*_SIGN) — cube-local rotations and animation-bone
+        // rotations use different conventions on Bedrock, and Rainbow's
+        // empirically-validated table is the ground truth for the cube side
+        // (upstream note: Z was wrongly inverted before build 39; Y never
+        // inverts).
         return switch (axis) {
-            case "x" -> new float[]{ROT_X_SIGN * angle, 0f, 0f};
-            case "z" -> new float[]{0f, 0f, ROT_Z_SIGN * angle};
-            default  -> new float[]{0f, ROT_Y_SIGN * angle, 0f}; // "y" or unknown axis falls back to Y
+            case "x" -> new float[]{-angle, 0f, 0f};
+            case "z" -> new float[]{0f, 0f, angle};
+            default  -> new float[]{0f, angle, 0f}; // "y" or unknown axis falls back to Y
         };
     }
 

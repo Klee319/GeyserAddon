@@ -322,6 +322,103 @@ class BedrockGeometryConverterTest {
         }
     }
 
+    @Nested
+    @DisplayName("element rotation signs (Rainbow build-39+ convention: -x, +y, +z)")
+    class ElementRotationSigns {
+
+        private float[] rotationFor(String axis, float angle) {
+            JavaModelGeometry.Element element = new JavaModelGeometry.Element(
+                new float[]{0f, 0f, 0f}, new float[]{16f, 16f, 16f},
+                new JavaModelGeometry.ElementRotation(new float[]{8f, 8f, 8f}, axis, angle),
+                Map.of("north", new JavaModelGeometry.Face(
+                    new float[]{0f, 0f, 16f, 16f}, "#layer0", 0)));
+            List<Map<String, Object>> cubes =
+                BedrockGeometryConverter.convertElementsToCubes(
+                    new JavaModelGeometry(List.of(element)), 16, 16, null);
+            @SuppressWarnings("unchecked")
+            List<Number> rotation = (List<Number>) cubes.get(0).get("rotation");
+            return new float[]{
+                rotation.get(0).floatValue(),
+                rotation.get(1).floatValue(),
+                rotation.get(2).floatValue()};
+        }
+
+        @Test
+        @DisplayName("X-axis rotation negates (Rainbow: X axis inverted on Bedrock)")
+        void xAxisNegates() {
+            float[] rot = rotationFor("x", 22.5f);
+            assertThat(rot[0]).isCloseTo(-22.5f, EPS);
+            assertThat(rot[1]).isCloseTo(0f, EPS);
+            assertThat(rot[2]).isCloseTo(0f, EPS);
+        }
+
+        @Test
+        @DisplayName("Y-axis rotation keeps its sign (Rainbow build 39+: Y NOT inverted)")
+        void yAxisKeepsSign() {
+            // Regression lock: the pre-review code negated Y (java2bedrock
+            // convention), which mirrors 45-degree cross pieces / angled
+            // blades relative to Rainbow's validated output.
+            float[] rot = rotationFor("y", 45f);
+            assertThat(rot[0]).isCloseTo(0f, EPS);
+            assertThat(rot[1]).isCloseTo(45f, EPS);
+            assertThat(rot[2]).isCloseTo(0f, EPS);
+        }
+
+        @Test
+        @DisplayName("Z-axis rotation keeps its sign (Rainbow build 39+ fixed Z inversion)")
+        void zAxisKeepsSign() {
+            float[] rot = rotationFor("z", -22.5f);
+            assertThat(rot[0]).isCloseTo(0f, EPS);
+            assertThat(rot[1]).isCloseTo(0f, EPS);
+            assertThat(rot[2]).isCloseTo(-22.5f, EPS);
+        }
+    }
+
+    @Nested
+    @DisplayName("Mojang position-derived default UV (FaceBakery.defaultFaceUV)")
+    class DefaultUvDerivation {
+
+        // Partial cube from (2,3,4) to (10,8,12): default UVs are derived
+        // from the element's from/to coordinates per face, NOT the whole
+        // texture. Table (Mojang FaceBakery.defaultFaceUV):
+        //   north: [16-to.x, 16-to.y, 16-from.x, 16-from.y] = [6, 8, 14, 13]
+        //   east:  [16-to.z, 16-to.y, 16-from.z, 16-from.y] = [4, 8, 12, 13]
+        //   up:    [from.x, from.z, to.x, to.z]             = [2, 4, 10, 12]
+        private JavaModelGeometry.Element partialCube(String faceName) {
+            return new JavaModelGeometry.Element(
+                new float[]{2f, 3f, 4f}, new float[]{10f, 8f, 12f},
+                null,
+                Map.of(faceName, new JavaModelGeometry.Face(null, "#layer0", 0)));
+        }
+
+        private Map<?, ?> faceUvOf(String faceName) {
+            List<Map<String, Object>> cubes =
+                BedrockGeometryConverter.convertElementsToCubes(
+                    new JavaModelGeometry(List.of(partialCube(faceName))), 16, 16, null);
+            return (Map<?, ?>) ((Map<?, ?>) cubes.get(0).get("uv")).get(faceName);
+        }
+
+        @Test
+        @DisplayName("north face of a partial cube derives UV from element bounds")
+        void northPartialCube() {
+            assertUv(faceUvOf("north"), 6f, 8f, 8f, 5f);
+        }
+
+        @Test
+        @DisplayName("east face of a partial cube derives UV from element bounds")
+        void eastPartialCube() {
+            assertUv(faceUvOf("east"), 4f, 8f, 8f, 5f);
+        }
+
+        @Test
+        @DisplayName("up face derives UV from bounds and stays point-mirrored")
+        void upPartialCube() {
+            // Derived UV [2,4,10,12], then the vertical-face point mirror
+            // anchors at (u2,v2) with negative sizes.
+            assertUv(faceUvOf("up"), 10f, 12f, -8f, -8f);
+        }
+    }
+
     // ---------------------------------------------------------------------
     // Helpers
     // ---------------------------------------------------------------------
