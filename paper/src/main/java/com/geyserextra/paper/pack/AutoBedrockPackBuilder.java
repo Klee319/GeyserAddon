@@ -113,6 +113,59 @@ public final class AutoBedrockPackBuilder {
     }
 
     /**
+     * Cap for the file base name embedded in generated zip entry paths.
+     *
+     * <p>Geyser warns when any zip entry path reaches 80 characters because
+     * some Bedrock platforms (notably consoles) enforce filesystem
+     * path-length limits and can fail to load the pack. The longest fixed
+     * decoration around a generated base name is the animation entry:
+     * {@code "animations/geyserextra_auto/" (28) + base + ".animation.json" (15)}
+     * = 43 + base. Capping the base at 36 keeps even that worst case at 79.</p>
+     */
+    static final int MAX_ZIP_FILE_BASE_LENGTH = 36;
+
+    /**
+     * Derives the file base name used inside zip entry paths for a given
+     * icon key. Short keys pass through unchanged (so existing packs keep
+     * byte-identical paths); keys longer than
+     * {@link #MAX_ZIP_FILE_BASE_LENGTH} are shortened to
+     * {@code <tail-of-key>_<sha256-8hex>} — deterministic across boots and
+     * JVMs, and collision-safe via the content hash.
+     *
+     * <p>Only file <em>paths</em> use this form. The icon key itself (the
+     * {@code item_texture.json} key and the {@code geyserextra:<iconKey>}
+     * attachable identifier the extension registers against) is never
+     * shortened — those are JSON strings, not paths, and must keep matching
+     * the extension-side registration exactly.</p>
+     */
+    public static String zipSafeFileBase(String iconKey) {
+        if (iconKey == null || iconKey.length() <= MAX_ZIP_FILE_BASE_LENGTH) {
+            return iconKey;
+        }
+        String hash = sha256Hex8(iconKey);
+        int tailLength = MAX_ZIP_FILE_BASE_LENGTH - hash.length() - 1;
+        String tail = iconKey.substring(iconKey.length() - tailLength);
+        return tail + "_" + hash;
+    }
+
+    /** First 8 hex chars of the SHA-256 of {@code value} (UTF-8). */
+    private static String sha256Hex8(String value) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            byte[] digest = md.digest(value.getBytes(StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder(8);
+            for (int i = 0; i < 4; i++) {
+                sb.append(String.format("%02x", digest[i]));
+            }
+            return sb.toString();
+        } catch (NoSuchAlgorithmException ex) {
+            // SHA-256 is mandated on every conforming JRE; fall back to a
+            // stable (if weaker) hex form rather than failing the build.
+            return String.format("%08x", value.hashCode());
+        }
+    }
+
+    /**
      * Builds the pack ZIP at the given output path from the registry contents.
      * Overwrites any existing file. Creates parent directories as needed.
      *
@@ -405,7 +458,12 @@ public final class AutoBedrockPackBuilder {
                 continue;
             }
             String iconKey = toBedrockIconKey(mapping.name());
-            String bedrockTextureRelative = "textures/items/" + iconKey;
+            // Zip paths embed the (possibly shortened) file base, never the
+            // raw icon key: Geyser warns at 80-char entry paths and some
+            // Bedrock platforms fail to load such packs. The icon key itself
+            // (item_texture.json key / attachable identifier) stays full.
+            String fileBase = zipSafeFileBase(iconKey);
+            String bedrockTextureRelative = "textures/items/" + fileBase;
             String zipEntry = bedrockTextureRelative + ".png";
             if (!plannedZipEntries.add(zipEntry)) {
                 duplicateSkipCount++;
@@ -417,7 +475,7 @@ public final class AutoBedrockPackBuilder {
                 continue;
             }
             pngTasks.add(new TextureCopyTask(def.textureFile(), zipEntry, key.toString(),
-                def.display() != null ? def.display().gui() : null));
+                def.display() != null ? def.display().gui() : null, iconKey));
             customIconToTexturePath.put(iconKey, bedrockTextureRelative);
 
             // Phase 7a: armor-equipped items route through the armor
@@ -472,7 +530,7 @@ public final class AutoBedrockPackBuilder {
             }
             if (armorTextureResolved) {
                 Map<String, String> armorArt = BedrockAttachableWriter.buildArmorArtifacts(
-                    iconKey, mapping.armor(), armorConfig);
+                    iconKey, fileBase, mapping.armor(), armorConfig);
                 for (Map.Entry<String, String> a : armorArt.entrySet()) {
                     String artifactPath = a.getKey();
                     if (!plannedZipEntries.add(artifactPath)) {
@@ -496,7 +554,7 @@ public final class AutoBedrockPackBuilder {
                 // builds offered for these items.
                 int[] textureSize = probePngDimensions(def.textureFile(), logger);
                 Map<String, String> artifacts = BedrockAttachableWriter.buildArtifacts(
-                    iconKey, def.display(), def.geometry(),
+                    iconKey, fileBase, def.display(), def.geometry(),
                     bedrockTextureRelative, textureSize[0], textureSize[1],
                     effectiveConfig, logger);
                 for (Map.Entry<String, String> art : artifacts.entrySet()) {
@@ -552,13 +610,16 @@ public final class AutoBedrockPackBuilder {
                 if (baked != raw) {
                     String zipEntry = task.zipEntry();
                     if (zipEntry.startsWith("textures/items/") && zipEntry.endsWith(".png")) {
-                        String iconKey = zipEntry.substring("textures/items/".length(),
-                            zipEntry.length() - ".png".length());
-                        String guiTextureRelative = "textures/items/" + iconKey + "_gui";
+                        // Derive the gui-variant path from the zip entry (which
+                        // already carries the shortened file base), but key the
+                        // item_texture.json redirect on the REAL icon key —
+                        // the two differ for 80-char-shortened names.
+                        String guiTextureRelative =
+                            zipEntry.substring(0, zipEntry.length() - ".png".length()) + "_gui";
                         String guiEntry = guiTextureRelative + ".png";
                         if (plannedZipEntries.add(guiEntry)) {
                             itemTextureBytes.put(guiEntry, baked);
-                            customIconToTexturePath.put(iconKey, guiTextureRelative);
+                            customIconToTexturePath.put(task.iconKey(), guiTextureRelative);
                         } else if (logger != null) {
                             logger.warning("[AutoPack] gui-baked icon entry collides with an "
                                 + "existing entry, keeping unbaked icon: " + guiEntry);
@@ -574,21 +635,19 @@ public final class AutoBedrockPackBuilder {
                         + "dropped for this mapping (Bedrock falls back to vanilla).");
                 }
                 taskIter.remove();
-                // Strip "textures/items/" prefix and ".png" suffix to recover
-                // the iconKey for the cascading cleanup.
+                // The task carries the real icon key (the zip entry may embed
+                // a shortened file base, so path-stripping would recover the
+                // wrong key for 80-char-shortened names).
                 String zipEntry = task.zipEntry();
-                String iconKey;
-                if (zipEntry.startsWith("textures/items/") && zipEntry.endsWith(".png")) {
-                    iconKey = zipEntry.substring("textures/items/".length(),
-                        zipEntry.length() - ".png".length());
-                } else {
-                    iconKey = null;
-                }
+                String iconKey = task.iconKey();
                 if (iconKey != null) {
                     customIconToTexturePath.remove(iconKey);
-                    String attachableEntry = BedrockAttachableWriter.attachableEntryPath(iconKey);
-                    String geometryEntry = BedrockAttachableWriter.geometryEntryPath(iconKey);
-                    String animationEntry = BedrockAttachableWriter.animationEntryPath(iconKey);
+                    // Artifact entry paths were planned with the shortened
+                    // file base — recompute it the same (deterministic) way.
+                    String fileBase = zipSafeFileBase(iconKey);
+                    String attachableEntry = BedrockAttachableWriter.attachableEntryPath(fileBase);
+                    String geometryEntry = BedrockAttachableWriter.geometryEntryPath(fileBase);
+                    String animationEntry = BedrockAttachableWriter.animationEntryPath(fileBase);
                     attachableArtifacts.remove(attachableEntry);
                     attachableArtifacts.remove(geometryEntry);
                     attachableArtifacts.remove(animationEntry);
@@ -701,7 +760,10 @@ public final class AutoBedrockPackBuilder {
             // disagree on what's present in the pack.
             for (Map.Entry<String, byte[]> armorCopy : armorTextureBytes.entrySet()) {
                 String iconKey = armorCopy.getKey();
-                String zipEntry = BedrockAttachableWriter.armorTextureEntryPath(iconKey);
+                // Same shortened file base the armor attachable's textures
+                // reference was built with (zipSafeFileBase is deterministic).
+                String zipEntry = BedrockAttachableWriter.armorTextureEntryPath(
+                    zipSafeFileBase(iconKey));
                 putEntryUnique(zos, zipEntry, armorCopy.getValue(), writtenEntries, logger);
             }
         } catch (IOException ioEx) {
@@ -939,7 +1001,7 @@ public final class AutoBedrockPackBuilder {
      * mapping set twice.
      */
     private record TextureCopyTask(Path source, String zipEntry, String keyLabel,
-                                   JavaModelDisplay.Transform gui) {}
+                                   JavaModelDisplay.Transform gui, String iconKey) {}
 
     /**
      * Reads only the dimensions of the PNG referenced by {@code source} so

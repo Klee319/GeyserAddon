@@ -126,28 +126,14 @@ public final class BedrockAttachableWriter {
         String textureRelativePath,
         AttachableGenerationConfig config
     ) {
-        return buildArtifacts(iconKey, display, geometry, textureRelativePath, 16, 16, config, null);
+        return buildArtifacts(iconKey, iconKey, display, geometry, textureRelativePath,
+            16, 16, config, null);
     }
 
     /**
-     * Phase 6 entry point. Takes the actual PNG dimensions of the icon
-     * texture so the geometry descriptor declares matching {@code texture_width}
-     * and {@code texture_height}, and so per-face UVs scale correctly for
-     * non-16x16 textures (the high-res operator-pack case).
-     *
-     * @param iconKey               sanitised Bedrock icon key (also the
-     *                               {@code bedrock_identifier} suffix)
-     * @param display                Java {@code display} block; may be {@code null}
-     * @param geometry               Java {@code elements} block; may be {@code null}
-     * @param textureRelativePath    existing {@code textures/items/<iconKey>} path
-     *                               written by {@code AutoBedrockPackBuilder}
-     * @param textureWidth           actual PNG width in pixels (>0); used as
-     *                               the geometry descriptor's {@code texture_width}
-     *                               and as the X scale factor for per-face UV
-     * @param textureHeight          actual PNG height in pixels (>0)
-     * @param config                 attachable generation policy
-     * @param logger                 optional logger for FINE-level diagnostics
-     * @return path → JSON content map (empty when nothing should be written)
+     * Backward-compatible 8-arg overload: uses {@code iconKey} itself as the
+     * zip-path file base (correct whenever the key is short enough to stay
+     * under Geyser's 80-char entry-path warning threshold).
      */
     public static Map<String, String> buildArtifacts(
         String iconKey,
@@ -159,8 +145,55 @@ public final class BedrockAttachableWriter {
         AttachableGenerationConfig config,
         Logger logger
     ) {
+        return buildArtifacts(iconKey, iconKey, display, geometry, textureRelativePath,
+            textureWidth, textureHeight, config, logger);
+    }
+
+    /**
+     * Phase 6 entry point. Takes the actual PNG dimensions of the icon
+     * texture so the geometry descriptor declares matching {@code texture_width}
+     * and {@code texture_height}, and so per-face UVs scale correctly for
+     * non-16x16 textures (the high-res operator-pack case).
+     *
+     * @param iconKey               sanitised Bedrock icon key (also the
+     *                               {@code bedrock_identifier} suffix)
+     * @param fileBase              file base name embedded in the returned
+     *                               zip entry paths. Usually equals
+     *                               {@code iconKey}; differs when
+     *                               {@code AutoBedrockPackBuilder.zipSafeFileBase}
+     *                               shortened it to keep entry paths under
+     *                               Geyser's 80-char warning threshold.
+     *                               Identifiers inside the JSON always keep
+     *                               {@code iconKey} (they must match the
+     *                               extension-side registration exactly).
+     * @param display                Java {@code display} block; may be {@code null}
+     * @param geometry               Java {@code elements} block; may be {@code null}
+     * @param textureRelativePath    existing {@code textures/items/<fileBase>} path
+     *                               written by {@code AutoBedrockPackBuilder}
+     * @param textureWidth           actual PNG width in pixels (>0); used as
+     *                               the geometry descriptor's {@code texture_width}
+     *                               and as the X scale factor for per-face UV
+     * @param textureHeight          actual PNG height in pixels (>0)
+     * @param config                 attachable generation policy
+     * @param logger                 optional logger for FINE-level diagnostics
+     * @return path → JSON content map (empty when nothing should be written)
+     */
+    public static Map<String, String> buildArtifacts(
+        String iconKey,
+        String fileBase,
+        JavaModelDisplay display,
+        JavaModelGeometry geometry,
+        String textureRelativePath,
+        int textureWidth,
+        int textureHeight,
+        AttachableGenerationConfig config,
+        Logger logger
+    ) {
         if (iconKey == null || iconKey.isBlank()) {
             return Map.of();
+        }
+        if (fileBase == null || fileBase.isBlank()) {
+            fileBase = iconKey;
         }
         if (config == null) {
             return Map.of();
@@ -196,14 +229,17 @@ public final class BedrockAttachableWriter {
         boolean rainbowSingleBone = useFullGeometry
             && !config.hasExplicitFirstPersonBasePose();
 
+        // Zip entry paths use the (possibly shortened) file base; the JSON
+        // bodies keep the full icon key for identifiers so they still match
+        // the geyserextra:<iconKey> registration on the extension side.
         Map<String, String> out = new LinkedHashMap<>();
-        out.put(attachableEntryPath(iconKey),
+        out.put(attachableEntryPath(fileBase),
                 JsonUtil.toPrettyJson(buildAttachableJson(iconKey, textureRelativePath, display, config)));
-        out.put(geometryEntryPath(iconKey),
+        out.put(geometryEntryPath(fileBase),
                 JsonUtil.toPrettyJson(buildGeometryJson(
                     iconKey, useFullGeometry ? geometry : null, safeTw, safeTh,
                     rainbowSingleBone, logger)));
-        out.put(animationEntryPath(iconKey),
+        out.put(animationEntryPath(fileBase),
                 JsonUtil.toPrettyJson(buildAnimationJson(
                     iconKey, display, config, rainbowSingleBone)));
         return out;
@@ -250,8 +286,26 @@ public final class BedrockAttachableWriter {
         com.geyserextra.core.api.ArmorData armor,
         com.geyserextra.core.config.GeyserExtraConfig.ArmorGenerationConfig config
     ) {
+        return buildArmorArtifacts(iconKey, iconKey, armor, config);
+    }
+
+    /**
+     * Variant taking a distinct zip-path file base (see
+     * {@code AutoBedrockPackBuilder.zipSafeFileBase}): entry path and the
+     * {@code textures.default} reference use {@code fileBase}, while the
+     * attachable {@code identifier} keeps the full {@code iconKey}.
+     */
+    public static Map<String, String> buildArmorArtifacts(
+        String iconKey,
+        String fileBase,
+        com.geyserextra.core.api.ArmorData armor,
+        com.geyserextra.core.config.GeyserExtraConfig.ArmorGenerationConfig config
+    ) {
         if (iconKey == null || iconKey.isBlank()) {
             return Map.of();
+        }
+        if (fileBase == null || fileBase.isBlank()) {
+            fileBase = iconKey;
         }
         if (armor == null) {
             return Map.of();
@@ -266,7 +320,7 @@ public final class BedrockAttachableWriter {
             "default", "armor",
             "enchanted", "armor_enchanted"));
         description.put("textures", linkedMap(
-            "default", "textures/entity/equipment/" + iconKey,
+            "default", "textures/entity/equipment/" + fileBase,
             "enchanted", "textures/misc/enchanted_item_glint"));
         description.put("geometry", Map.of("default", armor.bedrockGeometry()));
         // Suppress the vanilla armor layer Bedrock renders by default —
@@ -288,7 +342,7 @@ public final class BedrockAttachableWriter {
             "minecraft:attachable", Map.of("description", description));
 
         return Map.of(
-            attachableEntryPath(iconKey),
+            attachableEntryPath(fileBase),
             JsonUtil.toPrettyJson(attachable));
     }
 
