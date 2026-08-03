@@ -1099,32 +1099,19 @@ public final class BedrockEnchantmentHandler implements Listener {
     }
 
     /**
-     * Builds the same vanilla-style display name fallback the Paper-side
-     * registration uses, so a Bedrock player sees identical text in both
-     * the registry-derived and the packet-injected paths.
+     * Builds the vanilla display name fallback, using the same resolver the
+     * Paper-side registration uses so a Bedrock player sees identical text in
+     * both the registry-derived and the packet-injected paths.
      *
-     * <p>Example: {@code Material.DIAMOND_SWORD} -> {@code "Diamond Sword"}.</p>
+     * <p>This used to prettify the Material key on its own, which is how a
+     * PDC-stamped but otherwise ordinary tool reached a Japanese client as
+     * "Diamond Pickaxe". Localisation matters more here than in the registry
+     * path: this name is written onto the outgoing stack, so it replaces
+     * whatever the client would have shown by itself.</p>
      */
-    private static String prettifyMaterialName(Material material) {
-        if (material == null) {
-            return "Unknown";
-        }
-        String raw = material.getKey().getKey();  // "diamond_sword"
-        StringBuilder pretty = new StringBuilder(raw.length());
-        boolean upcaseNext = true;
-        for (int i = 0; i < raw.length(); i++) {
-            char c = raw.charAt(i);
-            if (c == '_' || c == '/' || c == ':') {
-                pretty.append(' ');
-                upcaseNext = true;
-            } else if (upcaseNext) {
-                pretty.append(Character.toUpperCase(c));
-                upcaseNext = false;
-            } else {
-                pretty.append(c);
-            }
-        }
-        return pretty.toString();
+    private String prettifyMaterialName(Material material) {
+        return com.geyserextra.paper.pack.VanillaDisplayNames.resolve(
+            material, plugin == null ? null : plugin.getJavaPackLangReader());
     }
 
     /**

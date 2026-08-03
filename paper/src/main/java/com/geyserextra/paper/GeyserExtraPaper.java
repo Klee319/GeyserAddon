@@ -19,6 +19,7 @@ import com.geyserextra.paper.pack.AutoBedrockPackBuilder;
 import com.geyserextra.paper.pack.AutoPackBuildGuard;
 import com.geyserextra.paper.pack.BedrockVanillaTexturePaths;
 import com.geyserextra.paper.pack.ItemModelHintsReader;
+import com.geyserextra.paper.pack.PdcHintsReader;
 import com.geyserextra.paper.pack.JavaPackLangReader;
 import com.geyserextra.paper.pack.JavaPackReader;
 import com.geyserextra.paper.pack.JavaPackResolver;
@@ -909,6 +910,21 @@ public final class GeyserExtraPaper extends JavaPlugin {
                         itemModelHints,
                         directItemModels.keySet(),
                         getLogger());
+                }
+
+                // PDC hints: the same idea for items identified only by a
+                // persistent-data marker. Those cannot be declared in a
+                // resource pack at all, so before this the only ways one could
+                // reach the ledger were a crafting recipe or a player actually
+                // holding it — leaving everything obtained from a mob drop,
+                // dungeon reward or merchant unregistered, and therefore
+                // nameless and off-hand-forbidden on Bedrock.
+                List<PdcHintsReader.PdcHint> pdcHints =
+                    PdcHintsReader.readAll(
+                        getDataFolder().toPath().resolve(PdcHintsReader.HINTS_DIR_NAME),
+                        getLogger());
+                if (!pdcHints.isEmpty()) {
+                    PdcHintsReader.prepopulate(itemMappingRegistry, pdcHints, getLogger());
                 }
 
                 synchronized (registryMetadataSaveLock) {

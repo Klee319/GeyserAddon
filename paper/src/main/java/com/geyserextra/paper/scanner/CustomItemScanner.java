@@ -627,59 +627,12 @@ public final class CustomItemScanner {
      * instead of a raw Geyser identifier.
      */
     private String resolveVanillaMaterialName(Material material) {
-        if (material == null) {
-            return "Unknown";
-        }
-        String key = material.getKey().getKey();
-        com.geyserextra.paper.pack.JavaPackLangReader langReader = plugin.getJavaPackLangReader();
-        if (langReader != null && !langReader.isEmpty()) {
-            String itemKey = "item.minecraft." + key;
-            String resolved = langReader.resolve(itemKey);
-            if (resolved != null && !resolved.isBlank()) {
-                return resolved;
-            }
-            if (material.isBlock()) {
-                String blockKey = "block.minecraft." + key;
-                resolved = langReader.resolve(blockKey);
-                if (resolved != null && !resolved.isBlank()) {
-                    return resolved;
-                }
-            }
-        }
-
-        // Bedrock's own name for this item, generated at build time from
-        // Mojang's bedrock-samples pack. Preferred over prettifying because
-        // this stack is heading for a Bedrock client: whatever we store here
-        // becomes the item's name there, and the prettified form puts English
-        // ("Wooden Sword") in front of a player whose client already had
-        // "木の剣" and only lost it because we registered the item.
-        String bedrockName =
-            com.geyserextra.paper.pack.BedrockVanillaTexturePaths.vanillaName(key);
-        if (bedrockName != null && !bedrockName.isBlank()) {
-            return bedrockName;
-        }
-        return prettifyMaterialKey(key);
+        return com.geyserextra.paper.pack.VanillaDisplayNames.resolve(
+            material, plugin.getJavaPackLangReader());
     }
 
     public static String prettifyMaterialKey(String raw) {
-        if (raw == null || raw.isEmpty()) {
-            return "Unknown";
-        }
-        StringBuilder pretty = new StringBuilder(raw.length());
-        boolean upcaseNext = true;
-        for (int i = 0; i < raw.length(); i++) {
-            char c = raw.charAt(i);
-            if (c == '_' || c == '/' || c == ':') {
-                pretty.append(' ');
-                upcaseNext = true;
-            } else if (upcaseNext) {
-                pretty.append(Character.toUpperCase(c));
-                upcaseNext = false;
-            } else {
-                pretty.append(c);
-            }
-        }
-        return pretty.toString();
+        return com.geyserextra.paper.pack.VanillaDisplayNames.prettify(raw);
     }
 
     private boolean isUnbreakable(ItemStack itemStack) {
