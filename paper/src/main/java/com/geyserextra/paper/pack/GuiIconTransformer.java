@@ -10,16 +10,15 @@ import java.io.IOException;
 import java.util.logging.Logger;
 
 /**
- * Bakes a Java {@code display.gui} transform into a Bedrock inventory icon
- * PNG at pack build time.
+ * Bakes a Java {@code display.gui} transform into a Bedrock item-icon PNG
+ * at pack build time (applied to the raw Java-pack sprite; no prior trim).
  *
- * <p><b>Why:</b> Java renders inventory icons as a 3D pass of the item model
- * with the model's {@code display.gui} rotation/translation/scale applied.
- * Bedrock renders the {@code item_texture.json} sprite verbatim with no
- * transform hook. Items such as ValhallaMMO's weapons declare
- * {@code gui.scale = 1.3913} (plus a translation), so their icons appear
- * ~39% smaller on Bedrock than on Java. Baking the transform into the PNG
- * itself is the only way to close that gap server-side.</p>
+ * <p><b>Why:</b> Java applies {@code display.gui} to inventory renders.
+ * Bedrock shows the {@code item_texture.json} sprite verbatim with no
+ * transform hook. Baking gui scale/translation (e.g. ValhallaMMO
+ * {@code gui.scale = 1.3913}) closes that gap. {@code display.ground} is
+ * intentionally not used here — it is for world drops on Java and shrinks
+ * shared INV icons when baked.</p>
  *
  * <p><b>2D approximation:</b> a flat sprite cannot reproduce arbitrary 3D
  * rotation. The bake keeps the components a 2D affine can express:</p>
@@ -51,17 +50,17 @@ public final class GuiIconTransformer {
      * can never fail on a malformed texture here.</p>
      *
      * @param pngBytes source PNG bytes (never mutated)
-     * @param gui      nullable {@code display.gui} transform
-     * @param logger   optional diagnostics sink
+     * @param transform nullable {@code display.ground} or {@code display.gui}
+     * @param logger    optional diagnostics sink
      * @return baked PNG bytes, or {@code pngBytes} itself when nothing to do
      */
-    public static byte[] bake(byte[] pngBytes, JavaModelDisplay.Transform gui, Logger logger) {
-        if (pngBytes == null || gui == null) {
+    public static byte[] bake(byte[] pngBytes, JavaModelDisplay.Transform transform, Logger logger) {
+        if (pngBytes == null || transform == null) {
             return pngBytes;
         }
-        float[] scale = gui.scale();
-        float[] rotation = gui.rotation();
-        float[] translation = gui.translation();
+        float[] scale = transform.scale();
+        float[] rotation = transform.rotation();
+        float[] translation = transform.translation();
 
         boolean noop = scale[0] == 1f && scale[1] == 1f
             && rotation[2] == 0f

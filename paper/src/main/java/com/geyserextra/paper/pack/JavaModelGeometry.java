@@ -72,17 +72,58 @@ public record JavaModelGeometry(List<Element> elements) {
      * enforce the limit because Bedrock's cube rotation field accepts any
      * float.
      *
-     * @param origin pivot point in Java's 0..16 model coordinates
-     * @param axis   {@code "x"}, {@code "y"}, or {@code "z"} (lowercased)
-     * @param angle  rotation in degrees around the named axis
+     * @param origin  pivot point in Java's 0..16 model coordinates
+     * @param axis    {@code "x"}, {@code "y"}, or {@code "z"} (lowercased)
+     * @param angle   rotation in degrees around the named axis
+     * @param rescale Mojang's optional {@code rescale} flag. When set, the two
+     *                axes perpendicular to {@code axis} are stretched by
+     *                {@code 1 / cos(angle)} so a rotated element still spans
+     *                its original footprint — at the canonical 45 degrees that
+     *                is the familiar sqrt(2) growth. Defaults to {@code false},
+     *                matching the model format.
      */
-    public record ElementRotation(float[] origin, String axis, float angle) {
+    /**
+     * An element's rotation, in either of the two forms found in the wild.
+     *
+     * <p>{@code axis} + {@code angle} is vanilla's single-axis form, capped at
+     * ±45° in 22.5° steps. {@code euler} is the three-axis
+     * {@code {"x":..,"y":..,"z":..}} object Blockbench writes for free
+     * rotation, which carries arbitrary angles. Only one is ever set:
+     * {@code euler} is {@code null} for the vanilla form.</p>
+     *
+     * <p>Bedrock cubes take a full {@code [x, y, z]} rotation with no step or
+     * range restriction, so both forms convert. Ignoring {@code euler} does not
+     * degrade gracefully — the element renders <em>unrotated</em>, which for a
+     * model whose parts are fanned out (book pages at 143-158°) collapses them
+     * into the body of the mesh.</p>
+     */
+    public record ElementRotation(
+        float[] origin, String axis, float angle, boolean rescale, float[] euler
+    ) {
         public ElementRotation {
             Objects.requireNonNull(origin, "origin must not be null");
             Objects.requireNonNull(axis, "axis must not be null");
             if (origin.length != 3) {
                 throw new IllegalArgumentException("origin must have length 3");
             }
+            if (euler != null && euler.length != 3) {
+                throw new IllegalArgumentException("euler must have length 3");
+            }
+        }
+
+        /** Back-compatible 3-arg form; {@code rescale} defaults to false. */
+        public ElementRotation(float[] origin, String axis, float angle) {
+            this(origin, axis, angle, false, null);
+        }
+
+        /** Back-compatible 4-arg (single-axis) form. */
+        public ElementRotation(float[] origin, String axis, float angle, boolean rescale) {
+            this(origin, axis, angle, rescale, null);
+        }
+
+        /** Three-axis form. */
+        public static ElementRotation ofEuler(float[] origin, float[] euler, boolean rescale) {
+            return new ElementRotation(origin, "y", 0f, rescale, euler);
         }
     }
 

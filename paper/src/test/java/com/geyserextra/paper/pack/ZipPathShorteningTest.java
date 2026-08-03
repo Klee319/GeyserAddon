@@ -104,7 +104,7 @@ class ZipPathShorteningTest {
 
         private static final AttachableGenerationConfig CONFIG =
             new AttachableGenerationConfig(
-                AttachableGenerationConfig.MODE_OFFSETS_ONLY, false, false);
+                AttachableGenerationConfig.MODE_OFFSETS_ONLY, false);
 
         private static JavaModelDisplay displayWithHandTransform() {
             return new JavaModelDisplay(

@@ -14,8 +14,83 @@ import static org.assertj.core.api.Assertions.offset;
 @DisplayName("BedrockAttachableWriter geometry mode")
 class BedrockAttachableWriterTest {
 
+    /**
+     * The frame is baked to {@code ZXY} now, but the guarantee that came with
+     * it still has to hold: the change of basis may only ever move first
+     * person. Third person must stay on java2bedrock's per-axis sign flips,
+     * which is what {@code convertTranslation} is here as the reference for.
+     *
+     * <p>It holds because the third-person root is {@code [90, 0, 0]}: with two
+     * angles zero the rotation matrix has a single non-zero off-diagonal term
+     * per row and the transpose reduces to exactly those sign flips (the
+     * {@code cos(90°) = 6.1e-17} residue is far below float precision at these
+     * magnitudes). Asserted through the public writer, with the real greataxe
+     * display including its {@code *_lefthand} slots, because the unit-level
+     * proof on {@code convertTranslationInRootFrame} does not cover how the
+     * writer feeds it — which hand's root rotation it passes, or whether it
+     * mirrors X consistently for the off hand.</p>
+     */
     @Test
-    @DisplayName("offsets_only + elements uses full 3D cubes (not flat 16x16 quad)")
+    @DisplayName("baked frame leaves third person on the java2bedrock mapping")
+    void bakedFrameKeepsThirdPersonOnReferenceMapping() {
+        JavaModelDisplay display = new JavaModelDisplay(
+            new JavaModelDisplay.Transform(
+                new float[]{55f, 0f, 90f}, new float[]{0f, 4f, -9f},
+                new float[]{1.7f, 1.7f, 1.7f}),
+            new JavaModelDisplay.Transform(
+                new float[]{45f, 0f, 90f}, new float[]{-15.5f, 13f, 1.5f},
+                new float[]{2f, 2f, 2f}),
+            null, null, null,
+            new JavaModelDisplay.Transform(
+                new float[]{55f, 0f, -90f}, new float[]{26f, 4f, -9f},
+                new float[]{1.7f, 1.7f, 1.7f}),
+            new JavaModelDisplay.Transform(
+                new float[]{45f, 0f, -90f}, new float[]{15.5f, 13f, 1.5f},
+                new float[]{2f, 2f, 2f}));
+
+        JavaModelGeometry.Face face = new JavaModelGeometry.Face(
+            new float[]{0f, 0f, 16f, 16f}, "#0", 0);
+        JavaModelGeometry geometry = new JavaModelGeometry(List.of(
+            new JavaModelGeometry.Element(
+                new float[]{0f, 0f, 0f}, new float[]{4f, 4f, 4f}, null,
+                Map.of("north", face, "south", face))));
+
+        String anim = animationJson(display, geometry);
+
+        // Both third-person hands, against convertTranslation on the same
+        // declared translation the writer reads for that hand.
+        assertThat(extractAnimation(anim, "thirdperson_main_hand").replaceAll("\\s+", ""))
+            .as("third-person main hand must stay on the reference mapping")
+            .contains(positionLiteral(BedrockGeometryConverter.convertTranslation(
+                new float[]{-15.5f, 13f, 1.5f}, false, true)));
+        assertThat(extractAnimation(anim, "thirdperson_off_hand").replaceAll("\\s+", ""))
+            .as("third-person off hand must stay on the reference mapping")
+            .contains(positionLiteral(BedrockGeometryConverter.convertTranslation(
+                new float[]{15.5f, 13f, 1.5f}, false, true)));
+    }
+
+    /** The emitted JSON form of a position triple, whitespace already stripped. */
+    private static String positionLiteral(float[] xyz) {
+        return "\"position\":[" + xyz[0] + "," + xyz[1] + "," + xyz[2] + "]";
+    }
+
+    private static String animationJson(
+        JavaModelDisplay display, JavaModelGeometry geometry
+    ) {
+        AttachableGenerationConfig config = new AttachableGenerationConfig(
+            AttachableGenerationConfig.MODE_OFFSETS_ONLY, false);
+        Map<String, String> artifacts = BedrockAttachableWriter.buildArtifacts(
+            "probe", "probe", display, geometry,
+            "textures/items/probe", 16, 16, config, null);
+        return artifacts.entrySet().stream()
+            .filter(e -> e.getKey().contains("animation"))
+            .map(Map.Entry::getValue)
+            .findFirst()
+            .orElseThrow(() -> new AssertionError("no animation artifact: " + artifacts.keySet()));
+    }
+
+    @Test
+    @DisplayName("offsets_only + elements uses full 3D cubes on the java2bedrock chain")
     void offsetsOnlyWithElementsUsesFullGeometry() {
         JavaModelDisplay display = new JavaModelDisplay(
             new JavaModelDisplay.Transform(
@@ -39,7 +114,7 @@ class BedrockAttachableWriterTest {
         JavaModelGeometry geometry = new JavaModelGeometry(List.of(a, b));
 
         AttachableGenerationConfig config =
-            new AttachableGenerationConfig(AttachableGenerationConfig.MODE_OFFSETS_ONLY, false, false);
+            new AttachableGenerationConfig(AttachableGenerationConfig.MODE_OFFSETS_ONLY, false);
 
         Map<String, String> artifacts = BedrockAttachableWriter.buildArtifacts(
             "test_hammer", display, geometry, "textures/items/test_hammer",
@@ -53,34 +128,33 @@ class BedrockAttachableWriterTest {
         assertThat(geo).contains("\"cubes\"");
         assertThat(countOccurrences(geo, "\"origin\"")).isEqualTo(2);
         assertThat(geo).doesNotContain("\"cubes\": []");
-        // Rainbow single-bone geometry: binding on the cube bone, no java2bedrock chain.
+        // java2bedrock chain + geo leaf (not Rainbow single-bone).
         assertThat(geo).contains("\"binding\"");
         assertThat(geo).contains("\"geyserextra\"");
-        assertThat(geo).doesNotContain("\"geyserextra_x\"");
-        assertThat(geo).doesNotContain("\"geyserextra_y\"");
-        assertThat(geo).doesNotContain("\"geyserextra_z\"");
-        assertThat(geo).doesNotContain("\"geyserextra_geo\"");
+        assertThat(geo).contains("\"geyserextra_x\"");
+        assertThat(geo).contains("\"geyserextra_y\"");
+        assertThat(geo).contains("\"geyserextra_z\"");
+        assertThat(geo).contains("\"geyserextra_geo\"");
 
         String anim = artifacts.get(BedrockAttachableWriter.animationEntryPath("test_hammer"));
         String thirdMain = extractAnimation(anim, "thirdperson_main_hand");
-        // Third-person Rainbow (AnimationMapper): rot (45,0,90) → (90, -rz, -ry)
-        // = (90, -90, -0); trans (-15.5, 13, 1.5) → (15.5, 14.0, -13.0).
+        // Third-person java2bedrock: root base (90,0,0)/(0,13,-3);
+        // display rot (45,0,90) → (-45,0,90); trans (-15.5,13,1.5) → (15.5,13,1.5).
         assertThat(anim).contains("thirdperson_main_hand");
         assertThat(anim).contains("firstperson_main_hand");
+        assertThat(thirdMain).contains("geyserextra_x");
+        assertThat(thirdMain).contains("-45.0");
         assertThat(thirdMain).contains("90.0");
-        assertThat(thirdMain).contains("-90.0");
         assertThat(thirdMain).contains("15.5");
-        assertThat(thirdMain).contains("14.0");
-        assertThat(thirdMain).contains("-13.0");
+        assertThat(thirdMain).contains("13.0");
+        assertThat(thirdMain).contains("1.5");
         assertThat(thirdMain).contains("2.0");
-        assertThat(thirdMain).doesNotContain("geyserextra_x");
-        // Legacy java2bedrock third-person base pose must not appear on Rainbow path.
-        assertThat(thirdMain).doesNotContain("-3.0");
+        assertThat(thirdMain).contains("-3.0");
     }
 
     @Test
-    @DisplayName("first person + elements uses the Rainbow axis-permutation mapping on the root bone")
-    void firstPersonWithElementsUsesRainbowMapping() {
+    @DisplayName("first person + elements uses java2bedrock base pose + display decomposition")
+    void firstPersonWithElementsUsesJava2BedrockMapping() {
         // ValhallaMMO golden warhammer display values (real-world case).
         JavaModelDisplay display = new JavaModelDisplay(
             new JavaModelDisplay.Transform(
@@ -101,7 +175,7 @@ class BedrockAttachableWriterTest {
                 Map.of("north", face))));
 
         AttachableGenerationConfig config =
-            new AttachableGenerationConfig(AttachableGenerationConfig.MODE_OFFSETS_ONLY, false, false);
+            new AttachableGenerationConfig(AttachableGenerationConfig.MODE_OFFSETS_ONLY, false);
 
         Map<String, String> artifacts = BedrockAttachableWriter.buildArtifacts(
             "test_hammer", display, geometry, "textures/items/test_hammer",
@@ -111,43 +185,43 @@ class BedrockAttachableWriterTest {
         String firstMain = extractAnimation(anim, "firstperson_main_hand");
         String firstOff = extractAnimation(anim, "firstperson_off_hand");
 
-        assertThat(firstPersonAnimatedBoneName(anim)).isEqualTo("geyserextra");
+        // First bone emitted in the bones block is geyserextra_x (display X).
+        assertThat(firstPersonAnimatedBoneName(anim)).isEqualTo("geyserextra_x");
 
-        // Rainbow mapping: rotation = (-90 + ry, -rz, rx) = (-90, -90, 55);
-        // position = (-ty, 12.5 + tz, tx) = (-4, 3.5, 0); scale unchanged.
-        assertThat(firstMain).contains("-90.0");
-        assertThat(firstMain).contains("55.0");
-        assertThat(firstMain).contains("-4.0");
-        assertThat(firstMain).contains("3.5");
+        // j2b FP base, identical for every item: root rot (90,60,-40),
+        // pos [4,10,4] raised by the height correction → [4,12.7,4],
+        // scale 1.5. The item-specific part is the display transform on
+        // x/y/z: rot (55,0,90) → (-55,0,90), and translation [0,4,-9]
+        // resolved in the root's own frame, then divided by the 1.5 root
+        // scale → [2.05, 2.67, -5.64].
+        //
+        // java2bedrock's sign flips would give [-0, 2.67, 6.0] here. That is
+        // the whole difference the baked ZXY frame makes: the root carries
+        // [90,60,-40], so a Java Z offset does not land on Bedrock's Z, and
+        // for a translation this large the error threw the item out of view.
+        String compact = firstMain.replaceAll("\\s+", "");
+        assertThat(compact).contains(
+            "\"geyserextra\":{\"rotation\":[90.0,60.0,-40.0],\"position\":[4.0,12.7,4.0],\"scale\":1.5");
+        assertThat(compact).contains("\"position\":[2.05,2.67,-5.64]");
+        assertThat(firstMain).contains("-55.0");
         assertThat(firstMain).contains("1.7");
-        // Whole pose on BONE_ROOT — no per-axis decomposition.
-        assertThat(firstMain).doesNotContain("geyserextra_x");
-        assertThat(firstMain).doesNotContain("geyserextra_y");
-        assertThat(firstMain).doesNotContain("geyserextra_z");
-        assertThat(firstMain).doesNotContain("0.1");
-        // Bedrock cannot address hands separately in first person: off hand
-        // reuses the right-hand values verbatim (Rainbow behaviour).
-        assertThat(firstOff).isEqualTo(firstMain);
-        // The legacy java2bedrock first-person base pose must be gone from
-        // the full-geometry first-person path.
-        assertThat(firstMain).doesNotContain("60.0");
-        assertThat(firstMain).doesNotContain("-40.0");
+        assertThat(firstMain).contains("geyserextra_x");
+        assertThat(firstMain).contains("geyserextra_y");
+        assertThat(firstMain).contains("geyserextra_z");
+        assertThat(firstOff).contains("geyserextra_x");
     }
 
     @Test
-    @DisplayName("full 3D geometry pivots the cube bone at the model-bounds centre (Rainbow), not fixed [0,8,0]")
-    void fullGeometryUsesModelCentrePivot() {
-        // ValhallaMMO golden great-axe (real-world case): after Java->Bedrock
-        // conversion the cubes span bounds min[-4.5,0,-4.5] max[8,0.5,8].
-        // Java rotates the display transform around the model's geometric
-        // centre, so — matching GeyserMC/Rainbow's GeometryMapper — the
-        // cube bone's pivot must be that centre [1.75,0.25,1.75], NOT the
-        // legacy fixed java2bedrock pivot [0,8,0].
+    @DisplayName("full 3D geometry pivots the cube bone at Java model-space centre [0,8,0], not AABB centre")
+    void fullGeometryUsesJavaModelSpacePivot() {
+        // ValhallaMMO golden great-axe: cubes span AABB centre [1.75,0.25,1.75],
+        // but Java item display rotates around baked origin (8,8,8) → Bedrock
+        // [0,8,0]. Using AABB centre made FP/TP poses swing off the hand.
         JavaModelDisplay display = greatAxeDisplay();
         JavaModelGeometry geometry = greatAxeGeometry();
 
         AttachableGenerationConfig config =
-            new AttachableGenerationConfig(AttachableGenerationConfig.MODE_OFFSETS_ONLY, false, false);
+            new AttachableGenerationConfig(AttachableGenerationConfig.MODE_OFFSETS_ONLY, false);
 
         Map<String, String> artifacts = BedrockAttachableWriter.buildArtifacts(
             "golden_great_axe", display, geometry, "textures/items/golden_great_axe",
@@ -155,23 +229,19 @@ class BedrockAttachableWriterTest {
 
         String geo = artifacts.get(BedrockAttachableWriter.geometryEntryPath("golden_great_axe"));
         float[] pivot = cubeBonePivot(geo);
-        assertThat(pivot[0]).isCloseTo(1.75f, offset(1e-4f));
-        assertThat(pivot[1]).isCloseTo(0.25f, offset(1e-4f));
-        assertThat(pivot[2]).isCloseTo(1.75f, offset(1e-4f));
+        assertThat(pivot[0]).isCloseTo(0f, offset(1e-4f));
+        assertThat(pivot[1]).isCloseTo(8f, offset(1e-4f));
+        assertThat(pivot[2]).isCloseTo(0f, offset(1e-4f));
     }
 
     @Test
-    @DisplayName("first person rotates the model around its geometric centre (Rainbow), not [0,8,0]")
-    void firstPersonRotatesAroundModelCentre() {
-        // The first-person Rainbow pose ([-90,-90,55] / [-4,3.5,0] / 1.7) is
-        // already correct, but it only renders correctly if applied to a bone
-        // pivoted at the model centre. Assert the bone the first-person
-        // animation targets is pivoted at [1.75,0.25,1.75] in the geometry.
+    @DisplayName("first person drives x/y/z; cubes live on geyserextra_geo pivoted at [0,8,0]")
+    void firstPersonRotatesAroundJavaModelSpacePivot() {
         JavaModelDisplay display = greatAxeDisplay();
         JavaModelGeometry geometry = greatAxeGeometry();
 
         AttachableGenerationConfig config =
-            new AttachableGenerationConfig(AttachableGenerationConfig.MODE_OFFSETS_ONLY, false, false);
+            new AttachableGenerationConfig(AttachableGenerationConfig.MODE_OFFSETS_ONLY, false);
 
         Map<String, String> artifacts = BedrockAttachableWriter.buildArtifacts(
             "golden_great_axe", display, geometry, "textures/items/golden_great_axe",
@@ -180,24 +250,20 @@ class BedrockAttachableWriterTest {
         String geo = artifacts.get(BedrockAttachableWriter.geometryEntryPath("golden_great_axe"));
         String anim = artifacts.get(BedrockAttachableWriter.animationEntryPath("golden_great_axe"));
 
-        // The bone the first-person animation drives must be the same bone
-        // that carries the cubes, and that bone must be pivoted at the model
-        // centre — otherwise the (correct) Rainbow rotation swings the model
-        // around the wrong point in first person.
         String animatedBone = firstPersonAnimatedBoneName(anim);
         String cubeBone = cubeBoneName(geo);
-        assertThat(animatedBone).isEqualTo("geyserextra");
-        assertThat(cubeBone).isEqualTo("geyserextra");
+        assertThat(animatedBone).isEqualTo("geyserextra_x");
+        assertThat(cubeBone).isEqualTo("geyserextra_geo");
 
         float[] pivot = cubeBonePivot(geo);
-        assertThat(pivot[0]).isCloseTo(1.75f, offset(1e-4f));
-        assertThat(pivot[1]).isCloseTo(0.25f, offset(1e-4f));
-        assertThat(pivot[2]).isCloseTo(1.75f, offset(1e-4f));
+        assertThat(pivot[0]).isCloseTo(0f, offset(1e-4f));
+        assertThat(pivot[1]).isCloseTo(8f, offset(1e-4f));
+        assertThat(pivot[2]).isCloseTo(0f, offset(1e-4f));
     }
 
     @Test
-    @DisplayName("explicit firstPersonBasePose forces the legacy path even with elements")
-    void explicitBasePoseKeepsLegacyFirstPerson() {
+    @DisplayName("explicit firstPersonBasePose overrides global FP base constants (same java2bedrock path)")
+    void explicitBasePoseOverridesFirstPersonDefaults() {
         JavaModelDisplay display = new JavaModelDisplay(
             new JavaModelDisplay.Transform(
                 new float[]{55f, 0f, 90f},
@@ -213,9 +279,9 @@ class BedrockAttachableWriterTest {
                 Map.of("north", face))));
 
         AttachableGenerationConfig config = new AttachableGenerationConfig(
-            AttachableGenerationConfig.MODE_OFFSETS_ONLY, false, false,
+            AttachableGenerationConfig.MODE_OFFSETS_ONLY, false,
             new AttachableGenerationConfig.BasePose(
-                new float[]{90f, 60f, -40f}, new float[]{4f, 10f, 4f}, 1.5f));
+                new float[]{90f, 45f, -30f}, new float[]{5f, 11f, 3f}, 1.25f));
 
         Map<String, String> artifacts = BedrockAttachableWriter.buildArtifacts(
             "test_hammer", display, geometry, "textures/items/test_hammer",
@@ -224,20 +290,122 @@ class BedrockAttachableWriterTest {
         String geo = artifacts.get(BedrockAttachableWriter.geometryEntryPath("test_hammer"));
         assertThat(geo).contains("\"geyserextra_x\"");
         assertThat(geo).contains("\"geyserextra_geo\"");
+        float[] geoPivot = cubeBonePivot(geo);
+        assertThat(geoPivot[0]).isCloseTo(0f, offset(1e-4f));
+        assertThat(geoPivot[1]).isCloseTo(8f, offset(1e-4f));
+        assertThat(geoPivot[2]).isCloseTo(0f, offset(1e-4f));
 
         String firstMain = extractAnimation(
             artifacts.get(BedrockAttachableWriter.animationEntryPath("test_hammer")),
             "firstperson_main_hand");
-        // Legacy base pose values present; the per-axis decomposition bones
-        // are used again on this path.
-        assertThat(firstMain).contains("60.0");
-        assertThat(firstMain).contains("-40.0");
+        assertThat(firstMain).contains("45.0");
+        assertThat(firstMain).contains("-30.0");
+        // The override is applied verbatim: the root pose is the same for
+        // every item, so nothing here depends on the model's display scale.
+        String compact = firstMain.replaceAll("\\s+", "");
+        assertThat(compact).contains(
+            "\"geyserextra\":{\"rotation\":[90.0,45.0,-30.0],\"position\":[5.0,11.0,3.0],\"scale\":1.25");
         assertThat(firstMain).contains("geyserextra_x");
     }
 
     @Test
-    @DisplayName("flat items (no elements) keep the java2bedrock first-person base pose")
-    void flatItemsKeepLegacyFirstPerson() {
+    @DisplayName("3D FP keeps the Java display translation and the fixed java2bedrock root pose")
+    void firstPerson3dKeepsJavaTranslationOnFixedRoot() {
+        // Greataxe-class: display scale 1.7, translation [0,4,-9]. This is the
+        // case the removed oversize heuristics were invented for.
+        JavaModelDisplay display = new JavaModelDisplay(
+            new JavaModelDisplay.Transform(
+                new float[]{55f, 0f, 90f},
+                new float[]{0f, 4f, -9f},
+                new float[]{1.7f, 1.7f, 1.7f}),
+            null, null, null, null);
+
+        JavaModelGeometry.Face face = new JavaModelGeometry.Face(
+            new float[]{0f, 0f, 16f, 16f}, "#0", 0);
+        JavaModelGeometry geometry = new JavaModelGeometry(List.of(
+            new JavaModelGeometry.Element(
+                new float[]{0f, 0f, 0f}, new float[]{4f, 4f, 4f}, null,
+                Map.of("north", face))));
+
+        AttachableGenerationConfig config = new AttachableGenerationConfig(
+            AttachableGenerationConfig.MODE_OFFSETS_ONLY, false, null);
+
+        Map<String, String> artifacts = BedrockAttachableWriter.buildArtifacts(
+            "test_axe", display, geometry, "textures/items/test_axe",
+            32, 32, config, null);
+
+        String firstMain = extractAnimation(
+            artifacts.get(BedrockAttachableWriter.animationEntryPath("test_axe")),
+            "firstperson_main_hand");
+        String compact = firstMain.replaceAll("\\s+", "");
+        // [0,4,-9] resolved in the root's [90,60,-40] frame, then divided by
+        // the 1.5 root scale.
+        assertThat(compact).contains("\"position\":[2.05,2.67,-5.64]");
+        assertThat(compact).contains("\"scale\":[1.7,1.7,1.7]");
+        assertThat(firstMain).contains("-55.0");
+        // Root is the java2bedrock constant, untouched by display scale.
+        assertThat(compact).contains(
+            "\"geyserextra\":{\"rotation\":[90.0,60.0,-40.0],\"position\":[4.0,12.7,4.0],\"scale\":1.5");
+    }
+
+    @Test
+    @DisplayName("texture-only uses flat FP pose (not Valhalla 3D frame) and keeps translation")
+    void textureOnlyUsesFlatFpPoseAndKeepsTranslation() {
+        // infinity_sword-style: parent item/handheld, custom layer0 only.
+        JavaModelDisplay display = VanillaBuiltinDisplays.HANDHELD;
+        AttachableGenerationConfig config = new AttachableGenerationConfig(
+            AttachableGenerationConfig.MODE_OFFSETS_ONLY, false,
+            new AttachableGenerationConfig.BasePose(
+                new float[]{90f, 60f, -28f}, new float[]{25f, 7f, 10f}, 3.2f));
+
+        Map<String, String> artifacts = BedrockAttachableWriter.buildArtifacts(
+            "infinity_sword", display, null, "textures/items/infinity_sword",
+            16, 16, config, null);
+
+        String firstMain = extractAnimation(
+            artifacts.get(BedrockAttachableWriter.animationEntryPath("infinity_sword")),
+            "firstperson_main_hand");
+        String compact = firstMain.replaceAll("\\s+", "");
+        // Must NOT use Valhalla 3D frame.
+        assertThat(compact).doesNotContain("\"position\":[25.0,7.0,10.0]");
+        assertThat(compact).doesNotContain("\"scale\":3.2");
+        // Flat-only pose: [0,15,4]/1.75.
+        assertThat(compact).contains(
+            "\"geyserextra\":{\"rotation\":[90.0,60.0,-40.0],\"position\":[0.0,17.7,4.0],\"scale\":1.75");
+        // Handheld FP translation kept.
+        assertThat(compact).doesNotContainPattern(
+            "\"geyserextra_x\":\\{\"rotation\":\\[[^]]+\\],\"position\":\\[-?0\\.0,-?0\\.0,-?0\\.0\\]");
+    }
+
+    @Test
+    @DisplayName("flat FP root pose is the same for a small-scale item (morningstar-class)")
+    void morningstarScaleKeepsBaseFpRootPosition() {
+        JavaModelDisplay display = new JavaModelDisplay(
+            new JavaModelDisplay.Transform(
+                new float[]{55f, 0f, 90f},
+                new float[]{1.13f, 3.2f, -2.12f},
+                new float[]{0.68f, 0.68f, 0.68f}),
+            null, null, null, null);
+
+        AttachableGenerationConfig config = new AttachableGenerationConfig(
+            AttachableGenerationConfig.MODE_OFFSETS_ONLY, false, null);
+
+        Map<String, String> artifacts = BedrockAttachableWriter.buildArtifacts(
+            "test_mace", display, null, "textures/items/test_mace",
+            16, 16, config, null);
+
+        String firstMain = extractAnimation(
+            artifacts.get(BedrockAttachableWriter.animationEntryPath("test_mace")),
+            "firstperson_main_hand");
+        String compact = firstMain.replaceAll("\\s+", "");
+        // Flat pose [0,15,4]/1.75 (no oversize when display scale 0.68).
+        assertThat(compact).contains(
+            "\"geyserextra\":{\"rotation\":[90.0,60.0,-40.0],\"position\":[0.0,17.7,4.0],\"scale\":1.75");
+    }
+
+    @Test
+    @DisplayName("flat FP root pose does not change with an oversized display scale")
+    void flatItemsKeepFlatFpRootWhenOversized() {
         JavaModelDisplay display = new JavaModelDisplay(
             new JavaModelDisplay.Transform(
                 new float[]{55f, 0f, 90f},
@@ -246,7 +414,7 @@ class BedrockAttachableWriterTest {
             null, null, null, null);
 
         AttachableGenerationConfig config =
-            new AttachableGenerationConfig(AttachableGenerationConfig.MODE_OFFSETS_ONLY, false, false);
+            new AttachableGenerationConfig(AttachableGenerationConfig.MODE_OFFSETS_ONLY, false);
 
         Map<String, String> artifacts = BedrockAttachableWriter.buildArtifacts(
             "flat_item", display, null, "textures/items/flat_item",
@@ -255,10 +423,10 @@ class BedrockAttachableWriterTest {
         String firstMain = extractAnimation(
             artifacts.get(BedrockAttachableWriter.animationEntryPath("flat_item")),
             "firstperson_main_hand");
-        // Default java2bedrock base pose (90, 60, -40) / (4, 10, 4) / 1.5.
-        assertThat(firstMain).contains("60.0");
-        assertThat(firstMain).contains("-40.0");
-        assertThat(firstMain).contains("10.0");
+        String compact = firstMain.replaceAll("\\s+", "");
+        // Fixed flat pose [0,15,4]/1.75 regardless of the display scale.
+        assertThat(compact).contains(
+            "\"geyserextra\":{\"rotation\":[90.0,60.0,-40.0],\"position\":[0.0,17.7,4.0],\"scale\":1.75");
         assertThat(firstMain).contains("geyserextra_x");
     }
 
@@ -298,7 +466,7 @@ class BedrockAttachableWriterTest {
             null, null, null);
 
         AttachableGenerationConfig config =
-            new AttachableGenerationConfig(AttachableGenerationConfig.MODE_OFFSETS_ONLY, false, false);
+            new AttachableGenerationConfig(AttachableGenerationConfig.MODE_OFFSETS_ONLY, false);
 
         Map<String, String> artifacts = BedrockAttachableWriter.buildArtifacts(
             "flat_icon", display, null, "textures/items/flat_icon",
@@ -316,6 +484,320 @@ class BedrockAttachableWriterTest {
      * right hand). Shared by the pivot regression tests so both assert
      * against the same real-world transform values.
      */
+    @Test
+    @DisplayName("off hand applies Java's left-hand rule to the declared *_lefthand slot")
+    void offHandUsesLeftHandTransform() {
+        // Dagger-class: the left-hand slot states rotation.z = -90 against a
+        // right hand of +90. Vanilla ItemTransform#apply negates Y and Z for
+        // the left hand, so the author's -90 is a request to render at +90 —
+        // the same orientation as the right hand.
+        JavaModelDisplay display = new JavaModelDisplay(
+            new JavaModelDisplay.Transform(
+                new float[]{55f, 0f, 90f}, new float[]{1.13f, 3.2f, -2.12f},
+                new float[]{0.68f, 0.68f, 0.68f}),
+            new JavaModelDisplay.Transform(
+                new float[]{45f, 0f, 90f}, new float[]{-6.5f, 4f, 0.5f},
+                new float[]{0.85f, 0.85f, 0.85f}),
+            null, null, null,
+            new JavaModelDisplay.Transform(
+                new float[]{55f, 0f, -90f}, new float[]{11.3f, 3.2f, -2.12f},
+                new float[]{0.68f, 0.68f, 0.68f}),
+            new JavaModelDisplay.Transform(
+                new float[]{45f, 0f, -90f}, new float[]{7.5f, 4f, 0.5f},
+                new float[]{0.85f, 0.85f, 0.85f}));
+
+        AttachableGenerationConfig config =
+            new AttachableGenerationConfig(AttachableGenerationConfig.MODE_OFFSETS_ONLY, false);
+
+        Map<String, String> artifacts = BedrockAttachableWriter.buildArtifacts(
+            "test_dagger", display, null, "textures/items/test_dagger",
+            16, 16, config, null);
+        String anim = artifacts.get(BedrockAttachableWriter.animationEntryPath("test_dagger"));
+
+        String thirdMain = extractAnimation(anim, "thirdperson_main_hand").replaceAll("\\s+", "");
+        String thirdOff = extractAnimation(anim, "thirdperson_off_hand").replaceAll("\\s+", "");
+        // Both hands negate the declared X. Java renders this model mirrored:
+        // apply() turns the declared +7.5 into -7.5, matching the right hand's
+        // -6.5 in a frame that is itself mirrored. Bedrock does not mirror the
+        // left arm's attachable frame for us, so reproducing that appearance
+        // takes opposite emitted signs rather than equal ones.
+        assertThat(thirdMain).contains("\"position\":[6.5,4.0,0.5]");
+        assertThat(thirdOff).contains("\"position\":[-7.5,4.0,0.5]");
+        // Z comes out at +90 in BOTH hands: the author's -90 is pre-compensation
+        // for Java's negation. Emitting the literal -90 is what put the off-hand
+        // weapon 180 degrees round the wrong way.
+        assertThat(thirdMain).contains("\"geyserextra_z\":{\"rotation\":[0.0,0.0,90.0]}");
+        assertThat(thirdOff).contains("\"geyserextra_z\":{\"rotation\":[0.0,0.0,90.0]}");
+    }
+
+    @Test
+    @DisplayName("off hand still gets Java's left-hand negation when no *_lefthand slot exists")
+    void offHandFallsBackToMirroredRightHand() {
+        JavaModelDisplay display = new JavaModelDisplay(
+            null,
+            new JavaModelDisplay.Transform(
+                new float[]{45f, 0f, 90f}, new float[]{-6.5f, 4f, 0.5f},
+                new float[]{0.85f, 0.85f, 0.85f}),
+            null, null, null);
+
+        AttachableGenerationConfig config =
+            new AttachableGenerationConfig(AttachableGenerationConfig.MODE_OFFSETS_ONLY, false);
+
+        Map<String, String> artifacts = BedrockAttachableWriter.buildArtifacts(
+            "test_plain", display, null, "textures/items/test_plain",
+            16, 16, config, null);
+        String anim = artifacts.get(BedrockAttachableWriter.animationEntryPath("test_plain"));
+
+        // ItemTransforms.Deserializer substitutes the right-hand transform for
+        // the missing slot, and apply(leftHand=true) still negates it — the
+        // rule is unconditional, not a fallback. Java therefore renders this
+        // model *un*mirrored: the off hand ends up on the same visual side as
+        // the main hand, which is the lopsided look that makes authors add an
+        // explicit *_lefthand slot. Since Bedrock's left arm frame is not
+        // mirrored either, matching that takes an equal emitted X, not an
+        // opposite one — the reverse of the declared-slot case above, and the
+        // reason the sign cannot simply follow which hand it is.
+        String off = extractAnimation(anim, "thirdperson_off_hand").replaceAll("\\s+", "");
+        assertThat(off).contains("\"position\":[6.5,4.0,0.5]");
+        assertThat(off).contains("\"geyserextra_z\":{\"rotation\":[0.0,0.0,-90.0]}");
+        assertThat(extractAnimation(anim, "thirdperson_main_hand").replaceAll("\\s+", ""))
+            .contains("\"position\":[6.5,4.0,0.5]");
+    }
+
+    @Test
+    @DisplayName("visible bounds grow past the java2bedrock defaults for an oversized mesh")
+    void visibleBoundsGrowForOversizedMesh() {
+        JavaModelDisplay display = greatAxeDisplay();
+        // A mesh that reaches outside Java's 0..16 box (legal: models may span
+        // -16..32) exceeds the fixed 4 x 4.5 default once the display and root
+        // scales are applied.
+        JavaModelGeometry.Face face = new JavaModelGeometry.Face(
+            new float[]{0f, 0f, 16f, 16f}, "#0", 0);
+        JavaModelGeometry geometry = new JavaModelGeometry(List.of(
+            new JavaModelGeometry.Element(
+                new float[]{-8f, -8f, -8f}, new float[]{24f, 24f, 24f}, null,
+                Map.of("north", face))));
+
+        AttachableGenerationConfig config =
+            new AttachableGenerationConfig(AttachableGenerationConfig.MODE_OFFSETS_ONLY, false);
+
+        String geo = BedrockAttachableWriter.buildArtifacts(
+                "big_axe", display, geometry, "textures/items/big_axe",
+                32, 32, config, null)
+            .get(BedrockAttachableWriter.geometryEntryPath("big_axe"));
+
+        float width = descriptorFloat(geo, "visible_bounds_width");
+        float height = descriptorFloat(geo, "visible_bounds_height");
+        assertThat(width).isGreaterThan(4f);
+        assertThat(height).isGreaterThan(4.5f);
+    }
+
+    @Test
+    @DisplayName("visible bounds never shrink below the java2bedrock defaults for a small mesh")
+    void visibleBoundsNeverShrink() {
+        // A small mesh AND a display that barely moves it — the great-axe
+        // display would legitimately widen the box, since it throws the mesh
+        // 15.5 units out of the bone (see visibleBoundsCoverAnimationReach).
+        JavaModelDisplay display = new JavaModelDisplay(
+            new JavaModelDisplay.Transform(
+                new float[]{0f, 0f, 0f}, new float[]{0f, 1f, 0f},
+                new float[]{1f, 1f, 1f}),
+            new JavaModelDisplay.Transform(
+                new float[]{0f, 0f, 0f}, new float[]{0f, 1f, 0f},
+                new float[]{1f, 1f, 1f}),
+            null, null, null);
+        JavaModelGeometry.Face face = new JavaModelGeometry.Face(
+            new float[]{0f, 0f, 1f, 1f}, "#0", 0);
+        JavaModelGeometry geometry = new JavaModelGeometry(List.of(
+            new JavaModelGeometry.Element(
+                new float[]{8f, 8f, 8f}, new float[]{9f, 9f, 9f}, null,
+                Map.of("north", face))));
+
+        AttachableGenerationConfig config =
+            new AttachableGenerationConfig(AttachableGenerationConfig.MODE_OFFSETS_ONLY, false);
+
+        String geo = BedrockAttachableWriter.buildArtifacts(
+                "tiny", display, geometry, "textures/items/tiny",
+                16, 16, config, null)
+            .get(BedrockAttachableWriter.geometryEntryPath("tiny"));
+
+        assertThat(descriptorFloat(geo, "visible_bounds_width")).isEqualTo(4f);
+        assertThat(descriptorFloat(geo, "visible_bounds_height")).isEqualTo(4.5f);
+    }
+
+    @Test
+    @DisplayName("geometry format_version is raised to 1.21.0 only when uv_rotation is emitted")
+    void formatVersionTracksUvRotationUse() {
+        JavaModelDisplay display = greatAxeDisplay();
+        JavaModelGeometry.Face plain = new JavaModelGeometry.Face(
+            new float[]{0f, 0f, 16f, 16f}, "#0", 0);
+        JavaModelGeometry.Face rotated = new JavaModelGeometry.Face(
+            new float[]{0f, 0f, 16f, 16f}, "#0", 90);
+        AttachableGenerationConfig config =
+            new AttachableGenerationConfig(AttachableGenerationConfig.MODE_OFFSETS_ONLY, false);
+
+        String plainGeo = BedrockAttachableWriter.buildArtifacts(
+                "plain", display,
+                new JavaModelGeometry(List.of(new JavaModelGeometry.Element(
+                    new float[]{0f, 0f, 0f}, new float[]{4f, 4f, 4f}, null,
+                    Map.of("north", plain)))),
+                "textures/items/plain", 16, 16, config, null)
+            .get(BedrockAttachableWriter.geometryEntryPath("plain"));
+        assertThat(plainGeo.replaceAll("\\s+", "")).contains("\"format_version\":\"1.16.0\"");
+
+        String rotatedGeo = BedrockAttachableWriter.buildArtifacts(
+                "rotated", display,
+                new JavaModelGeometry(List.of(new JavaModelGeometry.Element(
+                    new float[]{0f, 0f, 0f}, new float[]{4f, 4f, 4f}, null,
+                    Map.of("east", rotated)))),
+                "textures/items/rotated", 16, 16, config, null)
+            .get(BedrockAttachableWriter.geometryEntryPath("rotated"));
+        assertThat(rotatedGeo.replaceAll("\\s+", "")).contains("\"format_version\":\"1.21.0\"");
+        assertThat(rotatedGeo.replaceAll("\\s+", "")).contains("\"uv_rotation\":90");
+
+        // A geometry at 1.21.0 is unreadable by a client that honours a
+        // 1.16.100 manifest, so the pack manifest has to move with it.
+        assertThat(AutoBedrockPackBuilder.requiresModernGeometry(
+            Map.of(BedrockAttachableWriter.geometryEntryPath("rotated"), rotatedGeo))).isTrue();
+        assertThat(AutoBedrockPackBuilder.requiresModernGeometry(
+            Map.of(BedrockAttachableWriter.geometryEntryPath("plain"), plainGeo))).isFalse();
+        assertThat(AutoBedrockPackBuilder.buildManifestJson(3, true).replaceAll("\\s+", ""))
+            .contains("\"min_engine_version\":[1,21,0]");
+        assertThat(AutoBedrockPackBuilder.buildManifestJson(3, false).replaceAll("\\s+", ""))
+            .contains("\"min_engine_version\":[1,16,100]");
+    }
+
+    @Test
+    @DisplayName("per-face uv_rotation is always emitted, pinning geometry to 1.21.0")
+    void faceUvRotationIsAlwaysOn() {
+        // The rollback that emitted legacy 1.16.0 geometry (mirror 180, drop
+        // 90/270) is gone along with its config key: pre-1.21.0 Bedrock clients
+        // can no longer load the pack, and there is no lever left to let them.
+        JavaModelDisplay display = greatAxeDisplay();
+        JavaModelGeometry.Face rotated90 = new JavaModelGeometry.Face(
+            new float[]{0f, 0f, 16f, 16f}, "#0", 90);
+        JavaModelGeometry.Face rotated180 = new JavaModelGeometry.Face(
+            new float[]{0f, 0f, 8f, 8f}, "#0", 180);
+        AttachableGenerationConfig config = new AttachableGenerationConfig(
+            AttachableGenerationConfig.MODE_OFFSETS_ONLY, false);
+
+        String geo = BedrockAttachableWriter.buildArtifacts(
+                "rotated", display,
+                new JavaModelGeometry(List.of(new JavaModelGeometry.Element(
+                    new float[]{0f, 0f, 0f}, new float[]{4f, 4f, 4f}, null,
+                    Map.of("east", rotated90, "north", rotated180)))),
+                "textures/items/rotated", 16, 16, config, null)
+            .get(BedrockAttachableWriter.geometryEntryPath("rotated"));
+        String compact = geo.replaceAll("\\s+", "");
+
+        assertThat(compact).contains("uv_rotation");
+        assertThat(compact).contains("\"format_version\":\"1.21.0\"");
+        // The 180 face is stated outright rather than emulated by a
+        // point-mirrored rect with negative sizes.
+        assertThat(compact).doesNotContain("\"uv_size\":[-8.0,-8.0]");
+        assertThat(AutoBedrockPackBuilder.requiresModernGeometry(
+            Map.of(BedrockAttachableWriter.geometryEntryPath("rotated"), geo))).isTrue();
+    }
+
+    @Test
+    @DisplayName("first-person off hand mirrors the base pose, third person leaves it alone")
+    void firstPersonOffHandMirrorsBasePose() {
+        JavaModelDisplay display = greatAxeDisplay();
+        AttachableGenerationConfig config =
+            new AttachableGenerationConfig(AttachableGenerationConfig.MODE_OFFSETS_ONLY, false);
+
+        String anim = BedrockAttachableWriter.buildArtifacts(
+                "mirror_axe", display, null, "textures/items/mirror_axe",
+                16, 16, config, null)
+            .get(BedrockAttachableWriter.animationEntryPath("mirror_axe"));
+
+        String fpMain = extractAnimation(anim, "firstperson_main_hand").replaceAll("\\s+", "");
+        String fpOff = extractAnimation(anim, "firstperson_off_hand").replaceAll("\\s+", "");
+        // Flat items ride FLAT_FIRST_PERSON_POSE: [90, 60, -40] / [0, 15, 4].
+        assertThat(fpMain).contains("\"geyserextra\":{\"rotation\":[90.0,60.0,-40.0]");
+        // The off hand gets its mirror image, or the right-arm mapping swings
+        // the item clean out of the first-person viewport.
+        assertThat(fpOff).contains("\"geyserextra\":{\"rotation\":[90.0,-60.0,40.0]");
+
+        // Third person's base pose is already mirror-invariant, so both hands
+        // must keep it byte-identical.
+        String tpMain = extractAnimation(anim, "thirdperson_main_hand").replaceAll("\\s+", "");
+        String tpOff = extractAnimation(anim, "thirdperson_off_hand").replaceAll("\\s+", "");
+        assertThat(tpMain).contains("\"geyserextra\":{\"rotation\":[90.0,0.0,0.0],\"position\":[0.0,13.0,-3.0]}");
+        assertThat(tpOff).contains("\"geyserextra\":{\"rotation\":[90.0,0.0,0.0],\"position\":[0.0,13.0,-3.0]}");
+    }
+
+    @Test
+    @DisplayName("visible bounds cover where the animation puts the mesh, not just the mesh")
+    void visibleBoundsCoverAnimationReach() {
+        // A small mesh with a large display translation: the geometry alone
+        // would fit the default box, but the hold animation throws it 26 units
+        // sideways, which is where Bedrock actually has to look for it.
+        JavaModelDisplay farOffset = new JavaModelDisplay(
+            new JavaModelDisplay.Transform(
+                new float[]{55f, 0f, 90f}, new float[]{26f, 4f, -9f},
+                new float[]{1f, 1f, 1f}),
+            new JavaModelDisplay.Transform(
+                new float[]{45f, 0f, 90f}, new float[]{0f, 0f, 0f},
+                new float[]{1f, 1f, 1f}),
+            null, null, null);
+        JavaModelGeometry.Face face = new JavaModelGeometry.Face(
+            new float[]{0f, 0f, 16f, 16f}, "#0", 0);
+        JavaModelGeometry small = new JavaModelGeometry(List.of(
+            new JavaModelGeometry.Element(
+                new float[]{7f, 7f, 7f}, new float[]{9f, 9f, 9f}, null,
+                Map.of("north", face))));
+
+        AttachableGenerationConfig config =
+            new AttachableGenerationConfig(AttachableGenerationConfig.MODE_OFFSETS_ONLY, false);
+
+        String geo = BedrockAttachableWriter.buildArtifacts(
+                "far_item", farOffset, small, "textures/items/far_item",
+                16, 16, config, null)
+            .get(BedrockAttachableWriter.geometryEntryPath("far_item"));
+
+        assertThat(descriptorFloat(geo, "visible_bounds_width"))
+            .as("box widened to reach the 26-unit display translation")
+            .isGreaterThan(4f);
+        assertThat(descriptorFloat(geo, "visible_bounds_height"))
+            .isGreaterThan(4.5f);
+    }
+
+    @Test
+    @DisplayName("removed tuning keys in an old config.json are ignored, not fatal")
+    void retiredKeysDoNotBreakDeserialisation() {
+        // Every install carries these five in its config.json from before they
+        // were settled and compiled in. Gson must skip them silently — throwing
+        // here would take the whole plugin down on enable, and
+        // firstPersonHeightOffset (the one key still live) has to survive the
+        // company.
+        AttachableGenerationConfig parsed = com.geyserextra.core.util.JsonUtil.fromJson(
+            "{\"firstPersonTranslationFrame\":\"j2b\",\"faceUvRotation\":false,"
+                + "\"rainbowFirstPersonMapping\":true,\"mirrorOffHandTranslation\":false,"
+                + "\"debugDumpArtifacts\":true,\"firstPersonHeightOffset\":4.25}",
+            AttachableGenerationConfig.class);
+        assertThat(parsed.firstPersonHeightOffset()).isEqualTo(4.25f);
+        // An absent key still falls back to the tuned default rather than 0.
+        assertThat(com.geyserextra.core.util.JsonUtil.fromJson(
+            "{}", AttachableGenerationConfig.class).firstPersonHeightOffset())
+            .isEqualTo(AttachableGenerationConfig.BasePose.FIRST_PERSON_HEIGHT_TRIM);
+    }
+
+    /** Reads a single numeric field out of the geometry descriptor block. */
+    private static float descriptorFloat(String geometryJson, String field) {
+        String compact = geometryJson.replaceAll("\\s+", "");
+        int at = compact.indexOf("\"" + field + "\":");
+        assertThat(at).as(field + " present").isGreaterThan(0);
+        int start = at + field.length() + 3;
+        int end = start;
+        while (end < compact.length()
+            && (Character.isDigit(compact.charAt(end)) || compact.charAt(end) == '.'
+                || compact.charAt(end) == '-')) {
+            end++;
+        }
+        return Float.parseFloat(compact.substring(start, end));
+    }
+
     private static JavaModelDisplay greatAxeDisplay() {
         return new JavaModelDisplay(
             new JavaModelDisplay.Transform(
@@ -331,9 +813,8 @@ class BedrockAttachableWriterTest {
 
     /**
      * Two-element great-axe geometry (blade + handle) whose converted Bedrock
-     * cubes span exactly the golden bounds min[-4.5,0,-4.5] max[8,0.5,8]:
-     * the blade element sets the full extent and the handle stays inside it,
-     * so the bounds centre is [1.75,0.25,1.75].
+     * cubes span AABB min[-4.5,0,-4.5] max[8,0.5,8] (centre [1.75,0.25,1.75]).
+     * The java2bedrock geo leaf must still pivot at [0,8,0], not that AABB centre.
      */
     private static JavaModelGeometry greatAxeGeometry() {
         JavaModelGeometry.Face face = new JavaModelGeometry.Face(
@@ -371,10 +852,8 @@ class BedrockAttachableWriterTest {
     }
 
     /**
-     * Name of the bone the {@code firstperson_main_hand} animation drives.
-     * Relies on the writer's stable
-     * {@code animation.geyserextra.<icon>.firstperson_main_hand} key and its
-     * single-bone {@code "bones": { "<name>": ... }} body.
+     * Name of the first bone listed under {@code firstperson_main_hand}.
+     * On the java2bedrock path that is {@code geyserextra_x}.
      */
     private static String firstPersonAnimatedBoneName(String animJson) {
         int key = animJson.indexOf(".firstperson_main_hand\"");

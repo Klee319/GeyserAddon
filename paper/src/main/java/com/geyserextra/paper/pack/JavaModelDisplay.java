@@ -10,9 +10,8 @@ import java.util.Objects;
  * {@link #gui()}, {@link #ground()}, {@link #head()}) is independently nullable:
  * a Java model only declares the slots it overrides; the rest inherit from the
  * parent model and ultimately from Minecraft's built-in {@code item/handheld} or
- * {@code item/generated}. Built-in vanilla defaults are not present in operator
- * packs, so a slot that resolves to {@code null} at the end of the parent chain
- * remains {@code null} here.</p>
+ * {@code item/generated}. {@link JavaPackReader} injects those builtins via
+ * {@link VanillaBuiltinDisplays} when the parent file is absent from the pack.</p>
  *
  * <p>Used by {@link BedrockAttachableWriter} to populate the {@code hold_first_person}
  * and {@code hold_third_person} animation channels of the generated attachable.</p>
@@ -22,16 +21,34 @@ public record JavaModelDisplay(
     Transform thirdpersonRighthand,
     Transform gui,
     Transform ground,
-    Transform head
+    Transform head,
+    Transform firstpersonLefthand,
+    Transform thirdpersonLefthand
 ) {
+
+    /**
+     * Backwards-compatible 5-slot constructor for models (and tests) that only
+     * care about the right-hand slots. The left-hand slots stay {@code null},
+     * which {@link #handTransformFor(boolean, boolean)} reads as "mirror the
+     * right hand" — Mojang's own fallback when a model omits them.
+     */
+    public JavaModelDisplay(
+        Transform firstpersonRighthand,
+        Transform thirdpersonRighthand,
+        Transform gui,
+        Transform ground,
+        Transform head
+    ) {
+        this(firstpersonRighthand, thirdpersonRighthand, gui, ground, head, null, null);
+    }
 
     /**
      * Returns {@code true} when at least one held-item slot
      * (first-person right hand or third-person right hand) is non-null.
-     * Used as the eligibility gate for writing an attachable: items
-     * without any held-item transform fall through to vanilla rendering
-     * rather than producing an attachable that would just duplicate the
-     * vanilla in-hand pose.
+     * Used as the eligibility gate for writing an attachable. Geyser custom
+     * item IDs do not inherit Bedrock's vanilla hold attachables, so items
+     * that only inherit {@code item/handheld} must still resolve a hand
+     * transform (via {@link VanillaBuiltinDisplays}) rather than skipping.
      */
     public boolean hasAnyHandTransform() {
         return firstpersonRighthand != null || thirdpersonRighthand != null;
@@ -48,6 +65,22 @@ public record JavaModelDisplay(
             return firstpersonRighthand != null ? firstpersonRighthand : thirdpersonRighthand;
         }
         return thirdpersonRighthand != null ? thirdpersonRighthand : firstpersonRighthand;
+    }
+
+    /**
+     * Slot-aware variant. Returns the model's own {@code *_lefthand} transform
+     * for the off hand when it declares one; Valhalla-derived weapon models do
+     * (their left-hand pose is not a plain sign flip of the right — e.g. a
+     * dagger uses {@code rotation.z = +90} in the right hand and {@code -90} in
+     * the left). Falls back to the right-hand slot otherwise, which is what
+     * Mojang's client does for models that omit the left-hand entries.
+     */
+    public Transform handTransformFor(boolean firstPerson, boolean offHand) {
+        if (!offHand) {
+            return handTransformFor(firstPerson);
+        }
+        Transform left = firstPerson ? firstpersonLefthand : thirdpersonLefthand;
+        return left != null ? left : handTransformFor(firstPerson);
     }
 
     /**

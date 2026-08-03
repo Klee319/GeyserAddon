@@ -9,6 +9,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -623,13 +624,19 @@ public final class JavaPackReader {
         // result regardless of which texture path wins.
         JavaModelDisplay display = resolveDisplayFromModelSafe(modelRef);
         JavaModelGeometry geometry = resolveElementsFromModelSafe(modelRef);
+        // Only 3D models can carry per-face texture references, so skip the
+        // extra parent-chain walk for the far more common flat items.
+        Map<String, Path> textureFiles =
+            (geometry != null && geometry.hasElements())
+                ? resolveTextureMapSafe(modelRef)
+                : Map.of();
 
         // Step 1: model JSON chain -> textures.layerN -> PNG file
         String textureRef = resolveTextureRefFromModel(modelRef);
         if (textureRef != null) {
             Path texturePath = resolveTextureFile(textureRef);
             if (texturePath != null) {
-                return new JavaModelDefinition(baseItem, cmd, modelRef, textureRef, texturePath, display, geometry);
+                return new JavaModelDefinition(baseItem, cmd, modelRef, textureRef, texturePath, display, geometry, textureFiles);
             }
         }
 
@@ -640,7 +647,7 @@ public final class JavaPackReader {
                 logger.fine("[JavaPack] " + baseItem + "#" + cmd
                     + ": resolved via model-name-as-texture-path fallback for " + modelRef);
             }
-            return new JavaModelDefinition(baseItem, cmd, modelRef, modelRef, direct, display, geometry);
+            return new JavaModelDefinition(baseItem, cmd, modelRef, modelRef, direct, display, geometry, textureFiles);
         }
 
         // Step 3: basename index lookup
@@ -653,7 +660,7 @@ public final class JavaPackReader {
                     + " -> " + indexed + ")");
             }
             return new JavaModelDefinition(baseItem, cmd, modelRef,
-                "basename:" + basename, indexed, display, geometry);
+                "basename:" + basename, indexed, display, geometry, textureFiles);
         }
 
         // All three paths failed: emit a single diagnostic line listing
@@ -750,11 +757,12 @@ public final class JavaPackReader {
      * at least one slot resolved, otherwise {@code null}.
      *
      * <p>Vanilla {@code item/handheld} / {@code item/generated} defaults live
-     * inside the Mojang client jar and are not present in operator packs, so
-     * slots that no overridden ancestor declares remain {@code null}. The
-     * downstream {@code BedrockAttachableWriter} uses this signal to skip
-     * attachable generation entirely for items that inherit all their display
-     * transforms from vanilla.</p>
+     * inside the Mojang client jar and are not present in operator packs.
+     * When the parent walk hits an unresolved ref of those names,
+     * {@link VanillaBuiltinDisplays} supplies the official slot values so
+     * CMD items that only declare {@code "parent": "item/handheld"} still
+     * produce a correct held-item attachable (Geyser custom IDs cannot fall
+     * back to Bedrock's vanilla sword pose).</p>
      *
      * <p>Made public so {@code AutoBedrockPackBuilder} can call it directly if
      * it wants per-item display extraction without going through the full
@@ -794,6 +802,83 @@ public final class JavaPackReader {
                     "[JavaPack] elements extraction threw for " + modelRef, ex);
             }
             return null;
+        }
+    }
+
+    /**
+     * Resolves the model's <b>whole</b> {@code textures} map to on-disk PNGs,
+     * keyed by the variable name without its {@code #} (so {@code "#1"} in a
+     * face looks up {@code "1"}).
+     *
+     * <p>The single {@code textureFile} the rest of the pipeline uses is the
+     * model's icon layer; a model built from {@code elements} may additionally
+     * reference {@code #1} / {@code #2} on individual faces, and rendering
+     * those with the icon layer paints the wrong artwork. Unlike
+     * {@code elements}, Mojang <i>does</i> merge {@code textures} down the
+     * parent chain, with the child winning, so the walk keeps going after a
+     * hit and only fills in keys it has not already seen.</p>
+     *
+     * <p>Values may themselves be variable references ({@code "#layer0"}),
+     * so each is followed until it reaches a real path. Unresolvable entries
+     * are simply absent from the result — callers fall back to the primary
+     * texture. Never throws.</p>
+     */
+    private Map<String, Path> resolveTextureMapSafe(String modelRef) {
+        try {
+            Map<String, String> refs = new LinkedHashMap<>();
+            String current = modelRef;
+            int hops = 0;
+            while (current != null && hops < 8) {
+                Path modelFile = resolveModelFile(current);
+                if (modelFile == null) {
+                    break;
+                }
+                Map<String, Object> modelJson;
+                try {
+                    modelJson = readJsonObject(modelFile);
+                } catch (IOException ex) {
+                    break;
+                }
+                if (modelJson.get("textures") instanceof Map<?, ?> textures) {
+                    for (Map.Entry<?, ?> e : textures.entrySet()) {
+                        if (e.getKey() instanceof String k && e.getValue() instanceof String v) {
+                            refs.putIfAbsent(k, v);
+                        }
+                    }
+                }
+                if (!(modelJson.get("parent") instanceof String parentRef)
+                    || parentRef.isBlank()) {
+                    break;
+                }
+                current = parentRef;
+                hops++;
+            }
+
+            Map<String, Path> out = new LinkedHashMap<>();
+            for (Map.Entry<String, String> e : refs.entrySet()) {
+                String value = e.getValue();
+                // Follow "#other" indirection; the bound of 8 mirrors the
+                // parent-chain limit and stops a self-referential pack looping.
+                int chase = 0;
+                while (value != null && value.startsWith("#") && chase < 8) {
+                    value = refs.get(value.substring(1));
+                    chase++;
+                }
+                if (value == null || value.isBlank() || value.startsWith("#")) {
+                    continue;
+                }
+                Path resolved = resolveTextureFile(value);
+                if (resolved != null) {
+                    out.put(e.getKey(), resolved);
+                }
+            }
+            return out;
+        } catch (RuntimeException ex) {
+            if (debug) {
+                logger.log(Level.FINE,
+                    "[JavaPack] texture map extraction threw for " + modelRef, ex);
+            }
+            return Map.of();
         }
     }
 
@@ -881,6 +966,10 @@ public final class JavaPackReader {
         }
     }
 
+    private static float numberOrZero(Object raw) {
+        return raw instanceof Number n ? n.floatValue() : 0f;
+    }
+
     private static JavaModelGeometry.ElementRotation parseElementRotation(Object raw) {
         if (!(raw instanceof Map<?, ?> map)) {
             return null;
@@ -890,8 +979,23 @@ public final class JavaPackReader {
         String axis = (axisObj instanceof String s) ? s : "y";
         Object angleObj = map.get("angle");
         float angle = (angleObj instanceof Number n) ? n.floatValue() : 0f;
+        Object rescaleObj = map.get("rescale");
+        boolean rescale = rescaleObj instanceof Boolean b && b;
         try {
-            return new JavaModelGeometry.ElementRotation(origin, axis, angle);
+            // Blockbench's free-rotation form: {"x":..,"y":..,"z":..} instead
+            // of vanilla's single axis + angle. Detected by the absence of
+            // "axis", so a vanilla object that happens to carry stray x/y/z
+            // keys still takes the single-axis path.
+            if (axisObj == null) {
+                float ex = numberOrZero(map.get("x"));
+                float ey = numberOrZero(map.get("y"));
+                float ez = numberOrZero(map.get("z"));
+                if (ex != 0f || ey != 0f || ez != 0f) {
+                    return JavaModelGeometry.ElementRotation.ofEuler(
+                        origin, new float[]{ex, ey, ez}, rescale);
+                }
+            }
+            return new JavaModelGeometry.ElementRotation(origin, axis, angle, rescale);
         } catch (IllegalArgumentException ignored) {
             return null;
         }
@@ -986,13 +1090,30 @@ public final class JavaPackReader {
         JavaModelDisplay.Transform gui = null;
         JavaModelDisplay.Transform ground = null;
         JavaModelDisplay.Transform head = null;
+        JavaModelDisplay.Transform firstHandLeft = null;
+        JavaModelDisplay.Transform thirdHandLeft = null;
 
         String current = modelRef;
         int hops = 0;
         while (current != null && hops < 8) {
             Path modelFile = resolveModelFile(current);
             if (modelFile == null) {
-                break;
+                // Pack has no file for this parent — inject Mojang defaults
+                // for item/handheld and item/generated, then continue the
+                // chain (handheld → generated) so ground/head still fill in.
+                JavaModelDisplay builtin =
+                    VanillaBuiltinDisplays.forUnresolvedParent(current);
+                if (builtin == null) {
+                    break;
+                }
+                if (firstHand == null) firstHand = builtin.firstpersonRighthand();
+                if (thirdHand == null) thirdHand = builtin.thirdpersonRighthand();
+                if (gui == null) gui = builtin.gui();
+                if (ground == null) ground = builtin.ground();
+                if (head == null) head = builtin.head();
+                current = VanillaBuiltinDisplays.nextBuiltinParent(current);
+                hops++;
+                continue;
             }
             Map<String, Object> modelJson;
             try {
@@ -1009,6 +1130,8 @@ public final class JavaPackReader {
                 if (gui == null) gui = parseTransform(displayMap.get("gui"));
                 if (ground == null) ground = parseTransform(displayMap.get("ground"));
                 if (head == null) head = parseTransform(displayMap.get("head"));
+                if (firstHandLeft == null) firstHandLeft = parseTransform(displayMap.get("firstperson_lefthand"));
+                if (thirdHandLeft == null) thirdHandLeft = parseTransform(displayMap.get("thirdperson_lefthand"));
             }
             Object parent = modelJson.get("parent");
             if (!(parent instanceof String parentRef) || parentRef.isBlank()) {
@@ -1022,7 +1145,8 @@ public final class JavaPackReader {
             && ground == null && head == null) {
             return null;
         }
-        return new JavaModelDisplay(firstHand, thirdHand, gui, ground, head);
+        return new JavaModelDisplay(firstHand, thirdHand, gui, ground, head,
+            firstHandLeft, thirdHandLeft);
     }
 
     /**
@@ -1376,8 +1500,28 @@ public final class JavaPackReader {
         String textureRef,
         Path textureFile,
         JavaModelDisplay display,
-        JavaModelGeometry geometry
+        JavaModelGeometry geometry,
+        /**
+         * Every entry of the model's {@code textures} map resolved to a PNG,
+         * keyed without the leading {@code #}. Faces that reference something
+         * other than the icon layer ({@code #1}, {@code #2}) need this to be
+         * painted with the right artwork. Never null; empty when the model
+         * declares no resolvable textures.
+         */
+        Map<String, Path> textureFiles
     ) {
+        public JavaModelDefinition {
+            textureFiles = textureFiles != null ? Map.copyOf(textureFiles) : Map.of();
+        }
+
+        /** Back-compatible 7-arg form; carries no per-face texture map. */
+        public JavaModelDefinition(String baseItem, int customModelData,
+                                   String modelRef, String textureRef, Path textureFile,
+                                   JavaModelDisplay display, JavaModelGeometry geometry) {
+            this(baseItem, customModelData, modelRef, textureRef, textureFile,
+                display, geometry, Map.of());
+        }
+
         /**
          * Backward-compatible 5-arg constructor used by call sites that
          * pre-date the Phase 3 display field. Delegates with

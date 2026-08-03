@@ -21,21 +21,23 @@ import java.util.logging.Logger;
  * the identifiers match exactly, so this is the only "wiring" needed —
  * Geyser itself has no setter for attachables in its v2 API.</p>
  *
- * <p><b>Rendering scheme:</b> flat items (no Java {@code elements}) keep the
- * field-proven <a href="https://github.com/Kas-tle/java2bedrock.sh">java2bedrock</a>
- * four-bone chain {@code root → x → y → z} with {@code texture_meshes} on
- * {@code z}; the root binds to the player skeleton and receives a fixed
- * per-slot base pose while the Java display rotation is decomposed onto
- * {@code x}/{@code y}/{@code z}.</p>
+ * <p><b>Rendering scheme (same rule for every custom item):</b> both flat
+ * items and 3D models with Java {@code elements} use the field-proven
+ * <a href="https://github.com/Kas-tle/java2bedrock.sh">java2bedrock</a>
+ * bone chain {@code root → x → y → z} (+ {@code geo} leaf for cubes). The
+ * root binds to the player skeleton and receives a fixed per-slot base pose;
+ * Java {@code display} rotation / translation / scale are decomposed onto
+ * {@code x}/{@code y}/{@code z}. Flat items place a {@code texture_meshes}
+ * entry on {@code z}; 3D items place cubes on {@code geyserextra_geo} at
+ * Java model-space centre pivot {@code [0, 8, 0]}.</p>
  *
- * <p>3D models with elements use GeyserMC
- * <a href="https://github.com/GeyserMC/Rainbow">Rainbow</a>
- * ({@code GeometryMapper} + {@code AnimationMapper}) unless the operator sets
- * an explicit {@code firstPersonBasePose} (legacy escape hatch): a single
- * bone {@code geyserextra} binds to the skeleton, pivots at the model bounds
- * centre, holds the cubes, and receives both first- and third-person Rainbow
- * hold poses. No {@code x}/{@code y}/{@code z}/{@code geo} chain on that
- * path.</p>
+ * <p>The GeyserMC Rainbow single-bone AnimationMapper was carried for a while
+ * as an alternative first-person mapping behind a config switch, because the
+ * two references disagree about that frame and only an in-game comparison
+ * settles it. java2bedrock won; the Rainbow path and its switch are gone.
+ * Operators may still override the <em>global</em> first-person base constants
+ * via {@code customItems.attachableGeneration.firstPersonBasePose} (applies to
+ * every item the same way — never per-item).</p>
  *
  * <p><b>Geometry:</b> models with Java {@code elements} emit 3D cubes under
  * both {@code offsets_only} and {@code full} (auto-upgrade). Models without
@@ -59,21 +61,76 @@ public final class BedrockAttachableWriter {
     /** Carries the Z component of the Java display rotation. */
     private static final String BONE_Z = "geyserextra_z";
     /**
-     * Legacy leaf bone for the explicit-{@code firstPersonBasePose} escape hatch:
-     * cubes live here (child of {@code z}) with a bounds-centre pivot while
-     * hold animations still use the java2bedrock {@code x}/{@code y}/{@code z}
-     * decomposition.
+     * Cube leaf for 3D geometry: child of {@code z}, pivot at Java model-space
+     * centre {@code [0, 8, 0]}. Hold animations drive {@code x}/{@code y}/{@code z};
+     * this bone only carries cubes.
      */
     private static final String BONE_GEO = "geyserextra_geo";
 
     /**
      * Molang binding that attaches the root bone to whichever player bone
-     * currently holds the item (main hand, off hand, or head). Verbatim from
-     * java2bedrock — {@code q.item_slot_to_bone_name} does not handle the
-     * head slot, hence the explicit ternary.
+     * currently holds the item (main hand, off hand, or head).
+     *
+     * <p>java2bedrock's query, with the head slot special-cased because the
+     * query does not cover it.</p>
+     *
+     * <p>Naming the off-hand bone explicitly — {@code c.item_slot == 'off_hand'
+     * ? 'leftitem' : 'rightitem'} — was tried and <b>reverted</b>. The theory
+     * was that the query failed to yield {@code leftitem}, because off-hand
+     * items rendered on the right arm displaced by their declared X offset
+     * (greataxe 15.5 a body-width out, rapier 7.5 beside the hand, mace 0
+     * directly on it). The zero-offset case did rule out an X-sign cause, but
+     * it did not establish the binding as the cause. In game the explicit
+     * binding made things <em>worse</em>: third-person off hand had been
+     * correct and stopped being so, which is what a binding to a bone the
+     * player skeleton does not expose looks like. The query stays until
+     * something identifies the real off-hand fault.</p>
      */
     private static final String ROOT_BONE_BINDING =
         "c.item_slot == 'head' ? 'head' : q.item_slot_to_bone_name(c.item_slot)";
+
+    /**
+     * Euler order Bedrock composes the root bone's {@code [rx, ry, rz]} in,
+     * used to invert that rotation when mapping a Java display translation into
+     * the root's local frame.
+     *
+     * <p>The order is not derivable from this pack — the third-person root
+     * {@code [90, 0, 0]} has two zero angles, so every order gives the same
+     * matrix there, and by that same fact this constant can only ever affect
+     * first person ({@code BedrockGeometryConverterTest} asserts the
+     * invariant). It was settled on a real Bedrock client: {@code zxy} put the
+     * greataxe and dagger in frame where java2bedrock's per-axis sign flips
+     * ({@link BedrockGeometryConverter.TranslationFrame#J2B}) threw them out of
+     * it, in proportion to their declared translation. Reverting to {@code J2B}
+     * reintroduces that.</p>
+     */
+    private static final BedrockGeometryConverter.TranslationFrame TRANSLATION_FRAME =
+        BedrockGeometryConverter.TranslationFrame.ZXY;
+
+    /**
+     * Both hands negate the declared translation X.
+     *
+     * <p>Let {@code d} be the declared translation and {@code J} what Java
+     * actually renders, after {@code ItemTransform#apply} negates X for the
+     * left hand:</p>
+     * <pre>
+     *   main hand, d = righthand:  J = d
+     *   off  hand, d = lefthand:   J = (-d.x, d.y, d.z)
+     * </pre>
+     * <p>A model that omits {@code *_lefthand} gets the righthand transform
+     * substituted and still runs that negation, so {@code J} lands on the same
+     * value from either source. The main-hand mapping {@code J -> emitted} is
+     * confirmed correct in game and it negates X; Bedrock does not mirror the
+     * left arm's attachable frame for us — established when the first-person
+     * off-hand root had to be mirrored by hand to become visible at all — so
+     * the off hand needs the same mapping, i.e. negating X there too.</p>
+     *
+     * <p>Keeping {@code +d.x} for lefthand-sourced transforms (java2bedrock's
+     * separate lefthand branch) lands the item {@code 2*d.x} off. This was
+     * briefly suspected of being the cause of off-hand items rendering on the
+     * right arm; it was not — see {@link #ROOT_BONE_BINDING}.</p>
+     */
+    private static final boolean MIRROR_X = true;
 
     /**
      * Fixed base poses that map Bedrock's item-slot bone frame onto Java's
@@ -88,6 +145,13 @@ public final class BedrockAttachableWriter {
     private static final List<Float> HEAD_BASE_POSITION = List.of(0f, 19.9f, 0f);
     /** Java scales head-slot rendering to 62.5% of the model's declared size. */
     private static final float HEAD_SCALE = 0.625f;
+
+    /** java2bedrock's fixed geometry bounds; only ever grown, never shrunk. */
+    private static final float DEFAULT_VISIBLE_BOUNDS_WIDTH = 4f;
+    private static final float DEFAULT_VISIBLE_BOUNDS_HEIGHT = 4.5f;
+    private static final float DEFAULT_VISIBLE_BOUNDS_OFFSET_Y = 0.75f;
+    /** Slack on the computed box so swing animations cannot clip its edge. */
+    private static final float VISIBLE_BOUNDS_MARGIN = 1.5f;
 
     private BedrockAttachableWriter() {}
 
@@ -203,8 +267,9 @@ public final class BedrockAttachableWriter {
             return Map.of();
         }
         // Mode is offsets_only or full. Both still require at least one
-        // held-item transform — without it the attachable would just be a
-        // duplicate of the vanilla in-hand rendering and not worth the bytes.
+        // held-item transform (including VanillaBuiltinDisplays for
+        // item/handheld). Geyser custom IDs cannot fall back to Bedrock's
+        // vanilla sword pose when we skip here.
         if (display == null || !display.hasAnyHandTransform()) {
             return Map.of();
         }
@@ -226,9 +291,6 @@ public final class BedrockAttachableWriter {
             && geometry.hasElements()
             && (AttachableGenerationConfig.MODE_FULL.equals(mode)
                 || AttachableGenerationConfig.MODE_OFFSETS_ONLY.equals(mode));
-        boolean rainbowSingleBone = useFullGeometry
-            && !config.hasExplicitFirstPersonBasePose();
-
         // Zip entry paths use the (possibly shortened) file base; the JSON
         // bodies keep the full icon key for identifiers so they still match
         // the geyserextra:<iconKey> registration on the extension side.
@@ -238,10 +300,14 @@ public final class BedrockAttachableWriter {
         out.put(geometryEntryPath(fileBase),
                 JsonUtil.toPrettyJson(buildGeometryJson(
                     iconKey, useFullGeometry ? geometry : null, safeTw, safeTh,
-                    rainbowSingleBone, logger)));
+                    display, rootScaleForBounds(config, useFullGeometry), logger)));
+        // Texture-only CMD items (no Java elements: item/handheld + custom
+        // layer0) must keep vanilla sword hold framing. Operator
+        // firstPersonBasePose is tuned for Valhalla 3D meshes and must not
+        // apply to the flat texture_meshes path.
         out.put(animationEntryPath(fileBase),
                 JsonUtil.toPrettyJson(buildAnimationJson(
-                    iconKey, display, config, rainbowSingleBone)));
+                    iconKey, display, config, !useFullGeometry)));
         return out;
     }
 
@@ -428,18 +494,38 @@ public final class BedrockAttachableWriter {
         JavaModelGeometry fullGeometry,
         int textureWidth,
         int textureHeight,
-        boolean rainbowSingleBone,
+        JavaModelDisplay display,
+        float rootScaleForBounds,
         Logger logger
     ) {
+        // Cubes are converted up-front so the descriptor can size its
+        // visible bounds from the real mesh and pick a format_version that
+        // matches the features the cubes actually use.
+        //
+        // Per-face uv_rotation is always forwarded: it is the only way to get
+        // Blockbench side faces oriented as Java draws them, and the legacy
+        // fallback (mirror 180, drop 90/270) was only ever there so operators
+        // could keep pre-1.21.0 Bedrock clients. That trade is settled — the
+        // pack pins min_engine_version 1.21.0.
+        List<Map<String, Object>> cubes = (fullGeometry != null && fullGeometry.hasElements())
+            ? BedrockGeometryConverter.convertElementsToCubes(
+                fullGeometry, textureWidth, textureHeight, logger, true)
+            : null;
+
         Map<String, Object> descriptor = new LinkedHashMap<>();
         descriptor.put("identifier", "geometry." + NAMESPACE + "." + iconKey);
         descriptor.put("texture_width", textureWidth);
         descriptor.put("texture_height", textureHeight);
-        // Generous bounds (java2bedrock values) so oversized weapons are not
-        // frustum-culled while swinging at the edge of the screen.
-        descriptor.put("visible_bounds_width", 4);
-        descriptor.put("visible_bounds_height", 4.5);
-        descriptor.put("visible_bounds_offset", List.of(0, 0.75, 0));
+        // Bounds start at the java2bedrock defaults and are only ever GROWN to
+        // enclose the real mesh at its largest rendered scale. Bedrock culls an
+        // attachable whose visible bounds leave the frustum, and the fixed
+        // 4 x 4.5 box is a Blockbench default that upstream Rainbow also flags
+        // as wrong (GeometryMapper carries a "TODO that's wrong" on the same
+        // constants). Every model shipped in the TrinityForge pack does fit the
+        // default box, so this is hardening for larger meshes rather than a fix
+        // for a currently-observed symptom — growing only means no model can
+        // render worse than it did before.
+        applyVisibleBounds(descriptor, cubes, display, rootScaleForBounds);
 
         // Bone chain root → x → y → z (all pivot [0,8,0]): the root binds to
         // the player skeleton, the x/y/z bones each carry one axis of the
@@ -467,38 +553,45 @@ public final class BedrockAttachableWriter {
         boneZ.put("pivot", List.of(0, 8, 0));
 
         List<Map<String, Object>> bones;
-        if (fullGeometry != null && fullGeometry.hasElements()) {
-            List<Map<String, Object>> cubes = BedrockGeometryConverter.convertElementsToCubes(
-                fullGeometry, textureWidth, textureHeight, logger);
-            float[] pivot = BedrockGeometryConverter.computeBoundsCentrePivot(cubes);
-
-            if (rainbowSingleBone) {
-                // Rainbow GeometryMapper: one bound bone at bounds-centre pivot.
-                root.put("pivot", List.of(pivot[0], pivot[1], pivot[2]));
-                root.put("cubes", cubes);
-                bones = List.of(root);
-            } else {
-                // Explicit firstPersonBasePose escape hatch: java2bedrock chain +
-                // geo leaf at bounds centre (cubes only; hold anim uses x/y/z).
-                Map<String, Object> boneGeo = new LinkedHashMap<>();
-                boneGeo.put("name", BONE_GEO);
-                boneGeo.put("parent", BONE_Z);
-                boneGeo.put("pivot", List.of(pivot[0], pivot[1], pivot[2]));
-                boneGeo.put("cubes", cubes);
-                bones = List.of(root, boneX, boneY, boneZ, boneGeo);
-            }
+        if (cubes != null) {
+            // 3D path: java2bedrock chain + geo leaf at Java model-space centre
+            // [0,8,0]. Bounds-centre put Valhalla flat meshes behind the FP
+            // camera under large base rotations.
+            Map<String, Object> boneGeo = new LinkedHashMap<>();
+            boneGeo.put("name", BONE_GEO);
+            boneGeo.put("parent", BONE_Z);
+            boneGeo.put("pivot", List.of(0, 8, 0));
+            boneGeo.put("cubes", cubes);
+            bones = List.of(root, boneX, boneY, boneZ, boneGeo);
         } else {
             // No Java elements → the model is item/generated style. Bedrock's
             // texture_meshes extrudes the PNG into a voxel mesh exactly like
             // Java's own item renderer, which both looks correct from every
             // angle and keeps the base-pose constants valid (they were tuned
             // against this mesh orientation in java2bedrock).
+            //
+            // Bedrock builds that mesh at one unit per texture pixel, so its
+            // size tracks the PNG's resolution rather than the item's. Java has
+            // no such coupling: item/generated always occupies one block face
+            // whether the sprite is 16px or 256px. A 64x64 sprite therefore
+            // came out four times too large, with its centre four times too far
+            // out — which is what made the 64px koujien tower over every 16px
+            // item. Centre the pivot on the real texture and scale the bone
+            // back to the 16px reference so any resolution lands at Java's
+            // size. The mesh's one-pixel thickness scales with it, matching
+            // Java's 1/16-block sheet more closely than a fixed unit would.
+            float meshSize = textureWidth > 0 ? textureWidth : 16f;
+            float meshScale = 16f / meshSize;
             Map<String, Object> textureMesh = new LinkedHashMap<>();
             textureMesh.put("texture", "default");
             textureMesh.put("position", List.of(0, 8, 0));
             textureMesh.put("rotation", List.of(90, 0, -180));
-            textureMesh.put("local_pivot", List.of(8, 0.5, 8));
+            textureMesh.put("local_pivot",
+                List.of(meshSize / 2f, 0.5f, meshSize / 2f));
             boneZ.put("texture_meshes", List.of(textureMesh));
+            if (meshScale != 1f) {
+                boneZ.put("scale", List.of(meshScale, meshScale, meshScale));
+            }
             bones = List.of(root, boneX, boneY, boneZ);
         }
 
@@ -506,40 +599,171 @@ public final class BedrockAttachableWriter {
         geometry.put("description", descriptor);
         geometry.put("bones", bones);
 
+        // Per-face uv_rotation only exists from geometry format 1.21.0
+        // (Microsoft "minecraft:geometry.v1.21.0" reference). Models that
+        // don't emit it stay on 1.16.0 so nothing that renders today starts
+        // depending on a newer format than it needs.
+        String formatVersion = BedrockGeometryConverter.requiresUvRotationFormat(cubes)
+            ? "1.21.0"
+            : "1.16.0";
+
         return linkedMap(
-            "format_version", "1.16.0",
+            "format_version", formatVersion,
             "minecraft:geometry", List.of(geometry));
+    }
+
+    /**
+     * Writes {@code visible_bounds_width} / {@code visible_bounds_height} /
+     * {@code visible_bounds_offset} onto the geometry descriptor, growing the
+     * java2bedrock defaults when the converted mesh needs more room.
+     *
+     * <p>Bedrock expresses these in blocks; cube coordinates are in model
+     * units (16 per block). The largest scale the mesh is ever drawn at is the
+     * biggest Java {@code display} scale across the hand slots multiplied by
+     * the first-person root scale, so that product is what the box has to
+     * contain.</p>
+     */
+    private static void applyVisibleBounds(
+        Map<String, Object> descriptor,
+        List<Map<String, Object>> cubes,
+        JavaModelDisplay display,
+        float rootScaleForBounds
+    ) {
+        float width = DEFAULT_VISIBLE_BOUNDS_WIDTH;
+        float height = DEFAULT_VISIBLE_BOUNDS_HEIGHT;
+        float offsetY = DEFAULT_VISIBLE_BOUNDS_OFFSET_Y;
+
+        float[] bounds = BedrockGeometryConverter.computeBounds(cubes);
+        if (bounds != null) {
+            float scale = maxHandDisplayScale(display) * rootScaleForBounds;
+            // Half-width has to cover the mesh on both sides of the bone, so
+            // take the largest absolute extent rather than the span: the box
+            // is centred on X/Z and the mesh is not.
+            float halfExtent = Math.max(
+                Math.max(Math.abs(bounds[0]), Math.abs(bounds[3])),
+                Math.max(Math.abs(bounds[2]), Math.abs(bounds[5])));
+            // The box has to enclose the mesh where the ANIMATION puts it, not
+            // where the geometry declares it. Bedrock culls on this AABB in the
+            // attached bone's space, and the hold animations translate the mesh
+            // by the base pose (up to 15 units) plus the item's own display
+            // translation (up to 26 on this pack) before it is drawn. Ignoring
+            // those made the box a claim about a position the mesh never
+            // occupies. Over-sizing only costs a little redundant draw work;
+            // under-sizing makes the item vanish until an animation happens to
+            // sweep it back inside, so this errs high deliberately.
+            float animReach = maxAnimationOffset(display) * scale / 16f;
+            float meshWidth = 2f * (halfExtent * scale / 16f + animReach);
+            float meshHeight = (bounds[4] - bounds[1]) * scale / 16f + 2f * animReach;
+            float meshCentreY = (bounds[1] + bounds[4]) / 2f * scale / 16f;
+
+            width = Math.max(width, meshWidth * VISIBLE_BOUNDS_MARGIN);
+            height = Math.max(height, meshHeight * VISIBLE_BOUNDS_MARGIN);
+            // Keep the box tall enough to reach the default offset as well as
+            // the mesh centre, so raising the centre never clips the bottom.
+            offsetY = Math.max(offsetY, meshCentreY);
+        }
+
+        descriptor.put("visible_bounds_width", roundHundredths(width));
+        descriptor.put("visible_bounds_height", roundHundredths(height));
+        descriptor.put("visible_bounds_offset",
+            List.of(0f, roundHundredths(offsetY), 0f));
+    }
+
+    /**
+     * Largest uniform {@code display.*.scale} across the first- and
+     * third-person hand slots, floored at 1 so a shrinking model never
+     * shrinks the bounds below the mesh's own size.
+     */
+    /**
+     * Largest single-axis translation any hold animation will apply, in Java
+     * model units: the base pose plus the biggest display translation across
+     * the hand slots. Used only to inflate the visible bounds.
+     */
+    private static float maxAnimationOffset(JavaModelDisplay display) {
+        // Only the item's OWN display translation counts here. The fixed base
+        // poses move the root bone identically for every item, so folding them
+        // in would inflate all 87 boxes by a constant instead of singling out
+        // the items that actually travel — and the java2bedrock defaults were
+        // evidently sized with those base poses already in mind.
+        float max = 0f;
+        if (display != null) {
+            for (boolean firstPerson : new boolean[]{true, false}) {
+                for (boolean offHand : new boolean[]{true, false}) {
+                    JavaModelDisplay.Transform t =
+                        display.handTransformFor(firstPerson, offHand);
+                    if (t != null) {
+                        max = Math.max(max, maxAbsAxis(t.translation()));
+                    }
+                }
+            }
+        }
+        return max;
+    }
+
+    private static float maxAbsAxis(float[] xyz) {
+        return Math.max(Math.abs(xyz[0]),
+            Math.max(Math.abs(xyz[1]), Math.abs(xyz[2])));
+    }
+
+    private static float maxHandDisplayScale(JavaModelDisplay display) {
+        float max = 1f;
+        if (display != null) {
+            for (boolean firstPerson : new boolean[]{true, false}) {
+                JavaModelDisplay.Transform t = display.handTransformFor(firstPerson);
+                if (t != null) {
+                    max = Math.max(max, maxAxis(t.scale()));
+                }
+            }
+        }
+        return max;
     }
 
     private static Map<String, Object> buildAnimationJson(
         String iconKey,
         JavaModelDisplay display,
         AttachableGenerationConfig config,
-        boolean rainbowSingleBone
+        boolean textureOnlyVanillaHold
     ) {
         String animPrefix = "animation." + NAMESPACE + "." + iconKey + ".";
-        JavaModelDisplay.Transform hand3rd = orIdentity(display.handTransformFor(false));
-        JavaModelDisplay.Transform hand1st = orIdentity(display.handTransformFor(true));
+        JavaModelDisplay.Transform hand3rd = orIdentity(display.handTransformFor(false, false));
+        JavaModelDisplay.Transform hand1st = orIdentity(display.handTransformFor(true, false));
+        // Off hand reads the model's own *_lefthand slots when present.
+        JavaModelDisplay.Transform hand3rdOff = orIdentity(display.handTransformFor(false, true));
+        JavaModelDisplay.Transform hand1stOff = orIdentity(display.handTransformFor(true, true));
+        // Java applies its left-hand rule (negate translation X, negate
+        // rotation Y and Z) to whatever transform the left hand resolves to —
+        // the declared *_lefthand slot when present, otherwise the right-hand
+        // one that ItemTransforms.Deserializer substitutes. It is never
+        // skipped, so the off-hand flag below does not depend on which slot
+        // supplied the values. See
+        // BedrockGeometryConverter#applyJavaLeftHandRotation.
 
-        AttachableGenerationConfig.BasePose firstPersonPose = config.firstPersonBasePose();
+        // Flat / texture_meshes (vanilla sword + texture swap): MUST NOT reuse
+        // the operator Valhalla 3D firstPersonBasePose — cubes and
+        // texture_meshes sit in different local frames. Use flat FP root
+        // (slightly below / closer than stock j2b) and keep handheld
+        // translation. 3D meshes keep the operator pose.
+        AttachableGenerationConfig.BasePose firstPersonPose = textureOnlyVanillaHold
+            ? withHeightOffset(FLAT_FIRST_PERSON_POSE, config.firstPersonHeightOffset())
+            : config.hasExplicitFirstPersonBasePose()
+                ? config.firstPersonBasePose()
+                : withHeightOffset(config.firstPersonBasePose(),
+                    config.firstPersonHeightOffset());
 
         Map<String, Object> animations = new LinkedHashMap<>();
         if (!config.forceFirstPersonOnly()) {
             animations.put(animPrefix + "thirdperson_main_hand",
-                buildHoldAnimation(hand3rd, false, false, firstPersonPose, rainbowSingleBone));
-            // Java models rarely declare left-hand slots; vanilla mirrors the
-            // right-hand transform, and the off-hand sign matrix in
-            // convertTranslation performs exactly that mirror.
+                buildHoldAnimation(hand3rd, false, false, firstPersonPose));
             animations.put(animPrefix + "thirdperson_off_hand",
-                buildHoldAnimation(hand3rd, false, true, firstPersonPose, rainbowSingleBone));
+                buildHoldAnimation(hand3rdOff, false, true, firstPersonPose));
         }
         animations.put(animPrefix + "firstperson_main_hand",
-            buildHoldAnimation(hand1st, true, false, firstPersonPose, rainbowSingleBone));
+            buildHoldAnimation(hand1st, true, false, firstPersonPose));
         animations.put(animPrefix + "firstperson_off_hand",
-            buildHoldAnimation(hand1st, true, true, firstPersonPose, rainbowSingleBone));
+            buildHoldAnimation(hand1stOff, true, true, firstPersonPose));
         if (display.head() != null) {
             animations.put(animPrefix + "head",
-                buildHeadAnimation(display.head(), rainbowSingleBone));
+                buildHeadAnimation(display.head()));
             animations.put(animPrefix + "disable", buildDisableAnimation());
         }
         return linkedMap(
@@ -552,59 +776,97 @@ public final class BedrockAttachableWriter {
     }
 
     /**
+     * FP root for texture-only / {@code texture_meshes} items.
+     * Based on Kas-tle java2bedrock ({@code [4,10,4]/1.5}) with a nudge:
+     * −X toward the camera; Y a bit below mid-screen; scale above stock j2b.
+     */
+    private static final AttachableGenerationConfig.BasePose FLAT_FIRST_PERSON_POSE =
+        new AttachableGenerationConfig.BasePose(
+            new float[]{90f, 60f, -40f},
+            new float[]{0f, 15f, 4f},
+            1.75f);
+
+    /**
+     * Returns {@code pose} with the operator's first-person height correction
+     * added to Y. Applied to the built-in flat and 3D defaults only: an
+     * explicit {@code firstPersonBasePose} is an absolute override and is
+     * returned untouched, so tuning the offset can never fight a hand-authored
+     * pose. See {@link AttachableGenerationConfig#firstPersonHeightOffset()}.
+     */
+    private static AttachableGenerationConfig.BasePose withHeightOffset(
+            AttachableGenerationConfig.BasePose pose, float offset) {
+        if (offset == 0f) {
+            return pose;
+        }
+        float[] p = pose.position();
+        return new AttachableGenerationConfig.BasePose(
+            pose.rotation(),
+            new float[]{p[0], p[1] + offset, p[2]},
+            pose.scale());
+    }
+
+    /**
      * Builds one held-item animation: the root bone gets the fixed per-slot
      * base pose, the x bone gets X rotation + translation + scale, and the
      * y/z bones get their single rotation axis (java2bedrock decomposition).
      *
-     * <p><b>3D Rainbow path</b> ({@code rainbowSingleBone}): GeyserMC
-     * {@code AnimationMapper} axis-permutation on {@link #BONE_ROOT} (the
-     * same bone that binds to the skeleton and holds the cubes). Translations
-     * are already in Bedrock pixel units in this codebase.</p>
-     * <pre>
-     *   First person:
-     *     rotation = (-90 + javaRot.y, -javaRot.z, javaRot.x)
-     *     position = (-javaTrans.y, 12.5 + javaTrans.z, javaTrans.x)
-     *   Third person:
-     *     rotation = (90, -javaRot.z, -javaRot.y)
-     *     position = (-javaTrans.x, 12.5 + javaTrans.z, -javaTrans.y)
-     *   scale = javaScale (per axis, unchanged) for both slots
-     * </pre>
-     * <p>Bedrock cannot address left/right hands separately in first person
-     * (Rainbow limitation), so off-hand animations reuse the right-hand
-     * values verbatim on this path (third-person off-hand included).</p>
+     * @param offHand {@code true} for the left/off hand, which applies
+     *                vanilla {@code ItemTransform#apply}'s left-hand rule
+     *                first: rotation Y and Z negate. Applies regardless of
+     *                whether the values came from a {@code *_lefthand} slot or
+     *                the right-hand fallback.
      */
     private static Map<String, Object> buildHoldAnimation(
         JavaModelDisplay.Transform transform,
         boolean firstPerson,
         boolean offHand,
-        AttachableGenerationConfig.BasePose firstPersonPose,
-        boolean rainbowSingleBone
+        AttachableGenerationConfig.BasePose firstPersonPose
     ) {
-        if (rainbowSingleBone) {
-            float[] jr = transform.rotation();
-            float[] jt = transform.translation();
-            float[] js = transform.scale();
+        float[] javaRotation = offHand
+            ? BedrockGeometryConverter.applyJavaLeftHandRotation(transform.rotation())
+            : transform.rotation();
 
-            Map<String, Object> rootBone = new LinkedHashMap<>();
-            if (firstPerson) {
-                rootBone.put("rotation", List.of(-90f + jr[1], -jr[2], jr[0]));
-                rootBone.put("position", List.of(-jt[1], 12.5f + jt[2], jt[0]));
-            } else {
-                rootBone.put("rotation", List.of(90f, -jr[2], -jr[1]));
-                rootBone.put("position", List.of(-jt[0], 12.5f + jt[2], -jt[1]));
-            }
-            rootBone.put("scale", List.of(js[0], js[1], js[2]));
-
-            Map<String, Object> animation = new LinkedHashMap<>();
-            animation.put("loop", true);
-            animation.put("bones", Map.of(BONE_ROOT, rootBone));
-            return animation;
-        }
-
-        float[] rotation = BedrockGeometryConverter.convertRotation(transform.rotation());
-        float[] position = BedrockGeometryConverter.convertTranslation(
-            transform.translation(), firstPerson, offHand);
+        float[] rotation = BedrockGeometryConverter.convertRotation(javaRotation);
+        // The root rotation has to be known before the translation is mapped:
+        // the offset is expressed in the root's local frame, and the off hand's
+        // root is mirrored (see below).
+        float handSign = offHand ? -1f : 1f;
+        float[] emittedRootRotation = firstPerson
+            ? new float[]{firstPersonPose.rotation()[0],
+                handSign * firstPersonPose.rotation()[1],
+                handSign * firstPersonPose.rotation()[2]}
+            : new float[]{THIRD_PERSON_BASE_ROTATION.get(0),
+                THIRD_PERSON_BASE_ROTATION.get(1),
+                THIRD_PERSON_BASE_ROTATION.get(2)};
+        float[] position = BedrockGeometryConverter.convertTranslationInRootFrame(
+            transform.translation(), emittedRootRotation, MIRROR_X, TRANSLATION_FRAME);
         float[] scale = BedrockGeometryConverter.convertScale(transform.scale());
+
+        // Bedrock composes a child bone inside its parent's scale, so the
+        // first-person root scale multiplies this translation as well as the
+        // mesh. Java does not: ItemTransform#apply translates in the hand
+        // frame and only then scales the model, so the offset is independent
+        // of any size correction. GeyserMC's Rainbow mapper corroborates that
+        // the frames are 1:1 in model units — it applies the Java display scale
+        // directly with no root scale at all — which makes java2bedrock's
+        // root scale a size correction for the mesh, not a change of units.
+        // Dividing here cancels it back out for the offset only, so a weapon
+        // with a large display translation (greataxe [0,4,-9], long spear
+        // [-5.25,-7.25,-1]) lands where Java puts it instead of 1.5x further
+        // out, which is what pushed those items out of the first-person view
+        // and led to the translation being zeroed for every item.
+        if (firstPerson) {
+            float rootScale = firstPersonPose.scale();
+            if (rootScale > 0f && rootScale != 1f) {
+                // Rounded so the emitted JSON — and therefore the pack's
+                // content hash — stays byte-stable across rebuilds.
+                position = new float[]{
+                    roundHundredths(position[0] / rootScale),
+                    roundHundredths(position[1] / rootScale),
+                    roundHundredths(position[2] / rootScale)
+                };
+            }
+        }
 
         Map<String, Object> boneX = new LinkedHashMap<>();
         if (firstPerson && rotation[0] == 0f && rotation[1] == 0f && rotation[2] == 0f) {
@@ -624,10 +886,31 @@ public final class BedrockAttachableWriter {
         bones.put(BONE_Z, Map.of("rotation", List.of(0f, 0f, rotation[2])));
         Map<String, Object> root = new LinkedHashMap<>();
         if (firstPerson) {
+            // One base pose for every item, exactly as java2bedrock emits it.
+            // The item-specific part of the first-person pose lives in the
+            // Java display transform on the x/y/z bones — the previous
+            // display-scale-dependent root nudges made the root item-specific
+            // too, which double-counted the same information and could never
+            // satisfy small and oversized weapons at the same time.
             float[] baseRot = firstPersonPose.rotation();
             float[] basePos = firstPersonPose.position();
-            root.put("rotation", List.of(baseRot[0], baseRot[1], baseRot[2]));
-            root.put("position", List.of(basePos[0], basePos[1], basePos[2]));
+            // The base pose maps Bedrock's first-person arm frame onto Java's
+            // camera-space item frame. That mapping is handed, so the off hand
+            // needs its mirror image — the same (x, -y, -z) rotation and -x
+            // position rule Java applies to the transform itself.
+            //
+            // The third-person root gets away without this because its pose
+            // ([90, 0, 0] / [0, 13, -3]) is already mirror-invariant: rotation
+            // Y and Z and position X are all zero. The first-person pose
+            // ([90, 60, -40] / [4, 10, 4]) is not, so feeding the right-arm
+            // mapping to the left arm swings the item out of the viewport,
+            // which is why third-person off hand rendered correctly while
+            // first-person off hand showed nothing at all — for flat and 3D
+            // items alike, since both use a non-symmetric first-person pose.
+            root.put("rotation", List.of(
+                emittedRootRotation[0], emittedRootRotation[1], emittedRootRotation[2]));
+            root.put("position", List.of(
+                handSign * basePos[0], basePos[1], basePos[2]));
             root.put("scale", firstPersonPose.scale());
         } else {
             root.put("rotation", THIRD_PERSON_BASE_ROTATION);
@@ -641,40 +924,50 @@ public final class BedrockAttachableWriter {
         return animation;
     }
 
+    /**
+     * First-person root scale used when sizing the geometry's visible bounds.
+     * 3D meshes ride the (optionally operator-overridden) base pose; flat
+     * texture-mesh items use their own fixed pose. Floored at 1 so the bounds
+     * are never computed smaller than the mesh itself.
+     */
+    private static float rootScaleForBounds(
+        AttachableGenerationConfig config, boolean useFullGeometry
+    ) {
+        float scale = useFullGeometry
+            ? config.firstPersonBasePose().scale()
+            : FLAT_FIRST_PERSON_POSE.scale();
+        return Math.max(1f, scale);
+    }
+
+    private static float maxAxis(float[] xyz) {
+        return Math.max(xyz[0], Math.max(xyz[1], xyz[2]));
+    }
+
+    private static float roundHundredths(float value) {
+        return Math.round(value * 100f) / 100f;
+    }
+
     /** Third-person head-slot pose: Java renders head items at 62.5% scale. */
     private static Map<String, Object> buildHeadAnimation(
-        JavaModelDisplay.Transform transform,
-        boolean rainbowSingleBone
+        JavaModelDisplay.Transform transform
     ) {
         float[] rotation = BedrockGeometryConverter.convertRotation(transform.rotation());
         float[] translation = transform.translation();
         float[] scale = BedrockGeometryConverter.convertScale(transform.scale());
 
         Map<String, Object> bones = new LinkedHashMap<>();
-        if (rainbowSingleBone) {
-            Map<String, Object> root = new LinkedHashMap<>();
-            root.put("rotation", List.of(rotation[0], rotation[1], rotation[2]));
-            root.put("position", List.of(
-                HEAD_BASE_POSITION.get(0) - translation[0] * HEAD_SCALE,
-                HEAD_BASE_POSITION.get(1) + translation[1] * HEAD_SCALE,
-                HEAD_BASE_POSITION.get(2) + translation[2] * HEAD_SCALE));
-            root.put("scale", List.of(
-                scale[0] * HEAD_SCALE, scale[1] * HEAD_SCALE, scale[2] * HEAD_SCALE));
-            bones.put(BONE_ROOT, root);
-        } else {
-            Map<String, Object> boneX = new LinkedHashMap<>();
-            boneX.put("rotation", List.of(rotation[0], 0f, 0f));
-            boneX.put("position", List.of(
-                -translation[0] * HEAD_SCALE,
-                translation[1] * HEAD_SCALE,
-                translation[2] * HEAD_SCALE));
-            boneX.put("scale", List.of(
-                scale[0] * HEAD_SCALE, scale[1] * HEAD_SCALE, scale[2] * HEAD_SCALE));
-            bones.put(BONE_X, boneX);
-            bones.put(BONE_Y, Map.of("rotation", List.of(0f, rotation[1], 0f)));
-            bones.put(BONE_Z, Map.of("rotation", List.of(0f, 0f, rotation[2])));
-            bones.put(BONE_ROOT, Map.of("position", HEAD_BASE_POSITION));
-        }
+        Map<String, Object> boneX = new LinkedHashMap<>();
+        boneX.put("rotation", List.of(rotation[0], 0f, 0f));
+        boneX.put("position", List.of(
+            -translation[0] * HEAD_SCALE,
+            translation[1] * HEAD_SCALE,
+            translation[2] * HEAD_SCALE));
+        boneX.put("scale", List.of(
+            scale[0] * HEAD_SCALE, scale[1] * HEAD_SCALE, scale[2] * HEAD_SCALE));
+        bones.put(BONE_X, boneX);
+        bones.put(BONE_Y, Map.of("rotation", List.of(0f, rotation[1], 0f)));
+        bones.put(BONE_Z, Map.of("rotation", List.of(0f, 0f, rotation[2])));
+        bones.put(BONE_ROOT, Map.of("position", HEAD_BASE_POSITION));
 
         Map<String, Object> animation = new LinkedHashMap<>();
         animation.put("loop", true);

@@ -114,11 +114,11 @@ class BedrockGeometryConverterTest {
     }
 
     @Nested
-    @DisplayName("rotation 180 (point-symmetric via negative uv_size)")
-    class RotationOneEighty {
+    @DisplayName("face rotation forwarded as Bedrock uv_rotation (geometry 1.21.0)")
+    class FaceRotation {
 
         @Test
-        @DisplayName("16x16 full-face UV with rotation=180 -> uv=[16,16], uv_size=[-16,-16]")
+        @DisplayName("rotation=180 keeps the plain UV rect and sets uv_rotation")
         void fullFace180() {
             JavaModelGeometry.Element element = singleFaceCube(
                 "north", new float[]{0f, 0f, 16f, 16f}, 180);
@@ -127,50 +127,50 @@ class BedrockGeometryConverterTest {
                     new JavaModelGeometry(List.of(element)), 16, 16, null);
 
             Map<?, ?> faceUv = (Map<?, ?>) ((Map<?, ?>) cubes.get(0).get("uv")).get("north");
-            // 180 deg rotation maps face TL to texture BR (u2,v2) and the
-            // mapping walks "backwards" with -(u2-u1), -(v2-v1).
-            assertUv(faceUv, 16f, 16f, -16f, -16f);
+            assertUv(faceUv, 0f, 0f, 16f, 16f);
+            assertThat(faceUv.get("uv_rotation")).isEqualTo(180);
         }
 
         @Test
-        @DisplayName("partial UV [4,8,12,16] with rotation=180 -> uv=[12,16], uv_size=[-8,-8]")
-        void partialRegion180() {
+        @DisplayName("rotation=90 is no longer dropped")
+        void ninetyIsPreserved() {
             JavaModelGeometry.Element element = singleFaceCube(
-                "north", new float[]{4f, 8f, 12f, 16f}, 180);
+                "east", new float[]{4f, 8f, 12f, 16f}, 90);
             List<Map<String, Object>> cubes =
                 BedrockGeometryConverter.convertElementsToCubes(
                     new JavaModelGeometry(List.of(element)), 16, 16, null);
 
-            Map<?, ?> faceUv = (Map<?, ?>) ((Map<?, ?>) cubes.get(0).get("uv")).get("north");
+            Map<?, ?> faceUv = (Map<?, ?>) ((Map<?, ?>) cubes.get(0).get("uv")).get("east");
+            assertUv(faceUv, 4f, 8f, 8f, 8f);
+            assertThat(faceUv.get("uv_rotation")).isEqualTo(90);
+        }
+
+        @Test
+        @DisplayName("rotation=270 on a vertical face keeps the up/down point mirror")
+        void twoSeventyOnVerticalFace() {
+            JavaModelGeometry.Element element = singleFaceCube(
+                "up", new float[]{4f, 8f, 12f, 16f}, 270);
+            List<Map<String, Object>> cubes =
+                BedrockGeometryConverter.convertElementsToCubes(
+                    new JavaModelGeometry(List.of(element)), 16, 16, null);
+
+            Map<?, ?> faceUv = (Map<?, ?>) ((Map<?, ?>) cubes.get(0).get("uv")).get("up");
             assertUv(faceUv, 12f, 16f, -8f, -8f);
+            assertThat(faceUv.get("uv_rotation")).isEqualTo(270);
         }
 
         @Test
-        @DisplayName("pre-flipped UV [16,0,0,16] + rotation=180 composes correctly")
-        void preFlippedPlus180() {
+        @DisplayName("rotation=0 omits uv_rotation entirely")
+        void zeroOmitsField() {
             JavaModelGeometry.Element element = singleFaceCube(
-                "north", new float[]{16f, 0f, 0f, 16f}, 180);
-            List<Map<String, Object>> cubes =
-                BedrockGeometryConverter.convertElementsToCubes(
-                    new JavaModelGeometry(List.of(element)), 16, 16, null);
-
-            Map<?, ?> faceUv = (Map<?, ?>) ((Map<?, ?>) cubes.get(0).get("uv")).get("north");
-            // u1=16, v1=0, u2=0, v2=16 -> uv=(u2,v2)=(0,16),
-            // uv_size = (-(u2-u1), -(v2-v1)) = (-(0-16), -(16-0)) = (16, -16)
-            assertUv(faceUv, 0f, 16f, 16f, -16f);
-        }
-
-        @Test
-        @DisplayName("32x32 high-res texture with rotation=180 scales correctly")
-        void highRes180() {
-            JavaModelGeometry.Element element = singleFaceCube(
-                "north", new float[]{0f, 0f, 16f, 16f}, 180);
+                "north", new float[]{0f, 0f, 16f, 16f}, 0);
             List<Map<String, Object>> cubes =
                 BedrockGeometryConverter.convertElementsToCubes(
                     new JavaModelGeometry(List.of(element)), 32, 32, null);
 
             Map<?, ?> faceUv = (Map<?, ?>) ((Map<?, ?>) cubes.get(0).get("uv")).get("north");
-            assertUv(faceUv, 32f, 32f, -32f, -32f);
+            assertUv(faceUv, 0f, 0f, 32f, 32f);
+            assertThat(faceUv.containsKey("uv_rotation")).isFalse();
         }
     }
 
@@ -419,6 +419,38 @@ class BedrockGeometryConverterTest {
         }
     }
 
+    @Nested
+    @DisplayName("convertTranslation (mirrorX selects righthand vs lefthand source)")
+    class TranslationSigns {
+
+        @Test
+        @DisplayName("third person: righthand source negates X, lefthand source keeps it")
+        void thirdPersonMirrorXSelectsSign() {
+            float[] righthand = new float[]{-15.5f, 13f, 1.5f};
+            float[] lefthand = new float[]{15.5f, 13f, 1.5f};
+            float[] main = BedrockGeometryConverter.convertTranslation(righthand, false, true);
+            float[] off = BedrockGeometryConverter.convertTranslation(lefthand, false, false);
+            assertThat(main[0]).isCloseTo(15.5f, EPS);
+            // A real *_lefthand value passes through unchanged, so the two
+            // hands end up mirrored instead of stacked on the same side.
+            assertThat(off[0]).isCloseTo(15.5f, EPS);
+            assertThat(main[1]).isCloseTo(13f, EPS);
+            assertThat(main[2]).isCloseTo(1.5f, EPS);
+        }
+
+        @Test
+        @DisplayName("first person negates Z on top of the X rule")
+        void firstPersonAlsoNegatesZ() {
+            float[] java = new float[]{1.13f, 3.2f, 1.13f};
+            float[] mirrored = BedrockGeometryConverter.convertTranslation(java, true, true);
+            float[] asIs = BedrockGeometryConverter.convertTranslation(java, true, false);
+            assertThat(mirrored[0]).isCloseTo(-1.13f, EPS);
+            assertThat(asIs[0]).isCloseTo(1.13f, EPS);
+            assertThat(mirrored[2]).isCloseTo(-1.13f, EPS);
+            assertThat(asIs[2]).isCloseTo(-1.13f, EPS);
+        }
+    }
+
     // ---------------------------------------------------------------------
     // Helpers
     // ---------------------------------------------------------------------
@@ -440,5 +472,118 @@ class BedrockGeometryConverterTest {
         assertThat(uvList.get(1).floatValue()).isCloseTo(v, EPS);
         assertThat(uvSizeList.get(0).floatValue()).isCloseTo(uSize, EPS);
         assertThat(uvSizeList.get(1).floatValue()).isCloseTo(vSize, EPS);
+    }
+
+    @Nested
+    @DisplayName("root-frame translation")
+    class RootFrameTranslation {
+
+        private static final float[] THIRD_PERSON_ROOT = {90f, 0f, 0f};
+        private static final float[] FIRST_PERSON_ROOT = {90f, 60f, -40f};
+
+        /**
+         * The guarantee that makes the frame switch safe to ship: the
+         * third-person root has only one non-zero angle, so every Euler order
+         * collapses to the same matrix and the change of basis must reproduce
+         * java2bedrock's sign flips exactly. If this fails, the switch has
+         * started moving items that are already correct in game.
+         */
+        @Test
+        @DisplayName("every frame reproduces j2b exactly in third person")
+        void thirdPersonIsFrameIndependent() {
+            float[][] samples = {
+                {-15.5f, 13f, 1.5f},    // greataxe / warhammer
+                {1.13f, 3.2f, -2.12f},  // dagger
+                {-5.25f, -7.25f, -1f},  // long spear
+                {0f, 0f, 0f}
+            };
+            for (float[] t : samples) {
+                for (boolean mirrorX : new boolean[]{true, false}) {
+                    float[] j2b = BedrockGeometryConverter
+                        .convertTranslation(t, false, mirrorX);
+                    for (BedrockGeometryConverter.TranslationFrame frame
+                        : BedrockGeometryConverter.TranslationFrame.values()) {
+                        if (frame == BedrockGeometryConverter.TranslationFrame.J2B) {
+                            continue;
+                        }
+                        float[] actual = BedrockGeometryConverter
+                            .convertTranslationInRootFrame(
+                                t, THIRD_PERSON_ROOT, mirrorX, frame);
+                        assertThat(actual)
+                            .as("frame %s, translation %s, mirrorX %s",
+                                frame, java.util.Arrays.toString(t), mirrorX)
+                            .usingComparatorWithPrecision(1e-4f)
+                            .containsExactly(j2b);
+                    }
+                }
+            }
+        }
+
+        /**
+         * The axis map is not a free parameter: it is pinned by confirmed-good
+         * third-person output. Java {@code [-15.5, 13, 1.5]} is emitted as
+         * {@code [15.5, 13, 1.5]} under a {@code [90, 0, 0]} root.
+         */
+        @Test
+        @DisplayName("axis map matches the observed third-person output")
+        void axisMapMatchesObservedOutput() {
+            float[] actual = BedrockGeometryConverter.convertTranslationInRootFrame(
+                new float[]{-15.5f, 13f, 1.5f}, THIRD_PERSON_ROOT, true,
+                BedrockGeometryConverter.TranslationFrame.ZYX);
+            assertThat(actual).usingComparatorWithPrecision(1e-4f)
+                .containsExactly(new float[]{15.5f, 13f, 1.5f});
+        }
+
+        /** A rotation is length-preserving, so no frame may resize the offset. */
+        @Test
+        @DisplayName("first-person frames preserve offset magnitude")
+        void firstPersonPreservesMagnitude() {
+            float[] t = {0f, 4f, -9f};
+            double expected = Math.sqrt(4 * 4 + 9 * 9);
+            for (BedrockGeometryConverter.TranslationFrame frame
+                : BedrockGeometryConverter.TranslationFrame.values()) {
+                if (frame == BedrockGeometryConverter.TranslationFrame.J2B) {
+                    continue;
+                }
+                float[] p = BedrockGeometryConverter.convertTranslationInRootFrame(
+                    t, FIRST_PERSON_ROOT, true, frame);
+                double len = Math.sqrt(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]);
+                assertThat(len).as("frame %s", frame).isCloseTo(expected, offset(1e-3));
+            }
+        }
+
+        /**
+         * The greataxe is the item the switch exists for: under j2b its 9-unit
+         * push away from the camera is misdirected, and only a frame that
+         * actually rotates the vector redistributes it.
+         */
+        @Test
+        @DisplayName("first-person frames differ from j2b for a large offset")
+        void firstPersonDiffersForLargeOffset() {
+            float[] t = {0f, 4f, -9f};
+            float[] j2b = BedrockGeometryConverter.convertTranslation(t, true, true);
+            for (BedrockGeometryConverter.TranslationFrame frame
+                : BedrockGeometryConverter.TranslationFrame.values()) {
+                if (frame == BedrockGeometryConverter.TranslationFrame.J2B) {
+                    continue;
+                }
+                float[] p = BedrockGeometryConverter.convertTranslationInRootFrame(
+                    t, FIRST_PERSON_ROOT, true, frame);
+                assertThat(p).as("frame %s", frame).isNotEqualTo(j2b);
+            }
+        }
+
+        @Test
+        @DisplayName("unknown and blank frame names fall back to j2b")
+        void parseFallsBack() {
+            assertThat(BedrockGeometryConverter.TranslationFrame.parse(null))
+                .isEqualTo(BedrockGeometryConverter.TranslationFrame.J2B);
+            assertThat(BedrockGeometryConverter.TranslationFrame.parse("  "))
+                .isEqualTo(BedrockGeometryConverter.TranslationFrame.J2B);
+            assertThat(BedrockGeometryConverter.TranslationFrame.parse("nonsense"))
+                .isEqualTo(BedrockGeometryConverter.TranslationFrame.J2B);
+            assertThat(BedrockGeometryConverter.TranslationFrame.parse(" zXy "))
+                .isEqualTo(BedrockGeometryConverter.TranslationFrame.ZXY);
+        }
     }
 }

@@ -53,33 +53,195 @@ public final class BedrockGeometryConverter {
     }
 
     /**
+     * Applies Java's own left-hand rule to a display transform's rotation,
+     * <b>before</b> any Java&rarr;Bedrock conversion.
+     *
+     * <p>Vanilla {@code ItemTransform#apply(boolean leftHand, PoseStack)}
+     * negates the Y and Z rotation and the X translation whenever the item is
+     * rendered in the left hand:</p>
+     * <pre>
+     *   if (leftHand) { f1 = -f1; f2 = -f2; }
+     *   int i = leftHand ? -1 : 1;
+     *   poseStack.translate(i * translation.x(), translation.y(), translation.z());
+     * </pre>
+     * <p>This happens <b>unconditionally for the left hand</b> — it is not a
+     * fallback for models that omit {@code *_lefthand}. When a model does omit
+     * the slot, {@code ItemTransforms.Deserializer} substitutes the
+     * <i>right</i>-hand transform object, which is still not
+     * {@code NO_TRANSFORM}, so {@code apply} negates that too. A model that
+     * declares {@code firstperson_lefthand.rotation = [55, 0, -90]} against a
+     * right hand of {@code [55, 0, 90]} is therefore asking to be rendered at
+     * {@code +90} in both hands; forwarding the literal {@code -90} flips the
+     * blade the wrong way round. 84 of the 102 hand slots in the TrinityForge
+     * pack follow exactly that negated-Z pattern.</p>
+     *
+     * <p>The X translation half of the same rule is expressed through
+     * {@link #convertTranslation}'s {@code mirrorX} flag: Java's {@code -1}
+     * and Bedrock's own X mirror cancel, so an off-hand transform passes
+     * {@code mirrorX = false} and keeps its declared X.</p>
+     */
+    public static float[] applyJavaLeftHandRotation(float[] javaRotation) {
+        if (javaRotation == null || javaRotation.length < 3) {
+            return new float[]{0f, 0f, 0f};
+        }
+        return new float[]{javaRotation[0], -javaRotation[1], -javaRotation[2]};
+    }
+
+    /**
      * Converts a Java {@code display.*.translation} array into Bedrock
      * animation bone {@code position} (pixel units in both systems).
      *
-     * <p>java2bedrock sign matrix — X negates for the main hand (mirrored
-     * frame) but not for the off hand (Java itself mirrors left-hand
-     * rendering, so the two mirrors cancel); Z negates only in first person
-     * where Bedrock's camera-space depth axis points the other way:</p>
+     * <p>Sign matrix for a Java <b>righthand</b> transform. X is negated; Z
+     * negates only in first person:</p>
      * <ul>
-     *   <li>third-person main hand: {@code (-x, y, z)}</li>
-     *   <li>third-person off hand: {@code (x, y, z)}</li>
-     *   <li>first-person main hand: {@code (-x, y, -z)}</li>
-     *   <li>first-person off hand: {@code (x, y, -z)}</li>
+     *   <li>third-person: {@code (-x, y, z)}</li>
+     *   <li>first-person: {@code (-x, y, -z)}</li>
      * </ul>
+     * <p>A transform read from a {@code *_lefthand} slot already states its X
+     * for the left hand, so it passes {@code mirrorX = false} and keeps
+     * {@code +x} — this is java2bedrock's split between its righthand and
+     * lefthand animation branches. Negating a lefthand X on top of that
+     * double-flips the weapon to the far side of the hand.</p>
+     *
+     * @param mirrorX {@code true} for righthand-sourced transforms (negate X),
+     *                {@code false} for lefthand-sourced ones (keep X)
      */
     public static float[] convertTranslation(
-        float[] javaTranslation, boolean firstPerson, boolean offHand
+        float[] javaTranslation, boolean firstPerson, boolean mirrorX
     ) {
         if (javaTranslation == null || javaTranslation.length < 3) {
             return new float[]{0f, 0f, 0f};
         }
-        float xSign = offHand ? +1f : -1f;
         float zSign = firstPerson ? -1f : +1f;
+        float xSign = mirrorX ? -1f : +1f;
         return new float[]{
             xSign * javaTranslation[0],
             javaTranslation[1],
             zSign * javaTranslation[2]
         };
+    }
+
+    /**
+     * Euler composition order used to rebuild the attachable root bone's
+     * rotation matrix in {@link #convertTranslationInRootFrame}.
+     *
+     * <p>{@link #J2B} is not an order at all — it selects java2bedrock's
+     * per-axis sign flips ({@link #convertTranslation}). The remaining values
+     * name the order in which Bedrock composes a bone's {@code [rx, ry, rz]}.
+     * Which one Bedrock actually uses cannot be recovered from this pack: the
+     * third-person root is {@code [90, 0, 0]}, and with two of the three angles
+     * zero every order collapses to the same matrix. Only the first-person root
+     * {@code [90, 60, -40]} distinguishes them, and there is no confirmed-good
+     * first-person output to fit against — hence the switch.</p>
+     */
+    public enum TranslationFrame {
+        /** java2bedrock per-axis sign flips. Exact only for an axis-aligned root. */
+        J2B,
+        ZYX, ZXY, XYZ, YXZ;
+
+        public static TranslationFrame parse(String raw) {
+            if (raw == null || raw.isBlank()) {
+                return J2B;
+            }
+            try {
+                return valueOf(raw.trim().toUpperCase(java.util.Locale.ROOT));
+            } catch (IllegalArgumentException e) {
+                return J2B;
+            }
+        }
+    }
+
+    /**
+     * Converts a Java {@code display.*.translation} into the local frame of the
+     * attachable root bone, so the offset means in Bedrock what it meant in
+     * Java.
+     *
+     * <p>{@link #convertTranslation}'s per-axis sign flips are only exact when
+     * the root bone's rotation is axis-aligned. The third-person root
+     * ({@code [90, 0, 0]}) is, so third person is correct today. The
+     * first-person root ({@code [90, 60, -40]}) is not: a Java X offset lands
+     * partly on Bedrock's X and partly on its Z, with an error proportional to
+     * the offset's magnitude. Items whose display translation is near zero
+     * never show it; the ones with a large translation are thrown out of
+     * frame.</p>
+     *
+     * <p>The fix is the change of basis the sign flips approximate:
+     * {@code p = R_root⁻¹ · M · t}, where {@code M} maps Java's item axes onto
+     * Bedrock's. {@code M} is not guessed — it is recovered exactly from
+     * confirmed-correct third-person output (Java {@code [-15.5, 13, 1.5]} →
+     * emitted {@code [15.5, 13, 1.5]} under a {@code [90, 0, 0]} root), giving
+     * {@code M(x, y, z) = (∓x, -z, y)}.</p>
+     *
+     * <p>Because a rotation matrix's inverse is its transpose and the
+     * third-person root leaves only one non-zero angle, this reproduces
+     * {@link #convertTranslation} bit-for-bit in third person under
+     * <em>every</em> {@link TranslationFrame} — the switch can only ever change
+     * first person. {@code BedrockGeometryConverterTest} asserts that.</p>
+     *
+     * @param rootRotationDeg the root bone's {@code [rx, ry, rz]} as emitted,
+     *                        including any off-hand mirroring
+     * @param mirrorX         as in {@link #convertTranslation}
+     */
+    public static float[] convertTranslationInRootFrame(
+        float[] javaTranslation, float[] rootRotationDeg,
+        boolean mirrorX, TranslationFrame frame
+    ) {
+        if (javaTranslation == null || javaTranslation.length < 3) {
+            return new float[]{0f, 0f, 0f};
+        }
+        if (frame == null || frame == TranslationFrame.J2B
+            || rootRotationDeg == null || rootRotationDeg.length < 3) {
+            throw new IllegalArgumentException(
+                "convertTranslationInRootFrame requires a non-J2B frame and a root rotation");
+        }
+        // M · t : Java item axes -> Bedrock arm axes.
+        float sx = mirrorX ? -1f : +1f;
+        double[] m = {
+            sx * javaTranslation[0],
+            -javaTranslation[2],
+            javaTranslation[1]
+        };
+        double[][] r = rootMatrix(rootRotationDeg, frame);
+        // R⁻¹ = Rᵀ for a rotation matrix, so this is a column-wise dot product.
+        double[] p = new double[3];
+        for (int i = 0; i < 3; i++) {
+            p[i] = r[0][i] * m[0] + r[1][i] * m[1] + r[2][i] * m[2];
+        }
+        return new float[]{(float) p[0], (float) p[1], (float) p[2]};
+    }
+
+    private static double[][] rootMatrix(float[] deg, TranslationFrame frame) {
+        double[][] x = axisMatrix(0, deg[0]);
+        double[][] y = axisMatrix(1, deg[1]);
+        double[][] z = axisMatrix(2, deg[2]);
+        return switch (frame) {
+            case ZYX -> mul(z, mul(y, x));
+            case ZXY -> mul(z, mul(x, y));
+            case XYZ -> mul(x, mul(y, z));
+            case YXZ -> mul(y, mul(x, z));
+            default -> throw new IllegalArgumentException("not a rotation order: " + frame);
+        };
+    }
+
+    private static double[][] axisMatrix(int axis, double degrees) {
+        double a = Math.toRadians(degrees);
+        double c = Math.cos(a);
+        double s = Math.sin(a);
+        return switch (axis) {
+            case 0 -> new double[][]{{1, 0, 0}, {0, c, -s}, {0, s, c}};
+            case 1 -> new double[][]{{c, 0, s}, {0, 1, 0}, {-s, 0, c}};
+            default -> new double[][]{{c, -s, 0}, {s, c, 0}, {0, 0, 1}};
+        };
+    }
+
+    private static double[][] mul(double[][] a, double[][] b) {
+        double[][] out = new double[3][3];
+        for (int i = 0; i < 3; i++) {
+            for (int j = 0; j < 3; j++) {
+                out[i][j] = a[i][0] * b[0][j] + a[i][1] * b[1][j] + a[i][2] * b[2][j];
+            }
+        }
+        return out;
     }
 
     /**
@@ -164,13 +326,13 @@ public final class BedrockGeometryConverter {
      *       where {@code sx = textureWidth/16} and {@code sy = textureHeight/16}.
      *       Missing UV is derived from the element's from/to coordinates
      *       (Mojang's {@code FaceBakery.defaultFaceUV} "UV lock" rule).</li>
+     *   <li>Java per-face texture rotation is forwarded verbatim as Bedrock
+     *       {@code uv_rotation} (geometry format 1.21.0+), matching
+     *       Rainbow's {@code GeometryMapper}.</li>
      * </ul>
      *
      * <p><b>Known limitations</b> (logged at FINE, not failure):</p>
      * <ul>
-     *   <li>Java per-face texture rotation (0/90/180/270) has no native
-     *       Bedrock equivalent — non-zero rotations produce a WARN-equivalent
-     *       fine log and the texture appears unrotated on the affected face.</li>
      *   <li>Faces referencing different textures via {@code texture}
      *       ({@code #layer0} vs {@code #blade}) are all rendered with the
      *       attachable's single default texture. Multi-texture support
@@ -185,6 +347,29 @@ public final class BedrockGeometryConverter {
         int textureHeight,
         Logger logger
     ) {
+        return convertElementsToCubes(geometry, textureWidth, textureHeight, logger, true);
+    }
+
+    /**
+     * As {@link #convertElementsToCubes(JavaModelGeometry, int, int, Logger)},
+     * but with an explicit switch for per-face rotation output.
+     *
+     * @param emitUvRotation when {@code false}, Java's face {@code rotation}
+     *        is not forwarded as {@code uv_rotation}. 180° falls back to the
+     *        legacy point-mirrored UV rect and 90°/270° are dropped, which
+     *        keeps every emitted geometry at {@code format_version 1.16.0}
+     *        and the pack manifest at {@code min_engine_version 1.16.100}.
+     *        Exposed as {@code customItems.attachableGeneration.faceUvRotation}
+     *        so an operator whose clients cannot load a 1.21.0 pack can roll
+     *        back without a rebuild.
+     */
+    public static List<Map<String, Object>> convertElementsToCubes(
+        JavaModelGeometry geometry,
+        int textureWidth,
+        int textureHeight,
+        Logger logger,
+        boolean emitUvRotation
+    ) {
         if (geometry == null || !geometry.hasElements()) {
             return List.of();
         }
@@ -193,7 +378,7 @@ public final class BedrockGeometryConverter {
         List<Map<String, Object>> cubes = new ArrayList<>(geometry.elements().size());
         for (JavaModelGeometry.Element element : geometry.elements()) {
             if (element == null) continue;
-            Map<String, Object> cube = convertSingleElement(element, tw, th, logger);
+            Map<String, Object> cube = convertSingleElement(element, tw, th, logger, emitUvRotation);
             // convertSingleElement returns null when the source element has no
             // usable faces — Mojang treats such elements as invisible, so
             // omitting the cube here is the only way to preserve that visual
@@ -209,7 +394,8 @@ public final class BedrockGeometryConverter {
         JavaModelGeometry.Element element,
         int textureWidth,
         int textureHeight,
-        Logger logger
+        Logger logger,
+        boolean emitUvRotation
     ) {
         float[] from = element.from();
         float[] to = element.to();
@@ -260,7 +446,7 @@ public final class BedrockGeometryConverter {
         }
 
         Map<String, Object> faceUvs = buildPerFaceUvMap(
-            faces, from, to, textureWidth, textureHeight, logger);
+            faces, from, to, textureWidth, textureHeight, logger, emitUvRotation);
         if (faceUvs.isEmpty()) {
             // Every face was zero-area or otherwise unrenderable. Omit the
             // cube rather than promoting to cube-level UV — promoting would
@@ -308,7 +494,8 @@ public final class BedrockGeometryConverter {
         float[] elementTo,
         int textureWidth,
         int textureHeight,
-        Logger logger
+        Logger logger,
+        boolean emitUvRotation
     ) {
         Map<String, Object> out = new LinkedHashMap<>();
         // Iterate in stable order so the rendered JSON (and downstream
@@ -319,7 +506,8 @@ public final class BedrockGeometryConverter {
                 continue;
             }
             Map<String, Object> bedrockFace = convertFace(
-                face, faceName, elementFrom, elementTo, textureWidth, textureHeight, logger);
+                face, faceName, elementFrom, elementTo, textureWidth, textureHeight,
+                logger, emitUvRotation);
             if (bedrockFace != null) {
                 out.put(faceName, bedrockFace);
             }
@@ -341,33 +529,26 @@ public final class BedrockGeometryConverter {
         float[] elementTo,
         int textureWidth,
         int textureHeight,
-        Logger logger
+        Logger logger,
+        boolean emitUvRotation
     ) {
-        // Phase 6 case C (hybrid rotation handling):
-        //   - 0°   → standard uv/uv_size, identity mapping
-        //   - 180° → uv=(u2,v2) with negative uv_size on both axes, which is
-        //            point-symmetric to the unrotated form and visually
-        //            indistinguishable from rotating the texture 180° in Java
-        //   - 90°/270° → not expressible in Bedrock 1.16.0 per-face UV (would
-        //            require swapping the texture's u/v axes relative to the
-        //            face axes; Bedrock per-face uv has no rotation field).
-        //            Render the face UNROTATED as the closest approximation —
-        //            a hole in the model (the previous skip behaviour) is far
-        //            more visible than a texture rotated 90° off, especially
-        //            on thin weapon parts whose textures are near-uniform.
-        //            Logged at FINE so it never spams the server console.
-        int rotation = face.rotation();
-        if (rotation != 0 && rotation != 180) {
-            if (logger != null) {
-                logger.fine("[BedrockGeometry] face " + faceName + " has Java rotation "
-                    + rotation + "° which Bedrock 1.16.0 per-face UV cannot express "
-                    + "(only 0°/180° supported via negative uv_size) — rendering the "
-                    + "face with unrotated UV as an approximation. For an exact match, "
-                    + "pre-rotate the texture region in the source PNG and set the "
-                    + "model face rotation to 0.");
-            }
-            rotation = 0;
-        }
+        // Java per-face texture rotation maps 1:1 onto Bedrock's per-face
+        // {@code uv_rotation} field, which exists from geometry format
+        // 1.21.0 onwards and accepts 90 / 180 / 270 as clockwise increments
+        // (Microsoft "minecraft:geometry.v1.21.0" reference). GeyserMC's own
+        // Rainbow mapper forwards the Java value unchanged
+        // (GeometryMapper#mapCuboidModelElement), so we do the same rather
+        // than approximating.
+        //
+        // Before this, 90°/270° were silently dropped and 180° was emulated
+        // with a point-mirrored UV rect. Dropping affected a third of the
+        // faces on Blockbench-authored weapon models, whose auto-UV assigns
+        // 90°/270° to the east/west side faces.
+        //
+        // When the operator disables the feature, fall back to the legacy
+        // approximation so no geometry needs format 1.21.0.
+        int rotation = emitUvRotation ? face.rotation() : 0;
+        boolean legacy180 = !emitUvRotation && face.rotation() == 180;
 
         // Default UV when not specified: Mojang derives it from the element's
         // from/to coordinates per face (FaceBakery.defaultFaceUV — the "UV
@@ -391,13 +572,14 @@ public final class BedrockGeometryConverter {
         float scaleX = textureWidth / 16f;
         float scaleY = textureHeight / 16f;
 
-        // java2bedrock samples up/down faces point-mirrored (uv anchored at
-        // the (u2,v2) corner with negative sizes): the X-mirrored geometry
-        // flips how Bedrock orients top/bottom face UVs relative to Java.
-        // A Java 180° face rotation is the same point-mirror, so the two
-        // compose via XOR (180° on an up/down face cancels back to identity).
+        // Up/down faces are point-mirrored (uv anchored at the (u2,v2) corner
+        // with negative sizes): the X-mirrored geometry flips how Bedrock
+        // orients top/bottom face UVs relative to Java. Both java2bedrock and
+        // Rainbow do this, and it is independent of the Java face rotation —
+        // that now rides along in {@code uv_rotation} instead of being folded
+        // into the rect.
         boolean verticalFace = "up".equals(faceName) || "down".equals(faceName);
-        boolean pointMirror = (rotation == 180) ^ verticalFace;
+        boolean pointMirror = legacy180 ^ verticalFace;
 
         float bedrockU;
         float bedrockV;
@@ -434,7 +616,68 @@ public final class BedrockGeometryConverter {
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("uv", List.of(bedrockU, bedrockV));
         out.put("uv_size", List.of(bedrockUSize, bedrockVSize));
+        // Bedrock omits the field for the unrotated case; the schema only
+        // enumerates 90 / 180 / 270.
+        if (rotation != 0) {
+            out.put("uv_rotation", rotation);
+        }
         return out;
+    }
+
+    /**
+     * True when any converted cube carries a per-face {@code uv_rotation}.
+     * Callers use this to select the geometry {@code format_version}: the
+     * field only exists from 1.21.0, so models that don't need it keep
+     * emitting 1.16.0 and stay loadable on older Bedrock clients.
+     */
+    public static boolean requiresUvRotationFormat(List<Map<String, Object>> cubes) {
+        if (cubes == null) {
+            return false;
+        }
+        for (Map<String, Object> cube : cubes) {
+            if (!(cube.get("uv") instanceof Map<?, ?> faces)) {
+                continue;
+            }
+            for (Object face : faces.values()) {
+                if (face instanceof Map<?, ?> f && f.containsKey("uv_rotation")) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Axis-aligned bounding box of the converted cubes, as
+     * {@code [minX, minY, minZ, maxX, maxY, maxZ]} in Bedrock model units.
+     * Returns {@code null} when no cube carries usable origin/size data.
+     *
+     * <p>Used to size the geometry descriptor's {@code visible_bounds_*}
+     * so oversized meshes are not frustum-culled — see
+     * {@code BedrockAttachableWriter#visibleBounds}.</p>
+     */
+    public static float[] computeBounds(List<Map<String, Object>> cubes) {
+        if (cubes == null || cubes.isEmpty()) {
+            return null;
+        }
+        float minX = Float.MAX_VALUE, minY = Float.MAX_VALUE, minZ = Float.MAX_VALUE;
+        float maxX = -Float.MAX_VALUE, maxY = -Float.MAX_VALUE, maxZ = -Float.MAX_VALUE;
+        boolean any = false;
+        for (Map<String, Object> cube : cubes) {
+            float[] origin = readFloat3(cube.get("origin"));
+            float[] size = readFloat3(cube.get("size"));
+            if (origin == null || size == null) {
+                continue;
+            }
+            any = true;
+            minX = Math.min(minX, origin[0]);
+            minY = Math.min(minY, origin[1]);
+            minZ = Math.min(minZ, origin[2]);
+            maxX = Math.max(maxX, origin[0] + size[0]);
+            maxY = Math.max(maxY, origin[1] + size[1]);
+            maxZ = Math.max(maxZ, origin[2] + size[2]);
+        }
+        return any ? new float[]{minX, minY, minZ, maxX, maxY, maxZ} : null;
     }
 
     /**
@@ -467,8 +710,115 @@ public final class BedrockGeometryConverter {
     }
 
     private static float[] convertElementRotation(JavaModelGeometry.ElementRotation rotation) {
-        String axis = rotation.axis() != null ? rotation.axis().toLowerCase(Locale.ROOT) : "y";
-        float angle = rotation.angle();
+        if (rotation.euler() != null) {
+            float[] e = rotation.euler();
+            // Per-axis sign flipping is exact for ONE non-zero angle and wrong
+            // for two or more: it silently assumes Java and Bedrock compose a
+            // [rx, ry, rz] triple in the same order, and they need not. The
+            // same assumption is what misdirected first-person translations
+            // until the change of basis replaced it (see
+            // convertTranslationInRootFrame).
+            //
+            // The error is not subtle. A Blockbench free rotation of
+            // {x:-180, y:-89, z:180} — a book cover, flipped and turned edge-on
+            // — composes to Ry(-91) under one order and Ry(+91) under another:
+            // the cover ends up on the wrong side of the pages, while the page
+            // block beside it, authored with a plain single-axis rotation,
+            // stays put. "Only the cover moved" is the signature.
+            //
+            // Folding the triple into its net rotation first removes the
+            // ambiguity for the case that actually occurs in the wild: authors
+            // reach for free rotation to express a flip (±180 on two axes) plus
+            // a turn, and those reduce to a single axis, which every
+            // composition order agrees on. Genuinely three-axis rotations still
+            // fall through to the per-axis approximation — they cannot be
+            // settled without knowing Bedrock's order, and no model shipped
+            // here uses one.
+            float[] singleAxis = reduceToSingleAxis(e);
+            if (singleAxis != null) {
+                return singleAxis;
+            }
+            return new float[]{-e[0], e[1], e[2]};
+        }
+        return convertSingleAxisRotation(
+            rotation.axis() != null ? rotation.axis() : "y", rotation.angle());
+    }
+
+    /**
+     * Folds a Java three-axis element rotation into the equivalent single-axis
+     * Bedrock rotation, or returns {@code null} when no single axis reproduces
+     * it.
+     *
+     * <p>The triple is composed into a rotation matrix and compared against a
+     * rotation about each axis in turn. Composition order does not matter to
+     * the test: if some single-axis rotation matches the composed matrix under
+     * one order, the caller is safe under every order, because the answer is
+     * then a property of the matrix rather than of how it was built. That is
+     * the whole point — it converts an unanswerable question about Bedrock's
+     * convention into an answerable one about this specific rotation.</p>
+     *
+     * <p>Angles are searched at 1° resolution and then refined, which covers
+     * Blockbench output (it writes two decimals but authors work in whole
+     * degrees) without a full matrix decomposition.</p>
+     */
+    private static float[] reduceToSingleAxis(float[] euler) {
+        double[][] target = mul(axisMatrix(0, euler[0]),
+            mul(axisMatrix(1, euler[1]), axisMatrix(2, euler[2])));
+        for (int axis = 0; axis < 3; axis++) {
+            Double angle = matchAxisAngle(target, axis);
+            if (angle != null) {
+                String name = switch (axis) {
+                    case 0 -> "x";
+                    case 1 -> "y";
+                    default -> "z";
+                };
+                return convertSingleAxisRotation(name, (float) (double) angle);
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Returns the angle about {@code axis} whose rotation matrix equals
+     * {@code target}, or {@code null} if none does within tolerance.
+     */
+    private static Double matchAxisAngle(double[][] target, int axis) {
+        double best = Double.MAX_VALUE;
+        double bestAngle = 0;
+        for (int deg = -180; deg <= 180; deg++) {
+            double err = matrixDistance(target, axisMatrix(axis, deg));
+            if (err < best) {
+                best = err;
+                bestAngle = deg;
+            }
+        }
+        // Refine to a hundredth of a degree around the coarse winner so
+        // Blockbench's two-decimal output is reproduced rather than snapped.
+        for (int step = -100; step <= 100; step++) {
+            double candidate = bestAngle + step / 100.0;
+            double err = matrixDistance(target, axisMatrix(axis, candidate));
+            if (err < best) {
+                best = err;
+                bestAngle = candidate;
+            }
+        }
+        return best < 1e-6 ? bestAngle : null;
+    }
+
+    /** Sum of squared element differences between two 3x3 matrices. */
+    private static double matrixDistance(double[][] a, double[][] b) {
+        double sum = 0;
+        for (int i = 0; i < 3; i++) {
+            for (int j = 0; j < 3; j++) {
+                double d = a[i][j] - b[i][j];
+                sum += d * d;
+            }
+        }
+        return sum;
+    }
+
+    private static float[] convertSingleAxisRotation(String rawAxis, float angle) {
+        String axis = rawAxis.toLowerCase(Locale.ROOT);
         // Rainbow GeometryMapper.getBedrockRotation (build 39+): only the X
         // angle negates in the X-mirrored geometry frame; Y and Z keep their
         // sign. This deliberately differs from the display-rotation sign
@@ -493,16 +843,12 @@ public final class BedrockGeometryConverter {
 
     /**
      * Computes the geometric centre of the axis-aligned bounding box that
-     * encloses every converted cube — the pivot Java rotates a held-item
-     * display transform around.
+     * encloses every converted cube.
      *
-     * <p>Ported from GeyserMC/Rainbow's {@code GeometryMapper}: the bone that
-     * carries the cubes must pivot at {@code min + (max - min) / 2} (over the
-     * cubes' {@code origin} and {@code origin + size}) so that display
-     * rotations swing the model around its centre rather than a fixed point.
-     * Using a fixed pivot makes an asymmetric model (e.g. a great-axe whose
-     * bounds are not centred on the origin) rotate about the wrong location,
-     * throwing off the first-person pose.</p>
+     * <p>Retained for tests / tooling. Held-item attachable bones now pivot at
+     * Java model-space centre {@code [0, 8, 0]} on both Rainbow and legacy
+     * paths — AABB centre put Valhalla flat meshes behind the first-person
+     * camera under large base rotations.</p>
      *
      * @param cubes converted Bedrock cubes (each with {@code origin} and
      *              {@code size} length-3 numeric lists); {@code null} / empty

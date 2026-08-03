@@ -35,10 +35,12 @@ class GuiIconTransformerTest {
     }
 
     @Test
-    @DisplayName("2x scale enlarges content about the canvas centre at unchanged canvas size")
+    @DisplayName("2x scale magnifies about the centre, pushing an off-centre pixel outward")
     void scaleEnlargesAboutCentre() throws IOException {
-        // 8x8 canvas, single red pixel just off-centre at (5, 4). Centre is
-        // (4, 4); scaling 2x about the centre maps x=5..6 → x=6..8.
+        // 8x8 canvas, single red pixel just off-centre at (5, 4). Scale 2 about
+        // the centre (4, 4) turns it into a 2x2 block starting at (6, 4) and
+        // vacates its original position. See scaleAboveOneClipsAtTheCanvasEdge
+        // for why the canvas is not grown or the scale clamped to fit.
         BufferedImage img = transparentImage(8, 8);
         img.setRGB(5, 4, OPAQUE_RED);
         byte[] baked = GuiIconTransformer.bake(toPng(img), guiScale(2f), null);
@@ -47,9 +49,8 @@ class GuiIconTransformerTest {
         assertThat(out.getWidth()).isEqualTo(8);
         assertThat(out.getHeight()).isEqualTo(8);
         assertThat(out.getRGB(6, 4)).isEqualTo(OPAQUE_RED);
-        // The original pixel position is left of the enlarged copy and must
-        // now be transparent.
-        assertThat(out.getRGB(3, 4) >>> 24).isZero();
+        assertThat(out.getRGB(5, 4) >>> 24).as("original texel is vacated").isZero();
+        assertThat(countOpaquePixels(out)).as("one texel becomes a 2x2 block").isEqualTo(4);
     }
 
     @Test
@@ -71,16 +72,77 @@ class GuiIconTransformerTest {
     }
 
     @Test
-    @DisplayName("content scaled past the canvas edge is clipped, matching Java's GUI slot crop")
-    void oversizedContentIsClipped() throws IOException {
+    @DisplayName("oversized full-bleed scale is fit to canvas so edges stay opaque")
+    void oversizedContentFitsToCanvas() throws IOException {
         byte[] baked = GuiIconTransformer.bake(solidPng(8, 8, OPAQUE_RED), guiScale(2f), null);
         BufferedImage out = ImageIO.read(new ByteArrayInputStream(baked));
-        // Canvas stays 8x8 even though the content doubled.
+        // Canvas stays 8x8; fit clamps scale 2 to effective 1:1 so nothing clips.
         assertThat(out.getWidth()).isEqualTo(8);
         assertThat(out.getHeight()).isEqualTo(8);
-        // Still fully covered in red (the enlarged fill overflows and clips).
         assertThat(out.getRGB(0, 0)).isEqualTo(OPAQUE_RED);
         assertThat(out.getRGB(7, 7)).isEqualTo(OPAQUE_RED);
+    }
+
+    @Test
+    @DisplayName("full-bleed scale 3 bake matches scale 1 (fit fills canvas without clipping)")
+    void fullBleedScale3MatchesScale1() throws IOException {
+        byte[] source = solidPng(8, 8, OPAQUE_RED);
+        BufferedImage scale1 = ImageIO.read(new ByteArrayInputStream(
+            GuiIconTransformer.bake(source, guiScale(1f), null)));
+        BufferedImage scale3 = ImageIO.read(new ByteArrayInputStream(
+            GuiIconTransformer.bake(source, guiScale(3f), null)));
+
+        assertThat(scale3.getWidth()).isEqualTo(scale1.getWidth());
+        assertThat(scale3.getHeight()).isEqualTo(scale1.getHeight());
+        for (int y = 0; y < scale1.getHeight(); y++) {
+            for (int x = 0; x < scale1.getWidth(); x++) {
+                assertThat(scale3.getRGB(x, y)).isEqualTo(scale1.getRGB(x, y));
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("scale above 1 clips at the canvas edge instead of being fitted to it")
+    void scaleAboveOneClipsAtTheCanvasEdge() throws IOException {
+        // 16x16 with opaque fill in [2..13]×[2..13]. Scale 2 about the centre
+        // magnifies that block past every border, so the canvas ends up fully
+        // opaque and the outer bands are lost.
+        //
+        // Why clip and not fit: Java renders the model at the declared gui.scale
+        // and the 16x16 inventory slot crops whatever overflows. Clamping the
+        // scale so the content fits would make the Bedrock icon disagree with
+        // the Java one for exactly the packs that set scale > 1 on purpose.
+        BufferedImage img = transparentImage(16, 16);
+        for (int y = 2; y <= 13; y++) {
+            for (int x = 2; x <= 13; x++) {
+                img.setRGB(x, y, OPAQUE_RED);
+            }
+        }
+        BufferedImage out = ImageIO.read(new ByteArrayInputStream(
+            GuiIconTransformer.bake(toPng(img), guiScale(2f), null)));
+
+        assertThat(out.getRGB(0, 0)).as("magnified past the top-left border")
+            .isEqualTo(OPAQUE_RED);
+        assertThat(out.getRGB(15, 15)).as("magnified past the bottom-right border")
+            .isEqualTo(OPAQUE_RED);
+        assertThat(countOpaquePixels(out)).isEqualTo(16 * 16);
+    }
+
+    @Test
+    @DisplayName("scale above 1 paints more than scale below 1")
+    void scaleAboveOnePaintsMoreThanScaleBelowOne() throws IOException {
+        // A single texel: scale 2 turns it into a 2x2 block, scale 0.5 drops it
+        // off the nearest-neighbour grid entirely. Both are magnification and
+        // minification about the canvas centre, with no fit step in between.
+        BufferedImage img = transparentImage(8, 8);
+        img.setRGB(5, 4, OPAQUE_RED);
+        BufferedImage enlarged = ImageIO.read(new ByteArrayInputStream(
+            GuiIconTransformer.bake(toPng(img), guiScale(2f), null)));
+        BufferedImage shrunk = ImageIO.read(new ByteArrayInputStream(
+            GuiIconTransformer.bake(toPng(img), guiScale(0.5f), null)));
+
+        assertThat(countOpaquePixels(enlarged)).isEqualTo(4);
+        assertThat(countOpaquePixels(shrunk)).isLessThan(countOpaquePixels(enlarged));
     }
 
     @Test
@@ -119,5 +181,17 @@ class GuiIconTransformerTest {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         ImageIO.write(img, "png", out);
         return out.toByteArray();
+    }
+
+    private static int countOpaquePixels(BufferedImage img) {
+        int count = 0;
+        for (int y = 0; y < img.getHeight(); y++) {
+            for (int x = 0; x < img.getWidth(); x++) {
+                if ((img.getRGB(x, y) >>> 24) != 0) {
+                    count++;
+                }
+            }
+        }
+        return count;
     }
 }
