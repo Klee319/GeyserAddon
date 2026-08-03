@@ -416,12 +416,30 @@ public final class ItemMappingRegistry {
                     .add(mapping);
             }
 
+            // Identifiers that stand for a category rather than one item, so
+            // they can be pushed to the back of their group below.
+            java.util.Set<String> genericPdcIds = findGenericPdcIdentifiers();
+
             // Sort base items alphabetically, then sort items within each group by CMD
             Map<String, List<Map<String, Object>>> sortedItemsByBase = new java.util.LinkedHashMap<>();
             itemsByBase.keySet().stream().sorted().forEach(baseItem -> {
                 List<CustomItemMapping> items = itemsByBase.get(baseItem);
-                // Sort by customModelData to ensure consistent order
-                items.sort(java.util.Comparator.comparingInt(CustomItemMapping::customModelData));
+                // Sort by customModelData to ensure consistent order, but keep
+                // category-wide PDC identifiers behind item-specific ones.
+                //
+                // Geyser v2 has no predicate that inspects a PDC *value*, so
+                // several PDC mappings on one base material all match the same
+                // stacks and the first registration wins. Ordering therefore
+                // decides which definition an item gets. A leftover entry like
+                // "trinityforge:tradeable" covers every tradeable item on that
+                // material and would shadow the specific one; putting it last
+                // resolves that in favour of the specific entry without
+                // deleting anything — deletions here are unrecoverable for
+                // PDC-path entries.
+                items.sort(java.util.Comparator
+                    .comparingInt((CustomItemMapping m) -> specificityRank(m, genericPdcIds))
+                    .thenComparingInt(CustomItemMapping::customModelData)
+                    .thenComparing(CustomItemMapping::name));
                 List<Map<String, Object>> jsonItems = items.stream()
                     .map(this::convertMappingToJson)
                     .collect(Collectors.toList());
@@ -444,6 +462,62 @@ public final class ItemMappingRegistry {
         } finally {
             batchLock.readLock().unlock();
         }
+    }
+
+    /**
+     * How narrowly a mapping's Bedrock predicate matches, lowest = narrowest.
+     *
+     * <p>Geyser v2 registers the first definition that claims a base item, and
+     * the predicates differ in reach: {@code legacyCustomModelData} matches one
+     * CMD value, {@code item_model} matches one model id, while the PDC path
+     * can only test that {@code minecraft:custom_data} is <em>present</em> —
+     * it matches every custom item on that material. Registering the broad one
+     * first therefore swallows the narrow ones, which is why an item with a
+     * perfectly good CMD definition could still render as something else.</p>
+     */
+    private static int specificityRank(
+        CustomItemMapping mapping, java.util.Set<String> genericPdcIds
+    ) {
+        if (mapping.customModelData() > 0) {
+            return 0;
+        }
+        if (mapping.hasItemModelId()) {
+            return 1;
+        }
+        if (mapping.hasPdcIdentifier() && genericPdcIds.contains(mapping.pdcIdentifier())) {
+            return 3;
+        }
+        return 2;
+    }
+
+    /**
+     * PDC identifiers that appear on several different base items.
+     *
+     * <p>A real item identifier names one item, so it shows up on one base
+     * material. One spread across many materials is a category — the value of
+     * some attribute slot that got mistaken for identity — and must not be
+     * allowed to shadow the specific mappings it overlaps.</p>
+     *
+     * <p>The threshold is 3 rather than 2 so a genuine identifier shared by a
+     * small set (an armour set written with one id across its pieces) is not
+     * demoted.</p>
+     */
+    private java.util.Set<String> findGenericPdcIdentifiers() {
+        Map<String, java.util.Set<String>> basesById = new java.util.HashMap<>();
+        for (CustomItemMapping mapping : mappingsByName.values()) {
+            if (!mapping.hasPdcIdentifier()) {
+                continue;
+            }
+            basesById.computeIfAbsent(mapping.pdcIdentifier(), k -> new java.util.HashSet<>())
+                .add(mapping.baseItem());
+        }
+        java.util.Set<String> generic = new java.util.HashSet<>();
+        for (Map.Entry<String, java.util.Set<String>> entry : basesById.entrySet()) {
+            if (entry.getValue().size() >= 3) {
+                generic.add(entry.getKey());
+            }
+        }
+        return generic;
     }
 
     /**

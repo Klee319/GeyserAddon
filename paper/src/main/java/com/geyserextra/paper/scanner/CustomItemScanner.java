@@ -475,29 +475,16 @@ public final class CustomItemScanner {
             return null;
         }
 
-        String[] commonKeyNames = {
-            "item_id", "itemid", "id", "identifier", "name", "item_name",
-            "custom_item", "custom_id", "type", "item_type"
-        };
-
-        // Scan for common key patterns
-        for (NamespacedKey key : pdc.getKeys()) {
-            String keyName = key.getKey().toLowerCase();
-
-            for (String pattern : commonKeyNames) {
-                if (keyName.contains(pattern)) {
-                    try {
-                        String value = pdc.get(key, PersistentDataType.STRING);
-                        if (value != null && !value.isBlank()) {
-                            String sanitized = sanitizeItemId(value);
-                            if (isValidItemId(sanitized)) {
-                                return sanitized;
-                            }
-                        }
-                    } catch (Exception ignored) {}
-                    break;
+        for (NamespacedKey key : rankKeysByHint(DISPLAY_ID_KEY_HINTS, sortKeys(pdc))) {
+            try {
+                String value = pdc.get(key, PersistentDataType.STRING);
+                if (value != null && !value.isBlank()) {
+                    String sanitized = sanitizeItemId(value);
+                    if (isValidItemId(sanitized)) {
+                        return sanitized;
+                    }
                 }
-            }
+            } catch (Exception ignored) {}
         }
 
         // Fallback: find any valid-looking string
@@ -770,15 +757,30 @@ public final class CustomItemScanner {
     };
 
     /**
-     * PDC key-name hint patterns. When no preferred namespace matches, the
-     * scanner walks PDC entries in alphabetical order and picks the first one
-     * whose key name contains any of these tokens. Matches the patterns used
-     * by {@link #extractItemIdFromPDC(ItemStack)} for display-name purposes,
-     * intentionally — both code paths should agree on which PDC slot carries
-     * the item's logical identity.
+     * PDC key-name hint patterns, most identity-like first. When no preferred
+     * namespace matches, the scanner picks the highest-ranked key whose name
+     * contains one of these tokens (see {@link #rankKeysByHint}).
+     *
+     * <p>Order is load-bearing, not cosmetic: {@code *_type} keys are last
+     * because they usually hold a category rather than an identity, and picking
+     * one collapses every item sharing that category onto a single mapping.</p>
      */
-    private static final String[] PDC_ID_KEY_HINTS = {
-        "item_id", "itemid", "custom_id", "identifier", "item_type", "type", "id"
+    static final String[] PDC_ID_KEY_HINTS = {
+        "item_id", "itemid", "catalog_id", "custom_id", "identifier", "id",
+        "item_type", "type"
+    };
+
+    /**
+     * Hint patterns for the display-name path ({@link #extractItemIdFromPDC}).
+     *
+     * <p>Same ranking rule as {@link #PDC_ID_KEY_HINTS} and deliberately kept
+     * in step with it — both paths must agree on which PDC slot carries the
+     * item's logical identity — but this one also accepts name-ish keys, which
+     * are useful for a label and useless as an identifier.</p>
+     */
+    static final String[] DISPLAY_ID_KEY_HINTS = {
+        "item_id", "itemid", "catalog_id", "custom_item", "custom_id",
+        "identifier", "id", "item_name", "name", "item_type", "type"
     };
 
     /**
@@ -922,11 +924,7 @@ public final class CustomItemScanner {
             return null;
         }
 
-        // Snapshot + sort once for deterministic iteration. HashMap-backed
-        // PDC implementations don't promise an order, so sorting up-front is
-        // necessary for "first match wins" to be stable across restarts.
-        List<NamespacedKey> sortedKeys = new java.util.ArrayList<>(pdc.getKeys());
-        sortedKeys.sort(java.util.Comparator.comparing(NamespacedKey::toString));
+        List<NamespacedKey> sortedKeys = sortKeys(pdc);
 
         // Phase 1: preferred plugin namespaces.
         for (String preferred : PREFERRED_PDC_NAMESPACES) {
@@ -946,19 +944,8 @@ public final class CustomItemScanner {
             }
         }
 
-        // Phase 2: key-name hints across any namespace.
-        for (NamespacedKey key : sortedKeys) {
-            String lowerKeyName = key.getKey().toLowerCase(Locale.ROOT);
-            boolean keyMatches = false;
-            for (String hint : PDC_ID_KEY_HINTS) {
-                if (lowerKeyName.contains(hint)) {
-                    keyMatches = true;
-                    break;
-                }
-            }
-            if (!keyMatches) {
-                continue;
-            }
+        // Phase 2: key-name hints across any namespace, ranked by hint.
+        for (NamespacedKey key : rankKeysByHint(PDC_ID_KEY_HINTS, sortedKeys)) {
             String value = readPdcStringSafe(pdc, key);
             if (value == null) {
                 continue;
@@ -971,6 +958,48 @@ public final class CustomItemScanner {
         }
 
         return null;
+    }
+
+    /**
+     * Snapshot + sort the PDC keys once for deterministic iteration.
+     *
+     * <p>HashMap-backed PDC implementations don't promise an order, so sorting
+     * up-front is what makes "first match wins" stable across restarts.</p>
+     */
+    private static List<NamespacedKey> sortKeys(PersistentDataContainer pdc) {
+        List<NamespacedKey> keys = new java.util.ArrayList<>(pdc.getKeys());
+        keys.sort(java.util.Comparator.comparing(NamespacedKey::toString));
+        return keys;
+    }
+
+    /**
+     * Orders {@code keys} by how strongly their name suggests identity, dropping
+     * keys that match no hint. Rank is the index of the first matching hint, so
+     * earlier entries in {@code hints} win; ties keep the incoming order.
+     *
+     * <p>This is hint-major on purpose. The previous key-major walk let the
+     * winner be whichever <em>matching</em> key sorted earliest, so a plugin
+     * writing both an identity and a category was identified by whichever name
+     * happened to come first in the alphabet. TrinityForge writes
+     * {@code bind_type} and {@code catalog_id}; {@code "b" < "c"}, so all 51 of
+     * its ledger entries were identified as {@code trinityforge:tradeable} (or
+     * {@code :soulbound}) and every item sharing a base material collapsed onto
+     * one mapping. Both PDC extraction paths route through here so they cannot
+     * disagree about which slot carries identity.</p>
+     */
+    static List<NamespacedKey> rankKeysByHint(String[] hints, List<NamespacedKey> keys) {
+        List<NamespacedKey> ranked = new java.util.ArrayList<>();
+        for (String hint : hints) {
+            for (NamespacedKey key : keys) {
+                if (!key.getKey().toLowerCase(Locale.ROOT).contains(hint)) {
+                    continue;
+                }
+                if (!ranked.contains(key)) {
+                    ranked.add(key);
+                }
+            }
+        }
+        return ranked;
     }
 
     /**
