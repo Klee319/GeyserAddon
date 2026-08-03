@@ -673,7 +673,16 @@ public class CustomItemsHandler {
         Identifier bedrockId = Identifier.of(BEDROCK_NAMESPACE, mapping.name);
 
         CustomItemBedrockOptions.Builder bedrockOptions = CustomItemBedrockOptions.builder()
-            .allowOffhand(mapping.allowOffhand);
+            .allowOffhand(mapping.allowOffhand)
+            // Bedrock decides "held diagonally like a tool" vs "held flat like
+            // an item" from the item's own hand_equipped flag, which a vanilla
+            // item has and a custom item does not inherit. Without this, every
+            // registered tool — including the ones we register purely so the
+            // Bedrock client will accept them in the off-hand — switches to
+            // the flat item pose, which is what surfaced as "vanilla tools are
+            // held like items". Items that ship their own attachable are
+            // unaffected: the attachable drives their pose either way.
+            .displayHandheld(isHandheldBaseItem(mapping.baseItem));
 
         // Geyser's public v2 API intentionally marks BLOCK_PLACER as a
         // non-vanilla-only component. These definitions extend vanilla Java
@@ -985,6 +994,45 @@ public class CustomItemsHandler {
                 return true;
             }
             idx = after;
+        }
+        return false;
+    }
+
+    /**
+     * Vanilla base items Bedrock renders as held-in-hand rather than flat,
+     * matched by suffix so modded/plugin tiers (copper_sword, netherite_spear,
+     * whatever ValhallaMMO adds next) are covered without a per-item list.
+     */
+    private static final String[] HANDHELD_BASE_SUFFIXES = {
+        "_sword", "_axe", "_pickaxe", "_shovel", "_hoe", "_spear"
+    };
+
+    /** Handheld base items whose id carries no tool suffix to match on. */
+    private static final Set<String> HANDHELD_BASE_ITEMS = Set.of(
+        "minecraft:bow", "minecraft:crossbow", "minecraft:trident", "minecraft:mace",
+        "minecraft:fishing_rod", "minecraft:carrot_on_a_stick",
+        "minecraft:warped_fungus_on_a_stick", "minecraft:stick", "minecraft:shears",
+        "minecraft:brush", "minecraft:spyglass"
+    );
+
+    /**
+     * Whether Bedrock renders {@code baseItem} in the hand-equipped pose.
+     *
+     * <p>Kept as a table rather than derived from the Java item because the
+     * extension has no Bukkit/Material access — it sees only the identifier
+     * string that the Paper side wrote into custom_items.json.</p>
+     */
+    private static boolean isHandheldBaseItem(String baseItem) {
+        if (baseItem == null) {
+            return false;
+        }
+        if (HANDHELD_BASE_ITEMS.contains(baseItem)) {
+            return true;
+        }
+        for (String suffix : HANDHELD_BASE_SUFFIXES) {
+            if (baseItem.endsWith(suffix)) {
+                return true;
+            }
         }
         return false;
     }

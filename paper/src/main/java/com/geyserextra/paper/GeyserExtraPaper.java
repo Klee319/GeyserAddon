@@ -17,6 +17,7 @@ import com.geyserextra.paper.recipe.SmithingRecipeHandler;
 import com.geyserextra.core.api.CustomItemMapping;
 import com.geyserextra.paper.pack.AutoBedrockPackBuilder;
 import com.geyserextra.paper.pack.AutoPackBuildGuard;
+import com.geyserextra.paper.pack.BedrockVanillaTexturePaths;
 import com.geyserextra.paper.pack.ItemModelHintsReader;
 import com.geyserextra.paper.pack.JavaPackLangReader;
 import com.geyserextra.paper.pack.JavaPackReader;
@@ -41,6 +42,7 @@ import com.geyserextra.paper.util.JapaneseTranslationLoader;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -261,15 +263,74 @@ public final class GeyserExtraPaper extends JavaPlugin {
      *
      * @return The path to the Extension data folder
      */
+    /**
+     * Reads the operator's explicit extension-data-folder, or {@code null} when
+     * none is set.
+     *
+     * <p>Lives in the Paper plugin's own {@code config.yml} rather than the
+     * JSON config, because the JSON config is itself read <em>out of</em> the
+     * folder being located — putting the path there would be circular. A system
+     * property is honoured first so an ops script can set it without editing a
+     * file on every backend.</p>
+     *
+     * <p>A configured path that does not exist is created rather than rejected:
+     * on a fresh proxy the Geyser extension folder may not exist until Geyser
+     * first starts, and failing here would leave the backend with no config at
+     * all. A path that exists but is a regular file is refused, since that
+     * cannot be recovered from by creating it.</p>
+     */
+    private Path configuredExtensionDataFolder() {
+        String raw = System.getProperty("geyserextra.data-folder");
+        String source = "system property geyserextra.data-folder";
+        if (raw == null || raw.isBlank()) {
+            saveDefaultConfig();
+            raw = getConfig().getString("extension-data-folder", "");
+            source = "config.yml extension-data-folder";
+        }
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+        try {
+            Path path = Path.of(raw.trim());
+            if (Files.exists(path) && !Files.isDirectory(path)) {
+                getLogger().severe("Ignoring " + source + ": " + path.toAbsolutePath()
+                    + " exists but is not a directory. Falling back to detection.");
+                return null;
+            }
+            Files.createDirectories(path);
+            return path;
+        } catch (java.nio.file.InvalidPathException | java.io.IOException e) {
+            getLogger().severe("Ignoring " + source + " (" + raw + "): "
+                + e.getMessage() + ". Falling back to detection.");
+            return null;
+        }
+    }
+
     public Path getExtensionDataFolder() {
         // Return cached path if already detected
         if (cachedExtensionDataFolder != null) {
             return cachedExtensionDataFolder;
         }
 
+        // Explicit override wins. Required for proxy setups: Geyser then runs
+        // on the Velocity/BungeeCord proxy, so this backend has no Geyser
+        // folder to find and the detection below cannot succeed no matter
+        // which names it tries. Without the override the fallback silently
+        // creates plugins/Geyser-Spigot/extensions/geyserextra here and writes
+        // the generated pack into it, where the proxy's Geyser never looks.
+        Path override = configuredExtensionDataFolder();
+        if (override != null) {
+            cachedExtensionDataFolder = override;
+            getLogger().info("Using configured extension data folder: "
+                + override.toAbsolutePath());
+            return cachedExtensionDataFolder;
+        }
+
         Path pluginsFolder = getServer().getPluginsFolder().toPath();
 
-        // Try different Geyser folder names
+        // Try different Geyser folder names. Proxy platforms are absent on
+        // purpose: their folders live on the proxy, not here, so a match would
+        // only ever be a stray directory.
         String[] geyserFolderNames = {
             "Geyser-Spigot",
             "Geyser-Paper",
@@ -286,8 +347,17 @@ public final class GeyserExtraPaper extends JavaPlugin {
             }
         }
 
-        // Default to Geyser-Spigot if none found
-        getLogger().warning("Could not detect Geyser folder, using default: Geyser-Spigot");
+        // Nothing found. On a proxy setup this is the normal outcome and the
+        // fallback below is wrong, so say what to do rather than only what
+        // happened.
+        getLogger().warning("Could not detect a Geyser folder under "
+            + pluginsFolder.toAbsolutePath() + ". If Geyser runs on a Velocity/"
+            + "BungeeCord proxy, set extension-data-folder in "
+            + "plugins/geyserExtra/config.yml to the proxy's "
+            + "<Geyser>/extensions/geyserextra directory -- otherwise the "
+            + "generated Bedrock pack is written where Geyser will not find it "
+            + "and Bedrock players see no custom items.");
+        getLogger().warning("Falling back to: Geyser-Spigot");
         cachedExtensionDataFolder = pluginsFolder
             .resolve("Geyser-Spigot")
             .resolve("extensions")
@@ -331,13 +401,68 @@ public final class GeyserExtraPaper extends JavaPlugin {
         // Try to load existing data from shared folder
         Path sharedFolder = getSharedFolder();
         itemMappingRegistry.loadIfExists(sharedFolder.resolve(CUSTOM_ITEMS_FILE));
+        relocaliseInventedDisplayNames();
         skullRegistry.loadIfExists(sharedFolder.resolve(SKULLS_FILE));
-
         getLogger().fine(() -> String.format(
             "Loaded %d custom items and %d skulls from shared folder.",
             itemMappingRegistry.size(),
             skullRegistry.size()
         ));
+    }
+
+    /**
+     * Replaces display names an earlier build invented from the Java id
+     * ("Wooden Sword") with the name Bedrock's own pack gives the item
+     * ("木の剣").
+     *
+     * <p>custom_items.json is persistent, so a mapping written before the
+     * generated name table existed keeps its English name forever — the
+     * scanner reuses the stored entry instead of re-deriving it. Without this
+     * pass the fix would only ever reach items nobody had touched yet.</p>
+     *
+     * <p>This <b>rewrites</b> entries rather than dropping them. An earlier
+     * attempt at a similar migration deleted the offending mappings instead,
+     * which silently took the Bedrock off-hand away from every affected item
+     * (off-hand permission rides on the registration) and could not be undone,
+     * because PDC entries are only ever re-created by observing a live stack.
+     * Migrations over this file must preserve every entry.</p>
+     *
+     * <p>Only names that exactly match the prettified Java id are touched, so
+     * an operator-authored name is never overwritten — the worst case is an
+     * item genuinely named "Wooden Sword" in English being localised, which is
+     * the intended outcome anyway.</p>
+     */
+    private void relocaliseInventedDisplayNames() {
+        List<CustomItemMapping> updated = new ArrayList<>();
+        for (CustomItemMapping mapping : itemMappingRegistry.getMappings()) {
+            if (!mapping.hasDisplayName()) {
+                continue;
+            }
+            String bareBase = mapping.baseItem();
+            int colon = bareBase.indexOf(':');
+            if (colon >= 0) {
+                bareBase = bareBase.substring(colon + 1);
+            }
+            if (!mapping.displayName().equals(CustomItemScanner.prettifyMaterialKey(bareBase))) {
+                continue;
+            }
+            String localised = BedrockVanillaTexturePaths.vanillaName(bareBase);
+            if (localised == null || localised.isBlank()
+                || localised.equals(mapping.displayName())) {
+                continue;
+            }
+            updated.add(new CustomItemMapping(
+                mapping.name(), mapping.baseItem(), mapping.customModelData(),
+                mapping.unbreakable(), localised, mapping.iconPath(),
+                mapping.creativeCategory(), mapping.creativeGroup(), mapping.register(),
+                mapping.pdcIdentifier(), mapping.armor(), mapping.itemModelId()));
+        }
+        if (updated.isEmpty()) {
+            return;
+        }
+        itemMappingRegistry.registerAll(updated);
+        getLogger().info("Relocalised " + updated.size() + " custom item display name(s)"
+            + " from the prettified Java id to Bedrock's own vanilla name");
     }
 
     /**
@@ -484,10 +609,11 @@ public final class GeyserExtraPaper extends JavaPlugin {
         Objects.requireNonNull(getCommand("tooltip")).setExecutor(new TooltipCommand());
 
         // Menu command — central Floodgate form menu for all Bedrock commands.
-        // /geyserextra (alias /ga) shares the same executor so admins and Bedrock
+        // /geyserextra (alias /gxa) shares the same executor so admins and Bedrock
         // players have a memorable master entry point without re-implementing the form.
+        // Named "bedrockmenu" rather than "menu"; see plugin.yml for why.
         BedrockMenuCommand menuExecutor = new BedrockMenuCommand(this, playerSettingsManager);
-        Objects.requireNonNull(getCommand("menu")).setExecutor(menuExecutor);
+        Objects.requireNonNull(getCommand("bedrockmenu")).setExecutor(menuExecutor);
         Objects.requireNonNull(getCommand("geyserextra")).setExecutor(menuExecutor);
 
         // Settings command — per-player display settings via Floodgate CustomForm
@@ -599,17 +725,32 @@ public final class GeyserExtraPaper extends JavaPlugin {
             );
         }
 
-        // V3: one-shot async refresh after onEnable so dynamic URL packs get
+        // V3: one-shot async refresh after onEnable so network-backed packs get
         // fetched and merged into the auto-pack even on the first boot when
         // no cache exists yet. The primary-thread startup save (which now
-        // refuses HTTP) leaves URL packs un-fetched; this kickoff fills them
-        // in without blocking the tick loop.
+        // refuses HTTP) leaves them un-fetched; this kickoff fills them in
+        // without blocking the tick loop.
         //
         // Why an async one-shot in addition to the periodic timer above:
-        // operators with autoReload=false would otherwise see URL packs
+        // operators with autoReload=false would otherwise see remote packs
         // missing until a manual reload or full restart with a warm cache.
         // This one-shot keeps the first-install path working out of the box.
-        if (!config.customItems().effectiveDynamicResourcePackUrls().isEmpty()) {
+        //
+        // The second half of the condition is the one that matters more often.
+        // When no local pack path is configured, JavaPackResolver falls back to
+        // the server.properties resource-pack URL — also network-backed, and
+        // the default for a server that simply points Java clients at a hosted
+        // pack. Gating this one-shot on dynamicResourcePackUrls alone left that
+        // configuration with NO path to a warm cache at all: every save runs on
+        // the primary thread, every primary-thread save refuses HTTP, so the
+        // resolver returns no roots and the generated pack contains only a
+        // manifest and an icon — about 2 KB, with every texture, model and
+        // attachable missing. That is not a first-boot transient; with
+        // autoReload=false it never resolves on its own.
+        boolean networkBackedSource =
+            !config.customItems().effectiveDynamicResourcePackUrls().isEmpty()
+                || config.customItems().effectiveJavaResourcePackPaths().isEmpty();
+        if (networkBackedSource) {
             getServer().getScheduler().runTaskLaterAsynchronously(
                 this,
                 () -> {

@@ -34,7 +34,8 @@ public final class BedrockVanillaTextureMapGenerator {
         if (args.length < 7) {
             System.err.println("Usage: BedrockVanillaTextureMapGenerator "
                 + "<item_texture.json> <terrain_texture.json> <manifest.json> "
-                + "<items.json> <blocks.json> <blocksJ2B.json> <output.json>");
+                + "<items.json> <blocks.json> <blocksJ2B.json> <output.json> "
+                + "[<bedrock ja_JP.lang>]");
             System.exit(1);
         }
         Path itemJson = Path.of(args[0]);
@@ -44,6 +45,9 @@ public final class BedrockVanillaTextureMapGenerator {
         Path javaBlocksJson = Path.of(args[4]);
         Path blocksJ2BJson = Path.of(args[5]);
         Path outputJson = Path.of(args[6]);
+        // Optional so the generator stays runnable by hand with the original
+        // seven arguments; a missing lang file only costs the localised names.
+        Path langFile = args.length > 7 ? Path.of(args[7]) : null;
 
         BedrockTextureCatalog catalog = BedrockTextureCatalog.load(itemJson, terrainJson);
         BedrockInventoryIconIndex iconIndex = BedrockInventoryIconIndex.load(itemJson, terrainJson);
@@ -97,10 +101,127 @@ public final class BedrockVanillaTextureMapGenerator {
         }
         root.add("useBlockIcon", blockIconObject);
 
+        Map<String, String> vanillaNames =
+            resolveVanillaNames(langFile, allIds, paths, useBlockIcon);
+        JsonObject nameObject = new JsonObject();
+        for (Map.Entry<String, String> entry : vanillaNames.entrySet()) {
+            nameObject.addProperty(entry.getKey(), entry.getValue());
+        }
+        root.add("vanillaNames", nameObject);
+
         Files.createDirectories(outputJson.getParent());
         Files.writeString(outputJson, GSON.toJson(root), StandardCharsets.UTF_8);
         System.out.println("[BedrockVanillaTextureMapGenerator] wrote " + paths.size()
-            + " flat paths + " + useBlockIcon.size() + " useBlockIcon entries to " + outputJson);
+            + " flat paths + " + useBlockIcon.size() + " useBlockIcon entries + "
+            + vanillaNames.size() + " vanilla names to " + outputJson);
+    }
+
+    /**
+     * Maps each Java id to the name Bedrock's own resource pack gives it.
+     *
+     * <p>Used as the last-resort display name for a custom item whose stack
+     * carries no name of its own. The alternative — prettifying the Java id —
+     * puts English into an otherwise Japanese client, and unlike a missing
+     * texture there is nothing downstream that can recover from it.</p>
+     *
+     * <p>Three lookup keys are tried per id because Bedrock's identifiers do
+     * not always match Java's: the resolved texture's basename (which already
+     * carries the edition rename, {@code wooden_sword → wood_sword}), the
+     * Bedrock block id for block-icon entries, and finally the Java id itself
+     * for everything the two editions happen to agree on. An id that matches
+     * none is simply omitted — the runtime keeps its existing prettified
+     * fallback, so a miss costs nothing that was not already the case.</p>
+     */
+    private static Map<String, String> resolveVanillaNames(
+        Path langFile,
+        Set<String> allIds,
+        Map<String, String> paths,
+        Map<String, String> useBlockIcon
+    ) throws IOException {
+        Map<String, String> names = new TreeMap<>();
+        if (langFile == null || !Files.exists(langFile)) {
+            System.out.println("[BedrockVanillaTextureMapGenerator] no Bedrock lang file supplied;"
+                + " custom items with no name of their own will fall back to a prettified Java id");
+            return names;
+        }
+        Map<String, String> lang = readLang(langFile);
+        for (String javaName : allIds) {
+            if ("air".equals(javaName)) {
+                continue;
+            }
+            String resolved = lookupLangName(lang, textureBaseName(paths.get(javaName)));
+            if (resolved == null) {
+                resolved = lookupLangName(lang, useBlockIcon.get(javaName));
+            }
+            if (resolved == null) {
+                resolved = lookupLangName(lang, javaName);
+            }
+            if (resolved != null) {
+                names.put(javaName, resolved);
+            }
+        }
+        return names;
+    }
+
+    /** {@code textures/items/wood_sword → wood_sword}; null-safe. */
+    private static String textureBaseName(String texturePath) {
+        if (texturePath == null) {
+            return null;
+        }
+        int slash = texturePath.lastIndexOf('/');
+        return slash >= 0 ? texturePath.substring(slash + 1) : texturePath;
+    }
+
+    /**
+     * Bedrock spells item names {@code item.<id>.name} and block names
+     * {@code tile.<id>.name}, with a handful of older entries missing the
+     * {@code .name} suffix. All four spellings are tried.
+     */
+    private static String lookupLangName(Map<String, String> lang, String id) {
+        if (id == null || id.isEmpty()) {
+            return null;
+        }
+        for (String key : new String[] {
+            "item." + id + ".name", "tile." + id + ".name",
+            "item." + id, "tile." + id
+        }) {
+            String value = lang.get(key);
+            if (value != null && !value.isBlank()) {
+                return value;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Parses a Bedrock {@code .lang} file: one {@code key=value} per line,
+     * {@code ##} line comments, and an optional {@code \t#} trailing comment
+     * that is NOT part of the value. Leaving that trailing comment in would
+     * ship translator notes to players as part of the item name.
+     */
+    private static Map<String, String> readLang(Path langFile) throws IOException {
+        Map<String, String> lang = new LinkedHashMap<>();
+        for (String line : Files.readAllLines(langFile, StandardCharsets.UTF_8)) {
+            String trimmed = line.trim();
+            if (trimmed.isEmpty() || trimmed.startsWith("#")) {
+                continue;
+            }
+            int eq = trimmed.indexOf('=');
+            if (eq <= 0) {
+                continue;
+            }
+            String key = trimmed.substring(0, eq).trim();
+            String value = trimmed.substring(eq + 1);
+            int comment = value.indexOf("\t#");
+            if (comment >= 0) {
+                value = value.substring(0, comment);
+            }
+            value = value.trim();
+            if (!key.isEmpty() && !value.isEmpty()) {
+                lang.put(key, value);
+            }
+        }
+        return lang;
     }
 
     /**

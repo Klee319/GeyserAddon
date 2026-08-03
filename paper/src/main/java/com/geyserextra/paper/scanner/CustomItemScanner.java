@@ -646,10 +646,22 @@ public final class CustomItemScanner {
                 }
             }
         }
+
+        // Bedrock's own name for this item, generated at build time from
+        // Mojang's bedrock-samples pack. Preferred over prettifying because
+        // this stack is heading for a Bedrock client: whatever we store here
+        // becomes the item's name there, and the prettified form puts English
+        // ("Wooden Sword") in front of a player whose client already had
+        // "木の剣" and only lost it because we registered the item.
+        String bedrockName =
+            com.geyserextra.paper.pack.BedrockVanillaTexturePaths.vanillaName(key);
+        if (bedrockName != null && !bedrockName.isBlank()) {
+            return bedrockName;
+        }
         return prettifyMaterialKey(key);
     }
 
-    private static String prettifyMaterialKey(String raw) {
+    public static String prettifyMaterialKey(String raw) {
         if (raw == null || raw.isEmpty()) {
             return "Unknown";
         }
@@ -854,7 +866,9 @@ public final class CustomItemScanner {
         }
         String baseItem = buildBaseItemIdentifier(itemStack);
 
-        // Existing entry for the same (base, pdcId)? Reuse it (no churn).
+        // An operator-curated or otherwise pre-existing entry for the same
+        // (base, pdcId) is honoured as-is — it may carry an icon or CMD this
+        // path could never produce, and clobbering it would lose that art.
         Optional<CustomItemMapping> existing = registry.getByPdc(baseItem, pdcId);
         if (existing.isPresent()) {
             return existing;
@@ -880,6 +894,19 @@ public final class CustomItemScanner {
             }
         }
 
+        // These mappings carry no art (customModelData 0, iconPath null), so
+        // it is tempting to skip registering them — that was tried on
+        // 2026-07-28 and had to be reverted. Registration is what makes an
+        // item placeable in the Bedrock off-hand: Bedrock allows the off-hand
+        // slot only for a short vanilla whitelist (shield, totem, map, arrow),
+        // and everything else needs allowOffhand on a registered custom item.
+        // Dropping these registrations silently took the off-hand away from
+        // every TF item that had no model. See [[batch-2026-07-28-9reqs]].
+        //
+        // The two costs of registering are paid elsewhere instead: the held
+        // pose is restored with CustomItemBedrockOptions.displayHandheld in
+        // the extension, and the display name is the open one — an item with
+        // no name of its own still gets our prettified English guess.
         com.geyserextra.core.api.ArmorData armorDataPdc = extractArmorData(itemStack);
         CustomItemMapping mapping = new CustomItemMapping(
             sanitizedName,

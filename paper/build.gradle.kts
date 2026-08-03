@@ -44,6 +44,15 @@ dependencies {
     // the 90/270 skip semantics that Codex round 2/3 review hardened.
     testImplementation("org.junit.jupiter:junit-jupiter:5.10.2")
     testImplementation("org.assertj:assertj-core:3.25.3")
+    // Paper API on the test classpath as well. Without it, a test that so much
+    // as names a class implementing Listener cannot compile, and with only
+    // testCompileOnly it compiles but dies at runtime with
+    // NoClassDefFoundError: org/bukkit/event/Listener when the class is
+    // loaded. Between them those two failures had pushed all listener logic
+    // out of reach of tests. This puts the API on both classpaths; it does NOT
+    // add a Bukkit harness, so tests still must not boot a server or touch
+    // registry-backed types like ItemStack.
+    testImplementation("io.papermc.paper:paper-api:1.21.11-R0.1-SNAPSHOT")
 }
 
 tasks.test {
@@ -61,7 +70,13 @@ val downloadBedrockSamples by tasks.registering {
     val itemTexture = bedrockSamplesCacheDir.map { it.file("item_texture.json") }
     val terrainTexture = bedrockSamplesCacheDir.map { it.file("terrain_texture.json") }
     val manifest = bedrockSamplesCacheDir.map { it.file("manifest.json") }
-    outputs.files(itemTexture, terrainTexture, manifest)
+    // Bedrock's own vanilla item names. A registered custom item is named only
+    // from the generated pack's texts/*.lang, so without this the client's
+    // localised name ("木の剣") is replaced by a prettified English guess
+    // ("Wooden Sword"). Taking the strings from Mojang's own pack means the
+    // fallback name is exactly what the player would have seen anyway.
+    val jaLang = bedrockSamplesCacheDir.map { it.file("ja_JP.lang") }
+    outputs.files(itemTexture, terrainTexture, manifest, jaLang)
 
     doLast {
         val cache = bedrockSamplesCacheDir.get().asFile
@@ -70,7 +85,8 @@ val downloadBedrockSamples by tasks.registering {
         listOf(
             "textures/item_texture.json" to itemTexture.get().asFile,
             "textures/terrain_texture.json" to terrainTexture.get().asFile,
-            "manifest.json" to manifest.get().asFile
+            "manifest.json" to manifest.get().asFile,
+            "texts/ja_JP.lang" to jaLang.get().asFile
         ).forEach { (remotePath, localFile) ->
             if (forceRefresh || !localFile.exists()) {
                 URI("$bedrockSamplesBase/$remotePath").toURL().openStream().use { input ->
@@ -117,6 +133,7 @@ val generateVanillaTexturePaths by tasks.registering(JavaExec::class) {
     val itemsJson = minecraftDataCacheDir.map { it.file("items.json") }
     val blocksJson = minecraftDataCacheDir.map { it.file("blocks.json") }
     val blocksJ2BJson = minecraftDataCacheDir.map { it.file("blocksJ2B.json") }
+    val jaLang = bedrockSamplesCacheDir.map { it.file("ja_JP.lang") }
     args(
         itemTexture.get().asFile,
         terrainTexture.get().asFile,
@@ -124,7 +141,8 @@ val generateVanillaTexturePaths by tasks.registering(JavaExec::class) {
         itemsJson.get().asFile,
         blocksJson.get().asFile,
         blocksJ2BJson.get().asFile,
-        generatedVanillaTexturePaths.get().asFile
+        generatedVanillaTexturePaths.get().asFile,
+        jaLang.get().asFile
     )
     inputs.files(
         itemTexture,
@@ -133,6 +151,7 @@ val generateVanillaTexturePaths by tasks.registering(JavaExec::class) {
         itemsJson,
         blocksJson,
         blocksJ2BJson,
+        jaLang,
         sourceSets.named("generate").map { it.allJava }
     )
     inputs.property("minecraftDataVersion", minecraftDataVersion)

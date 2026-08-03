@@ -15,9 +15,15 @@ commands:
     description: Swap items between offhand and hotbar (Bedrock players only)
     aliases: [oh]
     permission: geyserextra.offhand
-  menu:
+  # Deliberately NOT called "menu" (nor aliased "m"). Bukkit gives an
+  # unqualified command name to whichever plugin registers it first, and this
+  # plugin enables early because of `loadbefore: [Geyser-Spigot]`. It was
+  # therefore stealing /menu from CommandBinderGUI, which could only be
+  # reached as /commandbindergui:menu afterwards. Generic verbs belong to the
+  # server operator, not to us.
+  bedrockmenu:
     description: Open Bedrock command menu
-    aliases: [m]
+    aliases: [bmenu]
     permission: geyserextra.menu
   tooltip:
     description: Toggle tooltip display for Bedrock players
@@ -39,8 +45,10 @@ commands:
     aliases: [ds]
     permission: geyserextra.settings
   geyserextra:
+    # "ga" removed for the same reason as "menu" above: it was shadowing the
+    # operator's own /ga binding.
     description: GeyserExtra master command (opens the Bedrock menu)
-    aliases: [ga]
+    aliases: [gxa]
     permission: geyserextra.menu
 permissions:
   geyserextra.offhand:
