@@ -451,6 +451,11 @@ public final class ItemMappingRegistry {
         // which would cause them to appear transparent on Bedrock clients.
         json.put("register", mapping.register());
 
+        // Why: Bedrock clients reject offhand for many weapon types unless Geyser
+        // mapping sets allow_offhand; Extension defaults true but explicit write
+        // avoids silent client refusal.
+        json.put("allow_offhand", true);
+
         // PDC identifier — only present for CMD-less / PDC-based mappings. The
         // extension reads this to switch the predicate from legacyCustomModelData
         // to hasComponent("minecraft:custom_data") when registering with Geyser.

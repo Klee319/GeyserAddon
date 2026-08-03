@@ -779,6 +779,32 @@ public final class GeyserExtraConfig {
      * for 2D icon stability; the elements auto-upgrade was added after
      * ValhallaMMO warhammers floated off-hand under pure flat-quad + display
      * offsets.</p>
+     *
+     * <p><b>Removed keys.</b> Five settings existed only to let an in-game
+     * comparison pick between two candidate behaviours without a rebuild. Each
+     * has since been settled on a real Bedrock client, so the winning value is
+     * now compiled in and the key is gone. Leaving them in a
+     * {@code config.json} is harmless — Gson ignores unknown keys — but they no
+     * longer do anything:</p>
+     * <ul>
+     *   <li>{@code firstPersonTranslationFrame} → {@code zxy}. The change of
+     *       basis is always done properly; java2bedrock's per-axis sign flips
+     *       are no longer used for the first-person root. Restoring
+     *       {@code j2b} throws the greataxe and dagger out of frame.</li>
+     *   <li>{@code faceUvRotation} → {@code true}. Java per-face texture
+     *       rotation is always forwarded to Bedrock {@code uv_rotation}, which
+     *       pins the pack at {@code min_engine_version 1.21.0}. Bedrock clients
+     *       older than 1.21.0 can no longer load the generated pack; there is
+     *       no longer a fallback that keeps them in.</li>
+     *   <li>{@code rainbowFirstPersonMapping} → {@code false}. The GeyserMC
+     *       Rainbow single-bone mapping lost the comparison and its code path
+     *       is deleted.</li>
+     *   <li>{@code mirrorOffHandTranslation} → {@code true}. Both hands negate
+     *       the declared X. The off-hand misplacement this was meant to control
+     *       turned out to be a bone-binding bug, not a sign error.</li>
+     *   <li>{@code debugDumpArtifacts} → removed outright; nothing ever read
+     *       it, so no artifact dump existed to disable.</li>
+     * </ul>
      */
     public static final class AttachableGenerationConfig {
 
@@ -795,27 +821,61 @@ public final class GeyserExtraConfig {
 
         private final String mode;
         private final boolean forceFirstPersonOnly;
-        private final boolean debugDumpArtifacts;
         private final BasePose firstPersonBasePose;
+        /**
+         * Boxed so an absent key falls back to
+         * {@link BasePose#FIRST_PERSON_HEIGHT_TRIM} while an explicit
+         * {@code 0} disables the correction.
+         */
+        private final Float firstPersonHeightOffset;
 
         public AttachableGenerationConfig() {
-            this(MODE_OFFSETS_ONLY, false, false);
+            this(MODE_OFFSETS_ONLY, false);
+        }
+
+        public AttachableGenerationConfig(String mode,
+                                          boolean forceFirstPersonOnly) {
+            this(mode, forceFirstPersonOnly, null);
         }
 
         public AttachableGenerationConfig(String mode,
                                           boolean forceFirstPersonOnly,
-                                          boolean debugDumpArtifacts) {
-            this(mode, forceFirstPersonOnly, debugDumpArtifacts, null);
-        }
-
-        public AttachableGenerationConfig(String mode,
-                                          boolean forceFirstPersonOnly,
-                                          boolean debugDumpArtifacts,
                                           BasePose firstPersonBasePose) {
+            this(mode, forceFirstPersonOnly, firstPersonBasePose,
+                BasePose.FIRST_PERSON_HEIGHT_TRIM);
+        }
+
+        public AttachableGenerationConfig(String mode,
+                                          boolean forceFirstPersonOnly,
+                                          BasePose firstPersonBasePose,
+                                          float firstPersonHeightOffset) {
             this.mode = normalizeMode(mode);
             this.forceFirstPersonOnly = forceFirstPersonOnly;
-            this.debugDumpArtifacts = debugDumpArtifacts;
             this.firstPersonBasePose = firstPersonBasePose;
+            this.firstPersonHeightOffset = firstPersonHeightOffset;
+        }
+
+        /**
+         * Height correction added to the Y of the first-person root position,
+         * in model units (1 unit = 1 texture pixel), for <em>both</em> the flat
+         * and 3D default poses. Positive values move the item toward the hand.
+         *
+         * <p>The stock java2bedrock and flat reference poses both float the
+         * item roughly one item-height above the hand in game. The sign is
+         * empirical: the first-person arm frame's Y runs opposite to the
+         * third-person and head frames, so subtracting pushes the item further
+         * away. See {@link BasePose#FIRST_PERSON_HEIGHT_TRIM}.</p>
+         *
+         * <p>Tunable via
+         * {@code customItems.attachableGeneration.firstPersonHeightOffset} so
+         * dialling this in costs a config edit and a restart rather than a
+         * rebuild. Ignored for 3D items when the operator supplies an explicit
+         * {@link #firstPersonBasePose()}, which is absolute.</p>
+         */
+        public float firstPersonHeightOffset() {
+            return firstPersonHeightOffset != null
+                ? firstPersonHeightOffset
+                : BasePose.FIRST_PERSON_HEIGHT_TRIM;
         }
 
         private static String normalizeMode(String raw) {
@@ -847,15 +907,6 @@ public final class GeyserExtraConfig {
         }
 
         /**
-         * If {@code true}, mirror generated attachable/geometry/animation JSON
-         * files under {@code <plugin>/debug/auto_pack/} for inspection. Has no
-         * effect on the live Bedrock pack contents.
-         */
-        public boolean debugDumpArtifacts() {
-            return debugDumpArtifacts;
-        }
-
-        /**
          * The fixed first-person base pose applied to the attachable root
          * bone. Bedrock's first-person arm frame differs from Java's
          * camera-space item frame, so this constant maps one onto the other;
@@ -872,10 +923,11 @@ public final class GeyserExtraConfig {
 
         /**
          * Whether the operator explicitly configured a first-person base
-         * pose. When {@code true}, the attachable writer honours the manual
-         * pose even for 3D (elements) models instead of the automatic
-         * Rainbow-derived first-person conversion — the config acts as an
-         * escape hatch for models the automatic mapping gets wrong.
+         * pose. When {@code true}, {@link #firstPersonBasePose()} returns that
+         * override instead of {@link BasePose#FIRST_PERSON_DEFAULT}. The
+         * writer applies this override only to 3D ({@code elements}) items;
+         * texture-only flat items always use {@link BasePose#FIRST_PERSON_DEFAULT}
+         * so CMD texture-swap swords keep vanilla hold framing.
          */
         public boolean hasExplicitFirstPersonBasePose() {
             return firstPersonBasePose != null;
@@ -888,8 +940,58 @@ public final class GeyserExtraConfig {
          */
         public static final class BasePose {
 
+            /**
+             * Default for {@link AttachableGenerationConfig#firstPersonHeightOffset()}:
+             * the correction that pulls the first-person item back down toward
+             * the hand, in model units (1 unit = 1 texture pixel). <b>Added</b>
+             * to the root position's Y.
+             *
+             * <p>Both java2bedrock's 3D pose and this project's flat pose sat
+             * about one item-height above the hand. The value is bisected from
+             * in-game reports, not computed: {@code 0} read as one item too
+             * high; {@code 16} (one item-height, matching the observed gap),
+             * {@code 8} and {@code 4} clearly too low, then {@code 3} slightly
+             * low, {@code 2} and {@code 2.5} too high. Settled on {@code 2.7}
+             * by the operator's call. The usable range is under one unit wide
+             * and the root carries a {@code [90,60,-40]} rotation, so this Y is
+             * not screen-vertical -- one screen item-height is far less than 16
+             * units of it, which is why estimating the offset from the apparent
+             * gap overshoots, and why there is no gap-to-units conversion to
+             * derive the value from.</p>
+             *
+             * <p><b>The sign is empirical, not derived.</b> This constant was
+             * first applied as a subtraction on the assumption that +Y is
+             * screen-up in the bound {@code rightitem} bone's frame — the way
+             * it reads in the third-person ({@code y = 13}) and head
+             * ({@code y = 19.9}) poses. In game the item moved <i>further</i>
+             * above the hand, so in the first-person arm frame the axis runs
+             * the other way and the correction is additive. Anchoring poses off
+             * the third-person frame is therefore unsafe; only in-game
+             * observation settles first-person.</p>
+             *
+             * <p>Kept as one named constant so the flat and 3D poses cannot
+             * drift apart — they were reported equally high, which is only
+             * consistent with a shared cause.</p>
+             */
+            public static final float FIRST_PERSON_HEIGHT_TRIM = 2.7f;
+
             private static final float[] DEFAULT_ROTATION = {90f, 60f, -40f};
+            /**
+             * Kas-tle java2bedrock.sh first-person root position, lowered by
+             * {@link #FIRST_PERSON_HEIGHT_TRIM} on Y.
+             *
+             * <p>Left at the stock reference value. The in-game height
+             * correction is applied at build time from
+             * {@link AttachableGenerationConfig#firstPersonHeightOffset()} so
+             * one operator-tunable number moves the flat and 3D poses
+             * together.</p>
+             */
             private static final float[] DEFAULT_POSITION = {4f, 10f, 4f};
+            /**
+             * Kas-tle java2bedrock.sh first-person root scale. Oversized items
+             * lerp toward {@code base * 0.75} in {@code BedrockAttachableWriter}
+             * (greataxe at display scale 1.7).
+             */
             private static final float DEFAULT_SCALE = 1.5f;
 
             /** java2bedrock's first-person main-hand constants. */

@@ -1,0 +1,31 @@
+# GeyserExtra (Paper 側) のブートストラップ設定。
+#
+# 本体の設定は JSON 側 (config.json) にあります。このファイルは「その
+# config.json をどこから読むか」だけを決めるため、鶏と卵を避けて分離して
+# あります。
+#
+# extension-data-folder:
+#   GeyserExtra 拡張のデータフォルダ
+#   (<Geyser>/extensions/geyserextra) への絶対パス。
+#
+#   空欄なら、この Paper サーバの plugins/ 配下から Geyser のフォルダを
+#   自動検出します。単一サーバ構成 (Geyser-Spigot が同じサーバに居る)
+#   ならそのままで動きます。
+#
+#   Velocity / BungeeCord プロキシ構成では Geyser がプロキシ側に居るため
+#   自動検出は必ず失敗します。放置すると存在しない Geyser-Spigot
+#   フォルダを勝手に作り、生成したリソースパックをそこへ書き込むので、
+#   統合版クライアントにパックが配信されません (＝カスタムアイテムが
+#   全部消えます)。プロキシ構成では必ずここを設定してください。
+#
+#   Windows の例:
+#     extension-data-folder: 'D:/game/minecraft/proxy/plugins/Geyser-Velocity/extensions/geyserextra'
+#   Linux の例:
+#     extension-data-folder: '/srv/mc/proxy/plugins/Geyser-Velocity/extensions/geyserextra'
+#
+#   プロキシとバックエンドが別マシンの場合はこの方法では届きません
+#   (ファイルシステムを共有している必要があります)。
+#
+#   システムプロパティ -Dgeyserextra.data-folder=... でも上書きできます。
+#   優先順位: システムプロパティ > このファイル > 自動検出。
+extension-data-folder: ''

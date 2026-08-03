@@ -29,10 +29,12 @@ import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
+import org.bukkit.event.entity.EntityPickupItemEvent;
 import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.InventoryCloseEvent;
 import org.bukkit.event.inventory.InventoryType;
 import org.bukkit.event.inventory.PrepareAnvilEvent;
+import org.bukkit.event.player.PlayerDropItemEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.inventory.AnvilInventory;
 import org.bukkit.inventory.ItemStack;
@@ -176,10 +178,12 @@ public final class BedrockEnchantmentHandler implements Listener {
         // model framework plugins, NBT injectors) typically runs at NORMAL/HIGH;
         // we run last so the displayName fallback and CMD strip see the most
         // up-to-date payload and are not silently overwritten by a later
-        // listener. The packet is only mutated when isBedrockPlayer(player) is
-        // true, so Java clients are unaffected and there is no contention with
-        // other plugins' Java-side modifications.
-        PacketListener listener = new PacketAdapter(
+        // listener.
+        //
+        // Java clients: if a prior Bedrock Creative write-back burned [GE]
+        // lore into the server ItemStack, strip it on the way out so Java
+        // players never see the Bedrock-only tooltip.
+        PacketListener outbound = new PacketAdapter(
             plugin,
             ListenerPriority.HIGHEST,
             PacketType.Play.Server.SET_SLOT,
@@ -194,9 +198,6 @@ public final class BedrockEnchantmentHandler implements Listener {
                         handleWindowItemsPacket(event);
                     }
                 } catch (Exception e) {
-                    // Why log full stack trace: e.getMessage() alone yields "null" on
-                    // many ProtocolLib internal failures (NPE, ClassCastException),
-                    // erasing all diagnostic information.
                     BedrockEnchantmentHandler.this.plugin.getLogger().log(
                         Level.WARNING,
                         "BedrockEnchantmentHandler: Error processing "
@@ -206,8 +207,33 @@ public final class BedrockEnchantmentHandler implements Listener {
                 }
             }
         };
-        protocolManager.addPacketListener(listener);
-        registeredListeners.add(listener);
+        protocolManager.addPacketListener(outbound);
+        registeredListeners.add(outbound);
+
+        // Bedrock Creative (and similar client-authoritative paths) can write
+        // the lore-injected packet ItemStack back onto the server. Strip [GE]
+        // on inbound creative set-slot before the server stores it.
+        PacketListener inbound = new PacketAdapter(
+            plugin,
+            ListenerPriority.HIGHEST,
+            PacketType.Play.Client.SET_CREATIVE_SLOT
+        ) {
+            @Override
+            public void onPacketReceiving(PacketEvent event) {
+                try {
+                    handleCreativeSlotInbound(event);
+                } catch (Exception e) {
+                    BedrockEnchantmentHandler.this.plugin.getLogger().log(
+                        Level.WARNING,
+                        "BedrockEnchantmentHandler: Error stripping [GE] lore on "
+                            + "SET_CREATIVE_SLOT",
+                        e
+                    );
+                }
+            }
+        };
+        protocolManager.addPacketListener(inbound);
+        registeredListeners.add(inbound);
     }
 
     /**
@@ -228,13 +254,18 @@ public final class BedrockEnchantmentHandler implements Listener {
      */
     private void handleSetSlotPacket(PacketEvent event) {
         Player player = event.getPlayer();
+        PacketContainer packet = event.getPacket();
+        ItemStack item = packet.getItemModifier().read(0);
+
         if (!isBedrockPlayer(player)) {
+            ItemStack cleaned = stripInjectedLoreFromItem(item);
+            if (cleaned != null) {
+                packet.getItemModifier().write(0, cleaned);
+            }
             return;
         }
 
         UUID playerId = getPlayerUuidSafely(player);
-        PacketContainer packet = event.getPacket();
-        ItemStack item = packet.getItemModifier().read(0);
 
         boolean targetsEnchantInput = playerId != null
             && stripper.isEnchantmentTableInputSlot(playerId, packet);
@@ -277,16 +308,35 @@ public final class BedrockEnchantmentHandler implements Listener {
      */
     private void handleWindowItemsPacket(PacketEvent event) {
         Player player = event.getPlayer();
-        if (!isBedrockPlayer(player)) {
-            return;
-        }
-
-        UUID playerId = getPlayerUuidSafely(player);
         PacketContainer packet = event.getPacket();
         List<ItemStack> items = packet.getItemListModifier().read(0);
         if (items == null || items.isEmpty()) {
             return;
         }
+
+        if (!isBedrockPlayer(player)) {
+            List<ItemStack> cleanedList = null;
+            for (int i = 0; i < items.size(); i++) {
+                ItemStack cleaned = stripInjectedLoreFromItem(items.get(i));
+                if (cleaned != null) {
+                    if (cleanedList == null) {
+                        cleanedList = new ArrayList<>(items.size());
+                        for (int j = 0; j < i; j++) {
+                            cleanedList.add(items.get(j));
+                        }
+                    }
+                    cleanedList.add(cleaned);
+                } else if (cleanedList != null) {
+                    cleanedList.add(items.get(i));
+                }
+            }
+            if (cleanedList != null) {
+                packet.getItemListModifier().write(0, cleanedList);
+            }
+            return;
+        }
+
+        UUID playerId = getPlayerUuidSafely(player);
 
         boolean isEnchantingTableWindow = playerId != null
             && stripper.isEnchantmentTableWindow(playerId, packet);
@@ -950,6 +1000,61 @@ public final class BedrockEnchantmentHandler implements Listener {
     }
 
     /**
+     * Strips {@link #INJECTED_LORE_MARKER} lore from a creative-mode inbound
+     * set-slot so Bedrock clients cannot persist packet-injected tooltips on
+     * the server ItemStack.
+     */
+    private void handleCreativeSlotInbound(PacketEvent event) {
+        Player player = event.getPlayer();
+        if (!isBedrockPlayer(player)) {
+            return;
+        }
+        PacketContainer packet = event.getPacket();
+        ItemStack item = packet.getItemModifier().read(0);
+        ItemStack cleaned = stripInjectedLoreFromItem(item);
+        if (cleaned != null) {
+            packet.getItemModifier().write(0, cleaned);
+        }
+    }
+
+    /**
+     * Returns a clone with every {@link #INJECTED_LORE_MARKER} lore line
+     * removed, or {@code null} when the item has none (caller keeps the
+     * original reference).
+     */
+    private static ItemStack stripInjectedLoreFromItem(ItemStack item) {
+        if (!containsInjectedLoreMarker(item)) {
+            return null;
+        }
+        ItemStack cloned = item.clone();
+        ItemMeta meta = cloned.getItemMeta();
+        if (meta == null) {
+            return null;
+        }
+        List<Component> cleaned = stripInjectedLore(meta.lore());
+        meta.lore(cleaned.isEmpty() ? null : cleaned);
+        cloned.setItemMeta(meta);
+        return cloned;
+    }
+
+    /**
+     * Mutates {@code item} in place when it carries injected lore. Used for
+     * server-side stacks already contaminated by Creative write-back.
+     */
+    private static void stripInjectedLoreInPlace(ItemStack item) {
+        if (!containsInjectedLoreMarker(item)) {
+            return;
+        }
+        ItemMeta meta = item.getItemMeta();
+        if (meta == null) {
+            return;
+        }
+        List<Component> cleaned = stripInjectedLore(meta.lore());
+        meta.lore(cleaned.isEmpty() ? null : cleaned);
+        item.setItemMeta(meta);
+    }
+
+    /**
      * Returns a copy of {@code lore} with every line that begins with
      * {@link #INJECTED_LORE_MARKER} removed. Returns an empty list when the
      * input is null. This is what guarantees the tooltip can't accumulate
@@ -1342,6 +1447,42 @@ public final class BedrockEnchantmentHandler implements Listener {
             && event.getPlayer() instanceof Player player) {
             bedrockAnvilCache.remove(player.getUniqueId());
         }
+    }
+
+    /**
+     * Removes burned-in {@code [GE]} lore from server ItemStacks during
+     * normal inventory interaction so Java recipients never keep Bedrock
+     * packet-injected tooltips.
+     */
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onInventoryClickStripInjectedLore(InventoryClickEvent event) {
+        if (!enabled) {
+            return;
+        }
+        stripInjectedLoreInPlace(event.getCurrentItem());
+        stripInjectedLoreInPlace(event.getCursor());
+    }
+
+    /**
+     * Strips {@code [GE]} lore from items dropped onto the ground.
+     */
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onPlayerDropStripInjectedLore(PlayerDropItemEvent event) {
+        if (!enabled) {
+            return;
+        }
+        stripInjectedLoreInPlace(event.getItemDrop().getItemStack());
+    }
+
+    /**
+     * Strips {@code [GE]} lore when an item entity is picked up.
+     */
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onPickupStripInjectedLore(EntityPickupItemEvent event) {
+        if (!enabled) {
+            return;
+        }
+        stripInjectedLoreInPlace(event.getItem().getItemStack());
     }
 
     /**

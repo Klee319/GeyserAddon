@@ -73,17 +73,31 @@ GeyserExtra は Java の `display` ブロックと Blockbench `elements` を Bed
   - `off` — attachable 生成を完全に無効化。pre-feature 版とバイナリ完全一致 (緊急ロールバック)。
 - `customItems.attachableGeneration.force_first_person_only` — `hold_third_person` アニメを書き出さない緊急回避フラグ
 - `customItems.attachableGeneration.debug_dump_artifacts` — 生成 JSON を `<plugin>/debug/auto_pack/` に複製保存（将来拡張用、現状は未使用）
-- **一人称／三人称の変換方式**: `elements` を持つ 3D モデルは、GeyserMC 公式コンバータ [Rainbow](https://github.com/GeyserMC/Rainbow) と同型の**単一 bone**（`binding` + 変換後キューブ bounds 中心 pivot + cubes）に、FP/TP 両方の AnimationMapper 式を載せます。FP: rotation `(-90+ry, -rz, rx)` / position `(-ty, 12.5+tz, tx)`。TP: rotation `(90, -rz, -ry)` / position `(-tx, 12.5+tz, -ty)`。固定 pivot `[0,8,0]` の多段チェーンは使いません。平面アイテム (elements なし、`texture_meshes` 系) と、`firstPersonBasePose` を明示したエスケープハッチ時のみ従来の java2bedrock 分解を使用します。
-- `customItems.attachableGeneration.firstPersonBasePose` — 一人称視点の基準姿勢の**手動上書き**。設定すると 3D モデルも Rainbow 変換ではなくこの姿勢 + java2bedrock 分解回転で描画されます (自動変換が合わないモデル向けのエスケープハッチ)。未設定時の平面アイテム用既定値は java2bedrock 由来 (rotation `[90, 60, -40]`, position `[4, 10, 4]`, scale `1.5`):
+- **Auto pack manifest version**: `geyserextra_auto.zip` の patch（version[2]）は内容ハッシュを単調増加で底上げします（Bedrock は同一 UUID で version が下がると更新を無視するため）。前回値は同ディレクトリの `geyserextra_auto.zip.pack_version` に保存されます。
+- **Auto pack 配信**: Extension は `SessionLoadResourcePacksEvent` で接続ごとにディスク上の ZIP を再登録します（`GeyserDefineResourcePacks` 時点の古いバイトが残り続けるのを防ぐ）。Paper が書いた `geyserextra_auto.pending.zip` もこのタイミングで昇格します。
+- **一人称／三人称の変換方式**: flat / 3D とも [java2bedrock](https://github.com/Kas-tle/java2bedrock.sh) の bone チェーン `root → x → y → z`（3D は cubes 用 leaf `geyserextra_geo`、pivot は Java モデル空間中心 `[0,8,0]`）を使います。root にスロット別 base pose、Java `display` の回転・平行移動・スケールを `x`/`y`/`z` に分解します。GeyserMC Rainbow 単 bone 経路は既定では使いません（Valhalla 系 FP/TP で実機不一致）。
+- **一人称の合成規則**: root base pose は**全アイテム共通の固定値**です（display.scale による補正は行いません）。アイテムごとの差は Java `display` 側だけが持ちます。
+  - `x` bone の position＝Java `display` 平行移動を変換したもの。**root の scale で割ってから**書き出します。Bedrock は親 bone の scale が子 bone の position にも掛かる一方、Java の `ItemTransform#apply` は手座標系で平行移動してから model を scale するため、割らないと平行移動だけが root scale 倍に膨らみます（大斧 `[0,4,-9]` / 長槍 `[-5.25,-7.25,-1]` が画面外へ飛ぶ原因でした）。
+  - Java 側の平行移動を捨てる処理はありません（旧 `debugZeroFirstPersonTranslation` は削除）。捨てると全アイテムが同じ位置になり、どの定数でも同時に合わせられなくなります。
+- **オフハンド**: `*_lefthand` があればその値を、無ければ右手値を使い（Mojang と同じフォールバック）、**どちらの場合も** Java 自身の左手則（rotation Y/Z を反転・translation X を反転）を適用してから Bedrock へ変換します。X は Bedrock 側の X ミラーと打ち消し合うので宣言値が残ります。
+- **一人称のオフハンド root**: ベースポーズも左右対称でないためミラーします（rotation `(x, -y, -z)` / position `(-x, y, z)`）。三人称のベースポーズ `[90,0,0] / [0,13,-3]` は元々ミラー不変なので両手で同一です。
+- `customItems.attachableGeneration.rainbowFirstPersonMapping`（既定 `false`）— 一人称のフレーム定義を GeyserMC Rainbow 方式（単 bone ＋軸置換 `X→Z, Y→X, Z→Y`、base `-90°` / `+12.5Y`、root scale なし）に切り替えます。既定は java2bedrock 方式（多段 bone ＋ root scale）。**どちらが実機で Java に近いかは実機比較でしか決まらない**ため、再ビルド無しで A/B できるようにしてあります。三人称は両者一致で影響しません。
+- **3D アイテムのインベントリ絵**: `elements` を持つモデルは、パック生成時にモデルを**オフラインでラスタライズ**してアイコン PNG を焼きます（`ItemIconRenderer`）。3D モデルのテクスチャは UV アトラスなので、そのままアイコンに使うと UV シートが表示されるためです。Java がインベントリ描画時に毎回やっていることを事前計算に移したもので、インベントリ・ドロップ・額縁が同時に直ります（**立体にはなりません** — attachable は装備スロット専用）。生 PNG は attachable が UV サンプリングするため `textures/items/<base>.png` に残し、焼いたアイコンは `<base>_gui.png` に置いて `item_texture.json` だけをそちらに向けます。レンダリング失敗時は従来の 2D アフィン bake にフォールバックします。
+- **visible bounds とアイテムの移動量**: 箱はメッシュの宣言位置だけでなく、そのアイテム自身の display 平行移動（最大 26 単位に達するものがある）も含めて算出します。Bedrock はこの AABB でカリングするため、箱が実描画位置を含まないと「静止時は消えてアニメで動いた時だけ見える」挙動になります。
+- **面 UV 回転**: Java の `faces[*].rotation` は Bedrock の per-face `uv_rotation` にそのまま渡します（geometry format `1.21.0` 以降。90/180/270）。`uv_rotation` を実際に出したモデルだけ format を `1.21.0` に上げ、それ以外は `1.16.0` のままにします。
+  **format を上げたときはパック `manifest.json` の `min_engine_version` も `[1, 21, 0]` に連動させます**（GeyserMC Rainbow が `PackConstants.ENGINE_VERSION` と `BedrockGeometry.FORMAT_VERSION` を揃えているのと同じ理由）。1.16.100 を宣言したパックに 1.21.0 の geometry を入れると、クライアントが古い解釈で読むため per-face UV が崩れ、3D モデルのテクスチャが総崩れになります。
+- `customItems.attachableGeneration.faceUvRotation`（既定 `true`）— 上の機能の**ロールバック用スイッチ**。`false` にすると `uv_rotation` を出さず、180° は旧来の UV 矩形の点対称化で近似、90°/270° は破棄し、geometry は全て `1.16.0` / manifest は `1.16.100` のままになります。1.21.0 パックを読めない古いクライアントを抱える場合や、3D テクスチャの切り分けに使ってください（側面テクスチャが 90° ずれる代わりに、クライアントを選びません）。
+- **visible bounds**: 変換後 cube の AABB × display scale × root scale から算出し、java2bedrock 既定 `4 / 4.5 / [0,0.75,0]` を**下回らない**範囲で拡大します（Rainbow も同じ定数に `TODO that's wrong` を付けています）。
+- `customItems.attachableGeneration.firstPersonBasePose` — 一人称 root の**3D アイテム向け**任意上書き。未設定時（およびテクスチャ差し替え flat）は java2bedrock 既定 rotation `[90, 60, -40]`, position `[4, 10, 4]`, scale **`1.5`**。**既定のままを推奨**します（旧 oversize 補正を前提に調整した上書きが残っていると、その補正が無くなった今はズレます）。上書きする場合の書式:
 
 ```json
 {
   "customItems": {
     "attachableGeneration": {
       "firstPersonBasePose": {
-        "rotation": [90, 60, -40],
-        "position": [4, 10, 4],
-        "scale": 1.5
+        "rotation": [90, 60, -28],
+        "position": [25, 7, 10],
+        "scale": 3.2
       }
     }
   }
@@ -95,16 +109,23 @@ GeyserExtra は Java の `display` ブロックと Blockbench `elements` を Bed
 **既知の制限 (妥協を明示):**
 - ブロックモデル (非 `item/`) は対象外
 - マテリアル指定は `entity_alphatest` 固定
-- `display.head` / `display.ground` / `display.fixed` は未対応 (手持ち時の slot のみ)
+- `display.head` / `display.fixed` は手持ち attachable 未対応
+- 全カスタム INV アイコンは `display.gui` bake のみ（`_gui.png`、trim/crop なし）。手持ち用生 PNG は非対象。ドロップ専用 3D 分離は不可
 - 複数 texture variable (`#layer0` 以外) を使うモデルは default texture のみ反映 (Bedrock `material_instances` 未実装、Phase 7 候補)
 - Java face 単位のテクスチャ rotation サポート:
   - `0` / `180` — ✓ 完全対応 (180° は Bedrock の negative uv_size で表現)
   - `90` / `270` — △ Bedrock 1.16.0 per-face UV では U/V 軸入れ替えを表現できないため、該当 face は **rotation 0 として近似描画** (FINE ログのみ)。正確に一致させたい場合は PNG 側でテクスチャを pre-rotate して JSON 側の rotation を 0 に。
 - `faces` が空の element は **invisible として cube 自体を omit**。Mojang セマンティクス準拠。
 
-**インベントリアイコンの `display.gui` 焼き込み:**
+**インベントリ／ドロップアイコン:**
 
-Java はインベントリアイコンも 3D モデルを `display.gui` の変換 (scale / rotation / translation) 付きでレンダリングしますが、Bedrock はスプライト PNG を等倍表示するだけです。GeyserExtra はパック生成時に `display.gui` の 2D 表現可能成分 (X/Y scale, Z rotation, X/Y translation) をアイコン PNG に焼き込み、Java 版とアイコンサイズが揃うようにします (例: ValhallaMMO 武器の gui scale `1.3913`)。X/Y 軸の rotation 成分は平面スプライトでは表現できないため無視されます (正面向き `[90, 0, 0]` 等は元々 no-op)。
+Geyser の icon キーは通常1つ（INV＝ドロップ共通）。全カスタムアイテムで Java `display.gui` を 2D bake（`item_texture` のみ `_gui.png`）。trim/crop はしない（非正方 crop がスロットでゆがむため）。手持ち attachable は生 PNG のまま。`display.ground` は焼かない。
+
+**テクスチャ差し替えだけの剣（`item/handheld` + layer0、elements なし）:**
+
+例: `infinity_sword`。attachable は flat（`texture_meshes`）＋バニラ handheld display 注入＋**flat 専用 FP**（`[90,60,-40]/[0,15,4]/1.75`、translation 維持）。3D 用 `firstPersonBasePose` は使わない。3D（elements あり）だけが operator の `firstPersonBasePose` を使います。
+
+**`[GE]` lore:** Bedrock 向けパケット注入のみ。Creative 書き戻し／ドロップ／クリック／Java 向け送信時に strip し、Java プレイヤに残さない。
 
 **カスタムアイテムのCTチャージゲージ:**
 
@@ -220,8 +241,8 @@ Bedrockクライアントが表示できないエンチャント情報と耐久�
 ```
 
 **特徴:**
-- ProtocolLibパケットレベルで改変するため、サーバー側のアイテムデータは変更されない
-- Javaプレイヤーには影響なし（Bedrockプレイヤーのみ）
+- ProtocolLibパケットレベルで改変（Bedrock向け）。注入行は `[GE]` マーカー付き
+- Creative 書き戻し／クリック／ドロップ／拾得／Java 向け送信時に `[GE]` を strip し、サーバ汚染と Java 側の残留を防ぐ
 - バニラ風の日本語表記（呪いは赤色表示）
 
 ### 4. 金床オーバーエンチャント保護

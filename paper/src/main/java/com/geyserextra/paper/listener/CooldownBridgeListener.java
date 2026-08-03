@@ -40,6 +40,26 @@ public final class CooldownBridgeListener implements Listener {
     private final CustomItemScanner scanner;
     private final Map<UUID, RecentMapping> recentMappings = new ConcurrentHashMap<>();
 
+    /**
+     * Emits a per-event cooldown boundary trace, but only when
+     * {@code general.debugMode} is set.
+     *
+     * <p>Logged at INFO rather than FINE on purpose: the server runtime's
+     * handler is pinned to INFO, so FINE records are dropped before they reach
+     * the console and the trace would be invisible exactly when it is wanted.
+     *
+     * <p>Only cooldown-bearing events reach this. The per-input traces that
+     * used to sit on interact, arm swing and melee damage are gone: they fired
+     * on every click and swing, which flooded a console that had debugMode on
+     * for unrelated reasons, and they told nothing that the cooldown_event
+     * trace does not already carry at the point the mapping is chosen.</p>
+     */
+    private void diagnostic(String message) {
+        if (plugin.getGeyserExtraConfig().general().debugMode()) {
+            plugin.getLogger().info(message);
+        }
+    }
+
     public CooldownBridgeListener(GeyserExtraPaper plugin, CustomItemScanner scanner) {
         this.plugin = plugin;
         this.scanner = scanner;
@@ -55,12 +75,6 @@ public final class CooldownBridgeListener implements Listener {
         // call setCooldown from the same interaction event. MONITOR is too
         // late: PlayerItemGroupCooldownEvent is nested inside setCooldown.
         Optional<CustomItemMapping> mapping = scanner.scanItem(event.getItem());
-        if (BedrockPlayerUtil.isBedrockPlayer(event.getPlayer())) {
-            plugin.getLogger().info("[CooldownBridge:diagnostic] interact"
-                + " player=" + event.getPlayer().getName()
-                + " action=" + event.getAction()
-                + " mapping=" + mappingLabel(mapping));
-        }
         mapping.ifPresent(value ->
             recentMappings.put(event.getPlayer().getUniqueId(),
                 new RecentMapping(value, System.nanoTime())));
@@ -74,11 +88,6 @@ public final class CooldownBridgeListener implements Listener {
         Player player = event.getPlayer();
         Optional<CustomItemMapping> mapping =
             scanner.scanItem(player.getInventory().getItemInMainHand());
-        if (BedrockPlayerUtil.isBedrockPlayer(player)) {
-            plugin.getLogger().info("[CooldownBridge:diagnostic] arm_swing"
-                + " player=" + player.getName()
-                + " mapping=" + mappingLabel(mapping));
-        }
         mapping.ifPresent(value ->
             recentMappings.put(player.getUniqueId(),
                 new RecentMapping(value, System.nanoTime())));
@@ -92,11 +101,6 @@ public final class CooldownBridgeListener implements Listener {
         // Melee weapons often set cooldown from damage events without interact.
         Optional<CustomItemMapping> mapping =
             scanner.scanItem(player.getInventory().getItemInMainHand());
-        if (BedrockPlayerUtil.isBedrockPlayer(player)) {
-            plugin.getLogger().info("[CooldownBridge:diagnostic] melee_damage"
-                + " player=" + player.getName()
-                + " mapping=" + mappingLabel(mapping));
-        }
         mapping.ifPresent(value ->
             recentMappings.put(player.getUniqueId(),
                 new RecentMapping(value, System.nanoTime())));
@@ -107,7 +111,7 @@ public final class CooldownBridgeListener implements Listener {
         Player player = event.getPlayer();
         String sourceGroup = event.getCooldownGroup().toString();
         if (CustomItemCooldownGroups.isSynthetic(sourceGroup)) {
-            plugin.getLogger().info("[CooldownBridge:diagnostic] synthetic event"
+            diagnostic("[CooldownBridge:diagnostic] synthetic event"
                 + " player=" + player.getName()
                 + " group=" + sourceGroup
                 + " ticks=" + event.getCooldown());
@@ -123,11 +127,10 @@ public final class CooldownBridgeListener implements Listener {
         Optional<CustomItemMapping> selected =
             CooldownMappingSelector.select(sourceGroup, main, off, recent);
 
-        // Temporary INFO-level boundary trace. FINE is not visible with the
-        // runtime's INFO logger even when GeyserExtra debugMode is enabled.
-        // This shows whether the loss occurs before selection, during the
-        // synthetic Paper event, or later in Geyser/Bedrock translation.
-        plugin.getLogger().info("[CooldownBridge:diagnostic] cooldown_event"
+        // Boundary trace: shows whether the loss occurs before selection,
+        // during the synthetic Paper event, or later in Geyser/Bedrock
+        // translation. Gated by debugMode -- see diagnostic().
+        diagnostic("[CooldownBridge:diagnostic] cooldown_event"
             + " player=" + player.getName()
             + " bedrock=" + bedrock
             + " source=" + sourceGroup
@@ -159,7 +162,7 @@ public final class CooldownBridgeListener implements Listener {
             // synthetic-namespace guard above stops it immediately while the
             // resulting ClientboundCooldownPacket continues through Geyser to
             // PlayerStartItemCooldownPacket.
-            plugin.getLogger().info("[CooldownBridge:diagnostic] mirror"
+            diagnostic("[CooldownBridge:diagnostic] mirror"
                 + " player=" + player.getName()
                 + " source=" + sourceGroup
                 + " target=" + key

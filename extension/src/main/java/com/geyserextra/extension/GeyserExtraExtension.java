@@ -8,6 +8,7 @@ import com.geyserextra.core.config.GeyserExtraConfig;
 import com.geyserextra.extension.handler.CustomItemsHandler;
 import com.geyserextra.extension.handler.CustomSkullsHandler;
 import org.geysermc.event.subscribe.Subscribe;
+import org.geysermc.geyser.api.event.bedrock.SessionLoadResourcePacksEvent;
 import org.geysermc.geyser.api.event.lifecycle.GeyserDefineCustomItemsEvent;
 import org.geysermc.geyser.api.event.lifecycle.GeyserDefineCustomSkullsEvent;
 import org.geysermc.geyser.api.event.lifecycle.GeyserDefineResourcePacksEvent;
@@ -22,6 +23,8 @@ import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.util.List;
+import java.util.UUID;
 import java.util.zip.ZipFile;
 
 /**
@@ -34,6 +37,16 @@ import java.util.zip.ZipFile;
 public class GeyserExtraExtension implements Extension {
 
     private static final String CONFIG_FILE = "config.json";
+    /**
+     * Header UUIDs used by {@code AutoBedrockPackBuilder} (current + recent).
+     * Session join re-reads the ZIP from disk and replaces any stale
+     * DefineResourcePacks-time registration that still points at old bytes.
+     */
+    private static final List<UUID> AUTO_PACK_HEADER_UUIDS = List.of(
+        UUID.fromString("9d8c1e76-2a3b-4c5d-9e6f-1a2b3c4d5e6f"),
+        UUID.fromString("9d8c1e76-2a3b-4c5d-9e6f-1a2b3c4d5e70"),
+        UUID.fromString("9d8c1e76-2a3b-4c5d-9e6f-1a2b3c4d5e71")
+    );
 
     private GeyserExtraConfig config;
     private CustomItemsHandler customItemsHandler;
@@ -182,8 +195,65 @@ public class GeyserExtraExtension implements Extension {
 
         // Auto-generated pack from Paper plugin's CustomItem registry. May be absent on
         // first launch (Paper hasn't built it yet) — that is OK; it ships next start.
+        // Prefer SessionLoadResourcePacks for the live bytes; this Define-time
+        // registration is a fallback for clients that only see the global list.
         if (config.customItems().enabled()) {
             registerAutoCustomItemsPack(event);
+        }
+    }
+
+    /**
+     * Re-binds the auto pack from disk for each Bedrock session. Geyser caches
+     * packs registered in {@link GeyserDefineResourcePacksEvent}; Paper may
+     * rebuild {@code geyserextra_auto.zip} afterward, so Define-time bytes go
+     * stale. Session-time {@link PackCodec#path} + register replaces them.
+     *
+     * <p>The unregister runs <em>before</em> the file check, and that ordering
+     * is the whole point. A pack registered at Define time stays in Geyser's
+     * global list for the rest of the proxy's life; Geyser stats the file again
+     * for every login, to size the pack info packet. If the ZIP is deleted
+     * after Define time — the Paper backend restarting into a rebuild, an
+     * operator clearing {@code packs/}, a backup job — that stat throws
+     * {@code NoSuchFileException} out of {@code infoPacketEntries} and
+     * <b>every Bedrock player fails to join</b>, custom items or not. Returning
+     * early on a missing file (the previous order) left the dead registration
+     * in place and made that permanent until a proxy restart.</p>
+     *
+     * <p>Dropping the registration first degrades the same situation to "no
+     * custom items this session", and the next session picks the pack back up
+     * as soon as Paper regenerates it. The proxy topology makes this worth
+     * guarding: the file is written by a different process on a different
+     * lifecycle, so the window where it is absent is real rather than
+     * theoretical.</p>
+     */
+    @Subscribe
+    public void onSessionLoadResourcePacks(SessionLoadResourcePacksEvent event) {
+        if (config == null || !config.customItems().enabled()) {
+            return;
+        }
+        Path packFile = dataFolder().resolve("packs").resolve("geyserextra_auto.zip");
+        promotePendingAutoPack(packFile);
+        for (UUID uuid : AUTO_PACK_HEADER_UUIDS) {
+            try {
+                event.unregister(uuid);
+            } catch (Exception ignored) {
+                // Not present in this session's pack list — fine.
+            }
+        }
+        if (!Files.isRegularFile(packFile)) {
+            logger().warning("Auto custom items pack is missing at " + packFile
+                + " — dropping its registration for this session so Bedrock"
+                + " players can still join. It returns once the Paper backend"
+                + " regenerates it.");
+            return;
+        }
+        try {
+            ResourcePack pack = ResourcePack.create(PackCodec.path(packFile));
+            event.register(pack);
+            logger().debug("Session-registered auto custom items pack from disk: " + packFile);
+        } catch (Exception e) {
+            logger().warning("Failed to session-register auto custom items pack: "
+                + e.getMessage());
         }
     }
 
@@ -246,6 +316,17 @@ public class GeyserExtraExtension implements Extension {
             Path activeSidecar = dataFolder().resolve("block_icon_bases.json");
             if (Files.isRegularFile(pendingSidecar)) {
                 Files.move(pendingSidecar, activeSidecar,
+                    StandardCopyOption.REPLACE_EXISTING);
+            }
+            // Monotonic manifest patch sidecar lives next to the ZIP. The
+            // pending ZIP was moved above; the sidecar still uses the pending
+            // file name until renamed to match the active ZIP.
+            Path pendingPackVersion = activePack.resolveSibling(
+                "geyserextra_auto.pending.zip.pack_version");
+            Path activePackVersion = activePack.resolveSibling(
+                activePack.getFileName() + ".pack_version");
+            if (Files.isRegularFile(pendingPackVersion)) {
+                Files.move(pendingPackVersion, activePackVersion,
                     StandardCopyOption.REPLACE_EXISTING);
             }
             logger().debug("Promoted pending auto custom items pack.");

@@ -4,6 +4,7 @@ import com.geyserextra.core.api.CustomItemMapping;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -33,6 +34,10 @@ class ItemMappingRegistryItemModelTest {
         ));
         Path file = tempDir.resolve("custom_items.json");
         registry.save(file);
+
+        String savedJson = Files.readString(file);
+        assertTrue(savedJson.contains("\"allow_offhand\": true"),
+            "saved mapping must explicitly allow offhand for Bedrock clients");
 
         ItemMappingRegistry loaded = new ItemMappingRegistry();
         loaded.load(file);

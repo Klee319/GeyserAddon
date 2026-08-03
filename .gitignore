@@ -19,3 +19,7 @@ log/
 
 # Claude Code
 .claude/
+
+# 実機検証中に散らかる一時ファイル
+.tmp_*
+build-test-out.txt
