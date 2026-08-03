@@ -68,6 +68,19 @@ public final class ItemMappingRegistry {
     private final ReadWriteLock batchLock;
 
     /**
+     * Set when a load found the file present but unparseable.
+     *
+     * <p>This is the fail-closed latch for the全消失 path. The ledger is a
+     * persistent record that cannot be regenerated — PDC-path entries only
+     * come back by observing a live {@code ItemStack}, so a startup that
+     * silently starts from an empty registry and then saves destroys data no
+     * process can restore. While this flag is set, {@link #save(Path)} refuses
+     * to overwrite so the damaged file (and its {@code .bak}) survive for
+     * manual recovery.</p>
+     */
+    private volatile boolean loadFailed;
+
+    /**
      * Creates a new empty ItemMappingRegistry.
      */
     public ItemMappingRegistry() {
@@ -369,12 +382,27 @@ public final class ItemMappingRegistry {
      * to ensure consistent ordering across saves. This is important because
      * Geyser may use registration order for texture mapping.
      *
+     * <p>Written through a temp file and promoted with {@code ATOMIC_MOVE}, and
+     * the previous generation is kept as {@code &lt;name&gt;.bak}. A half-written
+     * ledger is unrecoverable: {@link #load(Path)} would find it unparseable and
+     * every PDC-path entry would need a live {@code ItemStack} to come back.</p>
+     *
+     * <p>Refuses to write while {@link #loadFailed} is set — see that field.</p>
+     *
      * @param path The path to save the mappings to
      * @throws IOException if an I/O error occurs
      * @throws NullPointerException if path is null
      */
     public void save(Path path) throws IOException {
         Objects.requireNonNull(path, "path must not be null");
+
+        if (loadFailed) {
+            LOGGER.severe(() -> "Refusing to overwrite " + path
+                + ": the existing file failed to parse at load time, so this registry"
+                + " does not hold its contents. Restore it from " + backupPath(path)
+                + " (or delete both to start over) and restart.");
+            return;
+        }
 
         batchLock.readLock().lock();
         try {
@@ -411,11 +439,40 @@ public final class ItemMappingRegistry {
                 Files.createDirectories(parent);
             }
 
-            Files.writeString(path, json);
+            writeAtomicWithBackup(path, json);
             LOGGER.fine(() -> "Saved " + mappingsByName.size() + " item mappings to " + path);
         } finally {
             batchLock.readLock().unlock();
         }
+    }
+
+    /**
+     * Writes {@code json} to {@code path} so that the file on disk is either the
+     * old content or the new content, never a truncated mix, and keeps the
+     * previous generation as {@code .bak}.
+     */
+    private static void writeAtomicWithBackup(Path path, String json) throws IOException {
+        Path tmp = path.resolveSibling(path.getFileName() + ".tmp");
+        Files.writeString(tmp, json);
+        if (Files.exists(path)) {
+            // Copy rather than move: a move would leave no file at `path` for
+            // the window between the two operations, and a crash there is the
+            // same total loss this method exists to prevent.
+            Files.copy(path, backupPath(path), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        }
+        try {
+            Files.move(tmp, path,
+                java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+        } catch (java.nio.file.AtomicMoveNotSupportedException e) {
+            // Some network/virtual filesystems refuse ATOMIC_MOVE. A plain
+            // replace is still strictly better than writing over the original.
+            Files.move(tmp, path, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        }
+    }
+
+    private static Path backupPath(Path path) {
+        return path.resolveSibling(path.getFileName() + ".bak");
     }
 
     /**
@@ -499,11 +556,39 @@ public final class ItemMappingRegistry {
             throw new IOException("File does not exist: " + path);
         }
 
-        String json = Files.readString(path);
-        List<CustomItemMapping> mappings = parseJsonToMappings(json);
+        List<CustomItemMapping> mappings;
+        try {
+            mappings = parseJsonToMappings(Files.readString(path));
+            loadFailed = false;
+        } catch (CorruptLedgerException e) {
+            // The file exists but is not readable as a ledger. Before giving up,
+            // try the previous generation: this is exactly the case .bak is for.
+            Path backup = backupPath(path);
+            List<CustomItemMapping> recovered = null;
+            if (Files.exists(backup)) {
+                try {
+                    recovered = parseJsonToMappings(Files.readString(backup));
+                } catch (CorruptLedgerException ignored) {
+                    recovered = null;
+                }
+            }
+            if (recovered == null || recovered.isEmpty()) {
+                // Latch fail-closed. Starting empty and then saving would turn one
+                // interrupted write into permanent loss of every PDC-path entry.
+                loadFailed = true;
+                throw new IOException("Ledger " + path + " is corrupt and no usable "
+                    + backup.getFileName() + " is present; refusing to start from an"
+                    + " empty registry (saves are suppressed until this is resolved)", e);
+            }
+            final int recoveredCount = recovered.size();
+            LOGGER.warning(() -> "Ledger " + path + " was corrupt; recovered "
+                + recoveredCount + " mapping(s) from " + backup.getFileName());
+            mappings = recovered;
+            loadFailed = false;
+        }
 
-        if (mappings == null || mappings.isEmpty()) {
-            LOGGER.warning(() -> "Loaded empty or null mapping list from " + path);
+        if (mappings.isEmpty()) {
+            LOGGER.warning(() -> "Loaded empty mapping list from " + path);
             return;
         }
 
@@ -538,13 +623,27 @@ public final class ItemMappingRegistry {
         }
     }
 
+    /** Raised when a ledger file is present but cannot be read as one. */
+    private static final class CorruptLedgerException extends Exception {
+        CorruptLedgerException(String message, Throwable cause) {
+            super(message, cause);
+        }
+    }
+
     /**
      * Parses JSON to list of CustomItemMapping, supporting multiple formats.
      *
+     * <p>Throws rather than returning an empty list on malformed input. The two
+     * cases must stay distinguishable: an empty ledger is a normal first run,
+     * while an unparseable one means the caller must not proceed to save over
+     * it.</p>
+     *
      * @param json The JSON string to parse
-     * @return List of mappings, or empty list if parsing fails
+     * @return List of mappings (possibly empty for a legitimately empty ledger)
+     * @throws CorruptLedgerException if the text is not readable as a ledger
      */
-    private List<CustomItemMapping> parseJsonToMappings(String json) {
+    private List<CustomItemMapping> parseJsonToMappings(String json)
+            throws CorruptLedgerException {
         List<CustomItemMapping> result = new ArrayList<>();
 
         try {
@@ -579,10 +678,14 @@ public final class ItemMappingRegistry {
             }
 
         } catch (Exception e) {
-            LOGGER.log(Level.WARNING, "Failed to parse mappings JSON", e);
+            throw new CorruptLedgerException("Failed to parse mappings JSON", e);
         }
 
-        return result;
+        // Parsed cleanly but matched neither known shape (not an object with
+        // "items", not an array). Treating that as "empty" would let a file of
+        // the wrong kind pass for a fresh ledger.
+        throw new CorruptLedgerException(
+            "Mappings JSON is neither an {\"items\": ...} object nor a legacy array", null);
     }
 
     /**
@@ -721,9 +824,21 @@ public final class ItemMappingRegistry {
             load(path);
             return true;
         } catch (IOException e) {
-            LOGGER.log(Level.WARNING, "Failed to load mappings from " + path, e);
+            // SEVERE, not WARNING: with the ledger unreadable every Bedrock
+            // player sees vanilla items until it is restored, and the operator
+            // has to act. A warning buried in startup noise is how the previous
+            // loss went unnoticed until players reported it.
+            LOGGER.log(Level.SEVERE, "Failed to load mappings from " + path, e);
             return false;
         }
+    }
+
+    /**
+     * Whether the last load found the ledger present but unreadable, in which
+     * case {@link #save(Path)} is suppressed to protect the file on disk.
+     */
+    public boolean isLoadFailed() {
+        return loadFailed;
     }
 
     /**

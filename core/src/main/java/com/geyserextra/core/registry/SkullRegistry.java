@@ -242,7 +242,17 @@ public final class SkullRegistry {
                 Files.createDirectories(parent);
             }
 
-            Files.writeString(path, json);
+            // tmp + ATOMIC_MOVE for the same reason as the item ledger: an
+            // interrupted overwrite leaves a file that parses as nothing.
+            Path tmp = path.resolveSibling(path.getFileName() + ".tmp");
+            Files.writeString(tmp, json);
+            try {
+                Files.move(tmp, path,
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                    java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+            } catch (java.nio.file.AtomicMoveNotSupportedException e) {
+                Files.move(tmp, path, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            }
             LOGGER.fine(() -> "Saved " + skullsList.size() + " skull data entries to " + path);
         } finally {
             batchLock.readLock().unlock();
