@@ -96,6 +96,14 @@ public class CustomItemsHandler {
     private final java.util.Set<String> vanillaTextureBases;
     /** Generated icon keys backed by authored PNGs in the current auto pack. */
     private final java.util.Set<String> customIconKeys;
+    /**
+     * Icon keys this process actually handed to Geyser.
+     *
+     * <p>Definitions are registered once at Geyser start; packs are swapped per
+     * session. This is the set a replacement pack must still satisfy — see
+     * {@link #packSatisfiesRegisteredIcons(java.util.Set)}.</p>
+     */
+    private final java.util.Set<String> registeredIconKeys = new java.util.HashSet<>();
 
     /**
      * Creates a new CustomItemsHandler.
@@ -222,6 +230,24 @@ public class CustomItemsHandler {
             }
         }
         loadCustomIconsFromActivePack();
+    }
+
+    /**
+     * Which of the icon keys registered with Geyser are missing from
+     * {@code packIconKeys}.
+     *
+     * <p>Empty means the pack is safe to promote. A non-empty result means
+     * promoting it would strand that many definitions on icons the pack no
+     * longer contains, for the rest of the Geyser process's life.</p>
+     */
+    public java.util.List<String> missingRegisteredIcons(java.util.Set<String> packIconKeys) {
+        java.util.List<String> missing = new ArrayList<>();
+        for (String key : registeredIconKeys) {
+            if (!packIconKeys.contains(key)) {
+                missing.add(key);
+            }
+        }
+        return missing;
     }
 
     private void loadCustomIconsFromActivePack() {
@@ -693,6 +719,12 @@ public class CustomItemsHandler {
             ? mapping.icon
             : mapping.name;
         bedrockOptions.icon(iconKey);
+        // Remembered so a later pack swap can be checked against it. Geyser
+        // only fires GeyserDefineCustomItemsEvent at initialisation, but the
+        // pack is re-registered every session, so a rebuilt pack that no
+        // longer carries this key leaves the definition pointing at nothing —
+        // which renders worse than the vanilla item it replaced.
+        registeredIconKeys.add(iconKey.toLowerCase(Locale.ROOT));
 
         CreativeCategory creativeCategory = mapCreativeCategory(mapping.creativeCategory);
         if (creativeCategory != null) {

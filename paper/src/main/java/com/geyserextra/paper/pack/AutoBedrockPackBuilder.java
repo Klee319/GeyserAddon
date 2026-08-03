@@ -89,6 +89,16 @@ public final class AutoBedrockPackBuilder {
     private static final String PACK_VERSION_SIDECAR_SUFFIX = ".pack_version";
     /** Bedrock manifest components are treated as signed shorts by some parsers. */
     static final int MAX_PACK_PATCH_VERSION = 32767;
+    /**
+     * Ceiling for the monotonic sequence, spread over {@code version[1]} and
+     * {@code version[2]}. Bedrock compares version arrays element by element,
+     * so carrying into the minor field keeps the ordering strictly increasing
+     * once the patch field wraps. At one bump per content change this is not
+     * reachable in practice, but it is still clamped rather than allowed to
+     * overflow into a lower version.
+     */
+    static final int MAX_PACK_SEQUENCE =
+        MAX_PACK_PATCH_VERSION * (MAX_PACK_PATCH_VERSION + 1) + MAX_PACK_PATCH_VERSION;
 
     /**
      * Same regex Extension's {@code CustomItemsHandler.sanitizeIdentifierValue}
@@ -807,6 +817,14 @@ public final class AutoBedrockPackBuilder {
                 + " raised to monotonic " + patchVersion
                 + " (last emitted " + prior.lastPatch() + ")");
         }
+        if (logger != null && patchVersion >= MAX_PACK_SEQUENCE) {
+            // Nothing higher can be emitted for this UUID, so from here on
+            // clients keep whatever they cached no matter what changes. Loud
+            // because it is otherwise invisible — the pack still builds fine.
+            logger.severe("[AutoPack] pack version sequence is saturated at "
+                + patchVersion + ". Bedrock clients will no longer see updates for UUID "
+                + HEADER_UUID + "; rotate the pack UUID to recover.");
+        }
         // Any geometry emitted at format 1.21.0 (per-face uv_rotation) forces
         // the manifest to advertise the matching engine version — see
         // buildManifestJson.
@@ -1007,12 +1025,20 @@ public final class AutoBedrockPackBuilder {
     }
 
     /**
-     * Picks the manifest patch to emit. When content is unchanged
+     * Picks the monotonic version sequence to emit. When content is unchanged
      * ({@code contentHash == lastContentHash}), returns {@code lastPatch} so
      * rebuilds stay byte-stable. When content changes, returns
      * {@code max(contentHash, lastPatch + 1)} so Bedrock always sees a
      * strictly higher version for the same UUID (hash-only versions can go
      * down and be ignored by the client).
+     *
+     * <p>The return value is a <em>sequence</em>, not a patch field: it may
+     * exceed {@link #MAX_PACK_PATCH_VERSION}, and
+     * {@link #buildManifestJson(int, boolean)} spreads it across
+     * {@code version[1]} and {@code version[2]}. Keeping it in one field would
+     * saturate — the live sidecar was already at 32219 of 32767, roughly 550
+     * content changes from the point where the emitted version stops rising and
+     * every Bedrock client silently keeps the pack it already cached.</p>
      */
     static int nextMonotonicPatchVersion(int contentHash, int lastPatch, int lastContentHash) {
         int hash = Math.floorMod(contentHash, MAX_PACK_PATCH_VERSION + 1);
@@ -1020,15 +1046,20 @@ public final class AutoBedrockPackBuilder {
             lastPatch = 0;
         }
         if (lastPatch > 0 && hash == Math.floorMod(lastContentHash, MAX_PACK_PATCH_VERSION + 1)) {
-            return Math.min(lastPatch, MAX_PACK_PATCH_VERSION);
-        }
-        if (lastPatch >= MAX_PACK_PATCH_VERSION) {
-            // Wrap the signed-short space; rare. Client may need a UUID bump
-            // after wrap — log at call site if needed.
-            return hash == 0 ? 1 : hash;
+            return Math.min(lastPatch, MAX_PACK_SEQUENCE);
         }
         int next = Math.max(hash, lastPatch + 1);
-        return Math.min(next, MAX_PACK_PATCH_VERSION);
+        return Math.min(next, MAX_PACK_SEQUENCE);
+    }
+
+    /** {@code version[1]} for a sequence, i.e. how many times patch wrapped. */
+    static int sequenceMinor(int sequence) {
+        return Math.max(0, sequence) / (MAX_PACK_PATCH_VERSION + 1);
+    }
+
+    /** {@code version[2]} for a sequence. */
+    static int sequencePatch(int sequence) {
+        return Math.max(0, sequence) % (MAX_PACK_PATCH_VERSION + 1);
     }
 
     private record PackVersionState(int lastPatch, int lastContentHash) {
@@ -1128,7 +1159,13 @@ public final class AutoBedrockPackBuilder {
             if (parts.length < 3) {
                 return 0;
             }
-            return Integer.parseInt(parts[2].trim());
+            // Rebuild the sequence: a pack written after the two-stage counter
+            // landed carries the overflow in version[1], and reading only
+            // version[2] would floor the sequence back below what clients have
+            // already cached.
+            int minor = Integer.parseInt(parts[1].trim());
+            int patch = Integer.parseInt(parts[2].trim());
+            return minor * (MAX_PACK_PATCH_VERSION + 1) + patch;
         } catch (Exception ex) {
             if (logger != null) {
                 logger.fine("[AutoPack] could not read patch from existing zip: "
@@ -1483,7 +1520,10 @@ public final class AutoBedrockPackBuilder {
         Map<String, Object> root = new LinkedHashMap<>();
         root.put("format_version", 2);
 
-        List<Integer> version = List.of(1, 0, patchVersion);
+        // patchVersion is the monotonic sequence; carry the overflow into
+        // version[1] so the array keeps rising past 32767.
+        List<Integer> version =
+            List.of(1, sequenceMinor(patchVersion), sequencePatch(patchVersion));
 
         Map<String, Object> header = new LinkedHashMap<>();
         header.put("name", PACK_NAME);

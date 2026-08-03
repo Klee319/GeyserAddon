@@ -36,4 +36,34 @@ class AutoBedrockPackBuilderPatchVersionTest {
         assertThat(AutoBedrockPackBuilder.nextMonotonicPatchVersion(12345, 0, -1))
             .isEqualTo(12345);
     }
+
+    @Test
+    @DisplayName("sequence keeps rising past the 32767 patch ceiling")
+    void sequenceRisesPastPatchCeiling() {
+        // The live sidecar sat at 32219. Clamping here is what would have
+        // frozen every Bedrock client on its cached pack.
+        assertThat(AutoBedrockPackBuilder.nextMonotonicPatchVersion(500, 32767, 999))
+            .isEqualTo(32768);
+        assertThat(AutoBedrockPackBuilder.nextMonotonicPatchVersion(500, 40000, 999))
+            .isEqualTo(40001);
+    }
+
+    @Test
+    @DisplayName("overflow carries into version[1] so the array stays increasing")
+    void overflowCarriesIntoMinor() {
+        assertThat(AutoBedrockPackBuilder.sequenceMinor(32767)).isEqualTo(0);
+        assertThat(AutoBedrockPackBuilder.sequencePatch(32767)).isEqualTo(32767);
+        assertThat(AutoBedrockPackBuilder.sequenceMinor(32768)).isEqualTo(1);
+        assertThat(AutoBedrockPackBuilder.sequencePatch(32768)).isEqualTo(0);
+    }
+
+    @Test
+    @DisplayName("manifest renders the carried version array")
+    void manifestRendersCarriedVersion() {
+        String compact = AutoBedrockPackBuilder.buildManifestJson(32768, false)
+            .replaceAll("\\s+", "");
+        assertThat(compact).contains("\"version\":[1,1,0]");
+        assertThat(AutoBedrockPackBuilder.buildManifestJson(32219, false)
+            .replaceAll("\\s+", "")).contains("\"version\":[1,0,32219]");
+    }
 }

@@ -283,6 +283,34 @@ public class GeyserExtraExtension implements Extension {
         }
     }
 
+    /**
+     * Reads the {@code texture_data} keys out of a pack's
+     * {@code textures/item_texture.json}. An unreadable or absent entry yields
+     * an empty set, which the caller treats as "satisfies nothing" — the
+     * conservative direction, since the alternative is promoting a pack whose
+     * contents could not be checked.
+     */
+    private java.util.Set<String> readPackIconKeys(ZipFile zip) {
+        java.util.Set<String> keys = new java.util.HashSet<>();
+        var entry = zip.getEntry("textures/item_texture.json");
+        if (entry == null) {
+            return keys;
+        }
+        try (var reader = new java.io.InputStreamReader(
+                zip.getInputStream(entry), java.nio.charset.StandardCharsets.UTF_8)) {
+            var root = com.google.gson.JsonParser.parseReader(reader).getAsJsonObject();
+            var textureData = root.getAsJsonObject("texture_data");
+            if (textureData != null) {
+                for (String key : textureData.keySet()) {
+                    keys.add(key.toLowerCase(java.util.Locale.ROOT));
+                }
+            }
+        } catch (Exception e) {
+            logger().warning("Could not read icon keys from pending pack: " + e.getMessage());
+        }
+        return keys;
+    }
+
     private void promotePendingAutoPack(Path activePack) {
         Path pendingPack = activePack.resolveSibling("geyserextra_auto.pending.zip");
         if (!Files.isRegularFile(pendingPack)) {
@@ -293,6 +321,23 @@ public class GeyserExtraExtension implements Extension {
                 || zip.getEntry("textures/item_texture.json") == null) {
                 logger().warning("Pending auto custom items pack is incomplete; "
                     + "keeping the current active pack.");
+                return;
+            }
+            // The item definitions were registered when Geyser started and
+            // cannot be re-registered; only the pack is swappable. Promoting a
+            // pack that dropped an icon a definition points at leaves that item
+            // broken until the proxy restarts — worse than staying one
+            // generation behind, which merely delays new items.
+            java.util.List<String> missing =
+                customItemsHandler == null
+                    ? java.util.List.of()
+                    : customItemsHandler.missingRegisteredIcons(readPackIconKeys(zip));
+            if (!missing.isEmpty()) {
+                logger().severe("Pending auto custom items pack is missing "
+                    + missing.size() + " icon(s) that are already registered with Geyser"
+                    + " (e.g. " + String.join(", ", missing.subList(0, Math.min(5, missing.size())))
+                    + "). Keeping the current active pack. Restart the proxy after the"
+                    + " Paper backend has rebuilt the pack to pick up the new definitions.");
                 return;
             }
         } catch (IOException invalid) {
