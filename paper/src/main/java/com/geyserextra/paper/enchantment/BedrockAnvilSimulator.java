@@ -14,8 +14,10 @@ import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
+import org.bukkit.event.inventory.InventoryAction;
 import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.InventoryCloseEvent;
+import org.bukkit.event.inventory.InventoryDragEvent;
 import org.bukkit.event.inventory.InventoryOpenEvent;
 import org.bukkit.event.inventory.InventoryType;
 import org.bukkit.event.player.PlayerQuitEvent;
@@ -222,8 +224,18 @@ public final class BedrockAnvilSimulator implements Listener {
 
         int rawSlot = event.getRawSlot();
 
-        // Clicks in the player's own inventory area are allowed freely
+        // Clicks in the player's own inventory area are allowed freely, with
+        // two exceptions that reach into the chest without a chest rawSlot:
+        // shift-click moves the stack into the first free container slot (the
+        // result slot, or a filler slot the moment one opens), and
+        // double-click gathers stacks out of the container. Both bypass the
+        // input-slot handlers entirely.
         if (rawSlot >= CHEST_SIZE) {
+            InventoryAction action = event.getAction();
+            if (action == InventoryAction.MOVE_TO_OTHER_INVENTORY
+                || action == InventoryAction.COLLECT_TO_CURSOR) {
+                event.setCancelled(true);
+            }
             return;
         }
 
@@ -240,6 +252,32 @@ public final class BedrockAnvilSimulator implements Listener {
 
         // All other chest slots are filler -- block interaction
         event.setCancelled(true);
+    }
+
+    /**
+     * Blocks drags that would deposit into anything but the two input slots.
+     *
+     * <p>{@link InventoryDragEvent} is a separate path from
+     * {@link InventoryClickEvent}: without this handler a drag drops stacks
+     * straight into filler slots, which no click handler guards and — before
+     * the sweep in {@code returnInputItems} — nothing gave back.</p>
+     */
+    @EventHandler(priority = EventPriority.HIGH)
+    public void onInventoryDrag(InventoryDragEvent event) {
+        if (!enabled) return;
+        if (!(event.getWhoClicked() instanceof Player player)) return;
+
+        AnvilSession session = sessions.get(player.getUniqueId());
+        if (session == null) return;
+        if (!event.getInventory().equals(session.chestInventory)) return;
+
+        for (int rawSlot : event.getRawSlots()) {
+            if (rawSlot < CHEST_SIZE
+                && rawSlot != SLOT_LEFT_INPUT && rawSlot != SLOT_RIGHT_INPUT) {
+                event.setCancelled(true);
+                return;
+            }
+        }
     }
 
     @EventHandler
@@ -726,12 +764,39 @@ public final class BedrockAnvilSimulator implements Listener {
     // ========================================================================
 
     /**
-     * Returns items from the input slots back to the player.
+     * Returns every player-owned item in the chest back to the player.
      * Handles full inventory by dropping items on the ground.
+     *
+     * <p>Scans all {@link #CHEST_SIZE} slots rather than just the two input
+     * slots. A vanilla anvil cannot hold a stack anywhere but its inputs, so
+     * returning the inputs was equivalent — a chest UI has no such invariant.
+     * Anything that reached the result slot or a filler slot (shift-click,
+     * drag, a click the handlers did not anticipate) was destroyed on close.
+     * Sweeping the whole container also covers disconnects and crashes.</p>
      */
     private void returnInputItems(Player player, AnvilSession session) {
-        returnItemToPlayer(player, session.chestInventory.getItem(SLOT_LEFT_INPUT));
-        returnItemToPlayer(player, session.chestInventory.getItem(SLOT_RIGHT_INPUT));
+        for (int slot = 0; slot < CHEST_SIZE; slot++) {
+            ItemStack item = session.chestInventory.getItem(slot);
+            if (isDecoration(item)) {
+                continue;
+            }
+            returnItemToPlayer(player, item);
+            session.chestInventory.setItem(slot, null);
+        }
+    }
+
+    /**
+     * Whether this stack is UI furniture the simulator placed itself, and so
+     * must not be handed to the player.
+     *
+     * <p>Both decorations carry a display name, so a player's own gray pane or
+     * arrow does not match and is returned normally.</p>
+     */
+    private static boolean isDecoration(ItemStack item) {
+        if (isEmptyItem(item)) {
+            return true;
+        }
+        return item.isSimilar(FILLER) || item.isSimilar(ARROW_INDICATOR);
     }
 
     /**
@@ -787,7 +852,7 @@ public final class BedrockAnvilSimulator implements Listener {
     /**
      * Checks whether an item is effectively empty (null or air).
      */
-    private boolean isEmptyItem(ItemStack item) {
+    private static boolean isEmptyItem(ItemStack item) {
         return item == null || item.getType() == Material.AIR || item.getAmount() <= 0;
     }
 }
