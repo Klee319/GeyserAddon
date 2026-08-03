@@ -49,8 +49,20 @@ import java.util.concurrent.ConcurrentHashMap;
  * fast clicks on the off-hand slot could schedule two next-tick jobs that
  * both observe the pre-first-click state and write conflicting amounts,
  * yielding duplicated or lost items.</p>
+ *
+ * <p>Inventory clicks are handled for both Survival ({@link InventoryType#CRAFTING},
+ * raw slot 45) and Creative ({@link InventoryType#CREATIVE}, player-inventory
+ * slot 40 or raw slot 45). When Bedrock reports {@link InventoryAction#NOTHING}
+ * for an off-hand click the client refused to visualise, the listener forces
+ * the equivalent pick-up, swap, or place-all mutation server-side.</p>
  */
 public final class OffhandSwapListener implements Listener {
+
+    /** Raw slot index of the off-hand in a player inventory view. */
+    private static final int OFFHAND_RAW_SLOT = 45;
+
+    /** {@link PlayerInventory} slot index of the off-hand stack. */
+    private static final int OFFHAND_PLAYER_SLOT = 40;
 
     private final Plugin plugin;
 
@@ -85,6 +97,20 @@ public final class OffhandSwapListener implements Listener {
         if (!player.isSneaking()) {
             return;
         }
+
+        ItemStack droppedItem = event.getItemDrop().getItemStack().clone();
+        PlayerInventory inv = player.getInventory();
+
+        // Only the held-slot INDEX is read here. Reading the slot's CONTENTS at
+        // event time and re-checking them next tick does not work: whether the
+        // dropped stack has already been subtracted from the inventory by the
+        // time this event fires depends on the code path that produced the drop
+        // (a Geyser-translated Bedrock drop lands after us). A snapshot taken
+        // here therefore mismatched the real post-drop slot on every gesture,
+        // and the swap aborted every time — the gesture degraded into a plain
+        // drop. The contents check still happens, just next tick against the
+        // state that actually settled.
+        int heldSlot = inv.getHeldItemSlot();
         if (!tryAcquireOp(player)) {
             // A previous gesture is still in flight; the in-flight mutation
             // already represents the player's intent, so dropping the extra
@@ -92,12 +118,11 @@ public final class OffhandSwapListener implements Listener {
             return;
         }
 
-        ItemStack droppedItem = event.getItemDrop().getItemStack().clone();
         // Remove the dropped Item entity so it does not actually appear on the
         // ground. Intentionally NOT cancelling the event: Paper / Spigot may
         // automatically re-add the dropped stack to the player's inventory
         // when a PlayerDropItemEvent is cancelled, which previously caused
-        // duplication — currentMain ended the tick still holding the full
+        // duplication — the main hand ended the tick still holding the full
         // pre-drop stack, and our reconstruction layered the droppedItem on
         // top, doubling the count and bypassing the stack-size cap. Letting
         // the drop proceed (entity-less) ensures Bukkit subtracts the item
@@ -105,43 +130,75 @@ public final class OffhandSwapListener implements Listener {
         // back what was actually removed.
         event.getItemDrop().remove();
 
-        schedule(player, () -> swapMainHandWithOffhand(player, droppedItem));
+        schedule(player, () -> swapHeldSlotWithOffhand(player, heldSlot, droppedItem));
     }
 
     /**
-     * Reconstructs the player's main-hand stack as it was before the drop
-     * removed items, then swaps it with the off-hand.
+     * Moves the reconstructed main-hand stack into the off-hand and the
+     * off-hand stack into the slot the drop came from.
+     *
+     * <p>Writes to {@code heldSlot} explicitly rather than through
+     * {@code setItemInMainHand}: that method resolves the slot at call time,
+     * so a player who scrolled during the one-tick delay would have the swap
+     * land on their newly-selected slot and lose whatever was in it.</p>
+     *
+     * <p>The slot must be overwritten rather than left alone: on a partial drop
+     * the leftover sitting there is part of {@code originalMain}, which is
+     * about to be written into the off-hand, so leaving it would duplicate it.
+     * That makes the occupant check load-bearing — it is what stops the
+     * overwrite from destroying an unrelated stack. The slot is accepted only
+     * when it is empty (whole-stack drop) or still holds the same item that was
+     * dropped (partial drop); anything else means the drop did not come from
+     * this slot, and since the dropped entity is already gone the only safe
+     * move is to hand the stack back.</p>
      */
-    private void swapMainHandWithOffhand(Player player, ItemStack droppedItem) {
+    private void swapHeldSlotWithOffhand(Player player, int heldSlot, ItemStack droppedItem) {
         PlayerInventory inv = player.getInventory();
-        ItemStack currentMain = inv.getItemInMainHand();
-        ItemStack offhand = inv.getItemInOffHand();
-
-        ItemStack originalMain = reconstructOriginalMain(currentMain, droppedItem);
-
-        inv.setItemInMainHand(offhand);
+        ItemStack occupant = inv.getItem(heldSlot);
+        ItemStack originalMain = reconstructOriginalMain(occupant, droppedItem);
+        if (originalMain == null) {
+            returnToPlayer(player, droppedItem);
+            player.updateInventory();
+            return;
+        }
+        inv.setItem(heldSlot, inv.getItemInOffHand());
         inv.setItemInOffHand(originalMain);
         player.updateInventory();
     }
 
     /**
-     * Forces server-side handling of every "remove from off-hand" inventory
-     * action for Bedrock players, because Bedrock's native UI silently
-     * refuses to react to clicks on the off-hand slot for item types it does
-     * not consider off-hand-friendly (most weapons, blocks, food, ...). The
-     * default Bukkit click resolution does the right thing on the server
-     * side, but the Bedrock client does not visualise the resulting state
-     * change, so the player perceives the item as stuck. Re-doing the
-     * inventory mutation ourselves and then calling {@code updateInventory()}
-     * re-syncs the Bedrock client view so the action takes visible effect.
+     * Gives {@code stack} back to the player, falling back to a ground drop
+     * when the inventory is full. Used on the abort paths, where the item
+     * entity has already been removed and silently discarding the stack would
+     * be item loss.
+     */
+    private static void returnToPlayer(Player player, ItemStack stack) {
+        for (ItemStack leftover : player.getInventory().addItem(stack).values()) {
+            if (leftover != null && !isEmpty(leftover)) {
+                player.getWorld().dropItemNaturally(player.getLocation(), leftover);
+            }
+        }
+    }
+
+    /**
+     * Forces server-side handling of off-hand inventory actions for Bedrock
+     * players, because Bedrock's native UI silently refuses to react to clicks
+     * on the off-hand slot for item types it does not consider off-hand-friendly
+     * (most weapons, blocks, food, ...). The default Bukkit click resolution
+     * does the right thing on the server side, but the Bedrock client does not
+     * visualise the resulting state change, so the player perceives the item as
+     * stuck. Re-doing the inventory mutation ourselves and then calling
+     * {@code updateInventory()} re-syncs the Bedrock client view so the action
+     * takes visible effect.
+     *
+     * <p>Creative inventory uses player-inventory slot 40 (or raw slot 45) for
+     * the off-hand. When Bedrock emits {@link InventoryAction#NOTHING}, this
+     * handler infers pick-up, swap, or place-all from cursor/off-hand contents.</p>
      */
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
     public void onInventoryClick(InventoryClickEvent event) {
-        if (event.getView().getType() != InventoryType.CRAFTING) {
-            return;  // not the player's own inventory view
-        }
-        if (event.getRawSlot() != 45) {
-            return;  // not the off-hand slot
+        if (!isOffhandSlotClick(event)) {
+            return;
         }
         if (!(event.getWhoClicked() instanceof Player player)) {
             return;
@@ -156,6 +213,16 @@ public final class OffhandSwapListener implements Listener {
         boolean cursorEmpty = isEmpty(cursor);
         boolean offhandEmpty = isEmpty(offhand);
 
+        plugin.getLogger().fine(() -> String.format(
+            "Bedrock offhand click: view=%s rawSlot=%d slot=%d action=%s cursor=%s offhand=%s",
+            event.getView().getType(),
+            event.getRawSlot(),
+            event.getSlot(),
+            event.getAction(),
+            describeStack(cursor),
+            describeStack(offhand)
+        ));
+
         // No-op clicks: cursor empty + offhand empty has nothing to mutate.
         if (cursorEmpty && offhandEmpty) {
             return;
@@ -168,29 +235,14 @@ public final class OffhandSwapListener implements Listener {
                 if (!cursorEmpty || offhandEmpty) {
                     return;
                 }
-                if (!tryAcquireOp(player)) return;
-                event.setCancelled(true);
-                ItemStack toCursor = offhand.clone();
-                schedule(player, () -> {
-                    inv.setItemInOffHand(null);
-                    player.setItemOnCursor(toCursor);
-                    player.updateInventory();
-                });
+                applyPickupAll(event, player, inv, offhand);
             }
             case SWAP_WITH_CURSOR -> {
                 // Cursor and off-hand swap (cursor holds a different stack).
                 if (cursorEmpty || offhandEmpty) {
                     return;
                 }
-                if (!tryAcquireOp(player)) return;
-                event.setCancelled(true);
-                ItemStack newOffhand = cursor.clone();
-                ItemStack toCursor = offhand.clone();
-                schedule(player, () -> {
-                    inv.setItemInOffHand(newOffhand);
-                    player.setItemOnCursor(toCursor);
-                    player.updateInventory();
-                });
+                applySwapWithCursor(event, player, inv, cursor, offhand);
             }
             case PLACE_ALL, PLACE_ONE, PLACE_SOME -> {
                 // Cursor → off-hand placement. Bedrock's UI does not refresh
@@ -206,22 +258,7 @@ public final class OffhandSwapListener implements Listener {
                 };
                 if (requested <= 0) return;
 
-                PlacementResult plan = planPlacement(cursor, offhand, requested);
-                if (plan == null) {
-                    // Nothing legal to place (e.g. dissimilar full-stack offhand
-                    // with no room). Let Bukkit handle / cancel naturally.
-                    return;
-                }
-
-                if (!tryAcquireOp(player)) return;
-                event.setCancelled(true);
-                final ItemStack newOffhandFinal = plan.newOffhand();
-                final ItemStack newCursorFinal = plan.newCursor();
-                schedule(player, () -> {
-                    inv.setItemInOffHand(newOffhandFinal);
-                    player.setItemOnCursor(newCursorFinal);
-                    player.updateInventory();
-                });
+                applyPlacement(event, player, inv, cursor, offhand, requested);
             }
             case MOVE_TO_OTHER_INVENTORY -> {
                 // Shift-click: send off-hand stack to the first slot that
@@ -305,12 +342,128 @@ public final class OffhandSwapListener implements Listener {
                 // the whole inventory, and we have no Bedrock-specific issue
                 // here that warrants a re-do.
             }
-            default -> {
-                // NOTHING and any future-added enum values fall through to
-                // default Bukkit behaviour. They do not strand items in the
-                // off-hand for the Bedrock player.
-            }
+            default -> applyForcedNothingAction(
+                event, player, inv, cursor, offhand, cursorEmpty, offhandEmpty
+            );
         }
+    }
+
+    /**
+     * Returns true when the click targets the player's off-hand slot in either
+     * Survival ({@link InventoryType#CRAFTING}) or Creative
+     * ({@link InventoryType#CREATIVE}) inventory views.
+     */
+    private static boolean isOffhandSlotClick(InventoryClickEvent event) {
+        InventoryType viewType = event.getView().getType();
+        if (viewType == InventoryType.CRAFTING) {
+            return event.getRawSlot() == OFFHAND_RAW_SLOT;
+        }
+        if (viewType == InventoryType.CREATIVE) {
+            return event.getRawSlot() == OFFHAND_RAW_SLOT
+                || (event.getClickedInventory() instanceof PlayerInventory
+                    && event.getSlot() == OFFHAND_PLAYER_SLOT);
+        }
+        return false;
+    }
+
+    /**
+     * When Bedrock reports {@link InventoryAction#NOTHING} (or an unhandled
+     * action) for an off-hand click, infer the intended mutation from cursor
+     * and off-hand contents so items do not appear stuck client-side.
+     */
+    private void applyForcedNothingAction(
+        InventoryClickEvent event,
+        Player player,
+        PlayerInventory inv,
+        ItemStack cursor,
+        ItemStack offhand,
+        boolean cursorEmpty,
+        boolean offhandEmpty
+    ) {
+        if (cursorEmpty && offhandEmpty) {
+            return;
+        }
+        if (!cursorEmpty && offhandEmpty) {
+            applyPlacement(event, player, inv, cursor, offhand, cursor.getAmount());
+            return;
+        }
+        if (!cursorEmpty) {
+            applySwapWithCursor(event, player, inv, cursor, offhand);
+            return;
+        }
+        applyPickupAll(event, player, inv, offhand);
+    }
+
+    private void applyPickupAll(
+        InventoryClickEvent event,
+        Player player,
+        PlayerInventory inv,
+        ItemStack offhand
+    ) {
+        if (!tryAcquireOp(player)) {
+            return;
+        }
+        event.setCancelled(true);
+        ItemStack toCursor = offhand.clone();
+        schedule(player, () -> {
+            inv.setItemInOffHand(null);
+            player.setItemOnCursor(toCursor);
+            player.updateInventory();
+        });
+    }
+
+    private void applySwapWithCursor(
+        InventoryClickEvent event,
+        Player player,
+        PlayerInventory inv,
+        ItemStack cursor,
+        ItemStack offhand
+    ) {
+        if (!tryAcquireOp(player)) {
+            return;
+        }
+        event.setCancelled(true);
+        ItemStack newOffhand = cursor.clone();
+        ItemStack toCursor = offhand.clone();
+        schedule(player, () -> {
+            inv.setItemInOffHand(newOffhand);
+            player.setItemOnCursor(toCursor);
+            player.updateInventory();
+        });
+    }
+
+    private void applyPlacement(
+        InventoryClickEvent event,
+        Player player,
+        PlayerInventory inv,
+        ItemStack cursor,
+        ItemStack offhand,
+        int requested
+    ) {
+        PlacementResult plan = planPlacement(cursor, offhand, requested);
+        if (plan == null) {
+            // Nothing legal to place (e.g. dissimilar full-stack offhand
+            // with no room). Let Bukkit handle / cancel naturally.
+            return;
+        }
+        if (!tryAcquireOp(player)) {
+            return;
+        }
+        event.setCancelled(true);
+        final ItemStack newOffhandFinal = plan.newOffhand();
+        final ItemStack newCursorFinal = plan.newCursor();
+        schedule(player, () -> {
+            inv.setItemInOffHand(newOffhandFinal);
+            player.setItemOnCursor(newCursorFinal);
+            player.updateInventory();
+        });
+    }
+
+    private static String describeStack(ItemStack stack) {
+        if (isEmpty(stack)) {
+            return "empty";
+        }
+        return stack.getType().name() + "x" + stack.getAmount();
     }
 
     /**
@@ -430,40 +583,54 @@ public final class OffhandSwapListener implements Listener {
     }
 
     /**
-     * Combines {@code currentMain} (post-drop remainder) with
-     * {@code droppedItem} to recover the pre-drop stack. Handles three cases:
+     * Combines {@code remainder} (what the drop left in the main hand) with
+     * {@code droppedItem} to recover the pre-drop stack, or returns
+     * {@code null} when the drop demonstrably did not come from the main hand.
      *
      * <ul>
-     *   <li>Empty currentMain (the drop emptied the slot): original was the
+     *   <li>Empty remainder (the drop emptied the slot): the original was the
      *       dropped stack alone.</li>
-     *   <li>currentMain similar to dropped (single-item drop from a larger
+     *   <li>Remainder similar to dropped (single-item drop from a larger
      *       stack): merge counts.</li>
-     *   <li>currentMain differs from dropped (defensive — shouldn't happen
-     *       in normal play): use the dropped item as the reconstructed
-     *       stack so the swap still functions.</li>
+     *   <li>Remainder holds something else: <b>not our gesture</b>. An earlier
+     *       revision returned the dropped item here and swapped anyway, which
+     *       overwrote the held slot with the off-hand stack and destroyed
+     *       whatever the player was really holding.</li>
      * </ul>
      */
-    private ItemStack reconstructOriginalMain(ItemStack currentMain, ItemStack droppedItem) {
-        if (currentMain == null || currentMain.getType() == Material.AIR) {
+    private ItemStack reconstructOriginalMain(ItemStack remainder, ItemStack droppedItem) {
+        if (remainder == null || remainder.getType() == Material.AIR) {
             return droppedItem.clone();
         }
-        if (currentMain.isSimilar(droppedItem)) {
-            ItemStack merged = currentMain.clone();
-            int total = currentMain.getAmount() + droppedItem.getAmount();
-            // Belt-and-braces: even though we no longer cancel the drop event
-            // (which previously caused Bukkit to auto-restore the stack and
-            // make `total` overshoot the cap), guard the merge so an unstacked
-            // item can never end up with amount > maxStackSize. If a future
-            // refactor reintroduces the duplication path, the worst case is
-            // a silent cap rather than an actual exploit.
-            int max = merged.getMaxStackSize();
-            if (max > 0 && total > max) {
-                total = max;
-            }
-            merged.setAmount(total);
-            return merged;
+        if (!remainder.isSimilar(droppedItem)) {
+            return null;
         }
-        return droppedItem.clone();
+        ItemStack merged = remainder.clone();
+        merged.setAmount(mergedMainAmount(
+            remainder.getAmount(), droppedItem.getAmount(), merged.getMaxStackSize()));
+        return merged;
+    }
+
+    /**
+     * Stack count of the reconstructed main-hand stack, capped at
+     * {@code maxStackSize}.
+     *
+     * <p>Belt-and-braces: even though the drop event is no longer cancelled
+     * (which previously caused Bukkit to auto-restore the stack and make the
+     * total overshoot the cap), the merge is capped so an unstackable item can
+     * never end up above its maximum. If a future refactor reintroduces the
+     * duplication path, the worst case is a silent cap rather than an actual
+     * exploit.</p>
+     *
+     * <p>Package-private and free of Bukkit types so the arithmetic can be
+     * covered without a running server.</p>
+     */
+    static int mergedMainAmount(int remainderAmount, int droppedAmount, int maxStackSize) {
+        int total = remainderAmount + droppedAmount;
+        if (maxStackSize > 0 && total > maxStackSize) {
+            return maxStackSize;
+        }
+        return total;
     }
 
     /** Result of a cursor → off-hand placement plan. */
