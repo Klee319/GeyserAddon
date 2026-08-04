@@ -4,6 +4,7 @@ import com.geyserextra.paper.util.BedrockPlayerUtil;
 
 import org.bukkit.Bukkit;
 import org.bukkit.Material;
+import org.bukkit.entity.Item;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
@@ -80,97 +81,238 @@ public final class OffhandSwapListener implements Listener {
     }
 
     /**
-     * Cancels a sneak-drop from a Bedrock player and swaps main-hand with
-     * off-hand on the next tick instead.
+     * Records a Bedrock player's drop and turns it into a main-hand ↔ off-hand
+     * swap on the next tick.
      *
-     * <p>Why HIGHEST priority: we want to run after other plugins have had
-     * a chance to cancel the drop (e.g. anti-cheat, region protection).
-     * {@code ignoreCancelled = true} skips this handler if anyone above us
-     * already cancelled.</p>
+     * <p>Why HIGHEST priority: every other plugin that inspects or vetoes the
+     * drop has run by then, so the state sampled here is the state that will
+     * actually settle.</p>
+     *
+     * <p>Why {@code ignoreCancelled} is <b>off</b>: a plugin that vetoes the
+     * drop is vetoing the item <em>leaving the player</em>, which a swap never
+     * does. Skipping cancelled events made the gesture silently dead on any
+     * server that protects drops (anti-cheat, region flags, spawn protection) —
+     * the reported "nothing happens" symptom. The cancelled case is handled
+     * explicitly in {@link #completeSneakDropSwap} instead.</p>
+     *
+     * <p>Nothing is mutated here — not even the item entity. Both facts this
+     * handler needs are unreliable at event time:</p>
+     * <ul>
+     *   <li><b>Sneak state.</b> Bedrock sends sneaking in its own packet, which
+     *       Geyser can translate <em>after</em> the drop (the same race
+     *       {@code BedrockAnvilSimulator} documents). Hard-gating on
+     *       {@code isSneaking()} here therefore rejected genuinely sneaking
+     *       players and degraded the gesture into a plain ground drop — the
+     *       reported "the item just falls" symptom. The state is sampled both
+     *       now and next tick, and either one counts.</li>
+     *   <li><b>Inventory contents.</b> Whether the dropped stack has already
+     *       been subtracted depends on the code path that produced the drop, so
+     *       only the held-slot INDEX is read here; the contents are re-read next
+     *       tick against the state that settled.</li>
+     * </ul>
+     *
+     * <p>Deferring {@code itemDrop.remove()} to the next tick is what makes the
+     * abort paths lossless: if the swap turns out not to apply, the entity is
+     * simply left alone and the gesture degrades to an ordinary drop.</p>
+     *
+     * <p>The entity cannot change under us during that tick, and the reason is
+     * tick ordering rather than the 40-tick pickup delay — that delay only
+     * guards {@code ItemEntity.playerTouch}, while hopper suction and
+     * item-entity merging ignore it. CraftBukkit runs
+     * {@code scheduler.mainThreadHeartbeat()} at the very top of
+     * {@code MinecraftServer.tickChildren}, before both the level tick and the
+     * connection tick that produced this drop. A ItemEntity spawned during
+     * tick N's connection phase therefore never ticks before our task runs at
+     * the head of tick N+1. This is an implicit guarantee: switching
+     * {@link #schedule} to {@code runTaskLater(…, 1)} or porting to Folia would
+     * silently void it, which is why {@link #completeSneakDropSwap} re-reads
+     * the entity's contents instead of trusting the snapshot taken here.</p>
      */
-    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    @EventHandler(priority = EventPriority.HIGHEST)
     public void onPlayerDropItem(PlayerDropItemEvent event) {
         Player player = event.getPlayer();
         if (!BedrockPlayerUtil.isBedrockPlayer(player)) {
             return;
         }
-        if (!player.isSneaking()) {
-            return;
-        }
 
-        ItemStack droppedItem = event.getItemDrop().getItemStack().clone();
-        PlayerInventory inv = player.getInventory();
+        Item entity = event.getItemDrop();
+        ItemStack droppedSnapshot = entity.getItemStack().clone();
+        int heldSlot = player.getInventory().getHeldItemSlot();
+        boolean sneakingAtDrop = player.isSneaking();
 
-        // Only the held-slot INDEX is read here. Reading the slot's CONTENTS at
-        // event time and re-checking them next tick does not work: whether the
-        // dropped stack has already been subtracted from the inventory by the
-        // time this event fires depends on the code path that produced the drop
-        // (a Geyser-translated Bedrock drop lands after us). A snapshot taken
-        // here therefore mismatched the real post-drop slot on every gesture,
-        // and the swap aborted every time — the gesture degraded into a plain
-        // drop. The contents check still happens, just next tick against the
-        // state that actually settled.
-        int heldSlot = inv.getHeldItemSlot();
         if (!tryAcquireOp(player)) {
             // A previous gesture is still in flight; the in-flight mutation
             // already represents the player's intent, so dropping the extra
             // request keeps state consistent.
             return;
         }
-
-        // Remove the dropped Item entity so it does not actually appear on the
-        // ground. Intentionally NOT cancelling the event: Paper / Spigot may
-        // automatically re-add the dropped stack to the player's inventory
-        // when a PlayerDropItemEvent is cancelled, which previously caused
-        // duplication — the main hand ended the tick still holding the full
-        // pre-drop stack, and our reconstruction layered the droppedItem on
-        // top, doubling the count and bypassing the stack-size cap. Letting
-        // the drop proceed (entity-less) ensures Bukkit subtracts the item
-        // from the inventory normally, so reconstructOriginalMain only adds
-        // back what was actually removed.
-        event.getItemDrop().remove();
-
-        schedule(player, () -> swapHeldSlotWithOffhand(player, heldSlot, droppedItem));
+        schedule(player, () -> completeSneakDropSwap(
+            player, heldSlot, droppedSnapshot, entity, sneakingAtDrop));
     }
 
     /**
-     * Moves the reconstructed main-hand stack into the off-hand and the
-     * off-hand stack into the slot the drop came from.
+     * Next-tick half of the sneak-drop gesture: decides whether the drop was
+     * really the swap gesture and, if so, performs it.
+     *
+     * <p>Every abort path here leaves the world exactly as an ordinary drop
+     * would: the item entity is only removed once the swap is committed.</p>
+     */
+    private void completeSneakDropSwap(
+        Player player,
+        int heldSlot,
+        ItemStack droppedSnapshot,
+        Item entity,
+        boolean sneakingAtDrop
+    ) {
+        PlayerInventory inv = player.getInventory();
+        ItemStack occupant = inv.getItem(heldSlot);
+
+        // What the entity holds RIGHT NOW is what disappears when we remove it,
+        // and that is not necessarily what was snapshotted at event time: a
+        // MONITOR handler can call setItemStack, and this plugin's own
+        // BedrockEnchantmentHandler already rewrites the stack in place at HIGH.
+        // Re-reading is what keeps "what we destroy" and "what we hand back" the
+        // same items — trusting the snapshot would delete one stack and mint
+        // another.
+        ItemStack liveDrop = entity.isValid() ? entity.getItemStack() : null;
+        boolean entityUsable = !isEmpty(liveDrop);
+
+        Reconstructed original = entityUsable
+            ? reconstructOriginalMain(occupant, liveDrop)
+            : null;
+        // Only meaningful when the entity never reached the world: it says the
+        // held slot got the whole pre-drop stack back, which is how CraftBukkit
+        // resolves a cancelled hand-thrown drop.
+        boolean slotHoldsDrop = !isEmpty(occupant) && occupant.isSimilar(droppedSnapshot);
+
+        SwapDecision decision = decide(
+            sneakingAtDrop, player.isSneaking(), entityUsable, slotHoldsDrop, original != null);
+
+        switch (decision) {
+            case SKIP_NOT_SNEAKING -> plugin.getLogger().fine(
+                () -> "Sneak-drop swap skipped for " + player.getName()
+                    + ": not sneaking at drop time nor on the following tick");
+            case ABORT_ENTITY_GONE -> plugin.getLogger().fine(
+                () -> "Sneak-drop swap aborted for " + player.getName()
+                    + ": the dropped entity never reached the world and the held slot"
+                    + " does not hold the stack back (held=" + describeStack(occupant)
+                    + ", dropped=" + describeStack(droppedSnapshot) + ")");
+            case ABORT_FOREIGN_SLOT -> plugin.getLogger().fine(() -> String.format(
+                "Sneak-drop swap aborted for %s: held slot %d holds %s, dropped %s",
+                player.getName(), heldSlot, describeStack(occupant), describeStack(liveDrop)));
+            case SWAP_RESTORED_STACK -> {
+                plugin.getLogger().fine(() -> "Sneak-drop swap for " + player.getName()
+                    + ": drop was cancelled upstream, swapping the restored stack directly");
+                swapHeldSlotWithOffhand(player, inv, heldSlot);
+            }
+            case COMMIT_RECONSTRUCTED -> commitSwap(player, inv, heldSlot, entity, original);
+        }
+    }
+
+    /** What {@link #completeSneakDropSwap} resolved the drop to. */
+    enum SwapDecision {
+        /** Not the gesture — leave the drop entirely alone. */
+        SKIP_NOT_SNEAKING,
+        /** The entity is unusable and the held slot does not hold the stack back. */
+        ABORT_ENTITY_GONE,
+        /** The entity is live, but the drop did not come from the held slot. */
+        ABORT_FOREIGN_SLOT,
+        /** The drop was vetoed upstream and restored — exchange the two slots. */
+        SWAP_RESTORED_STACK,
+        /** Consume the entity and write the reconstructed stacks. */
+        COMMIT_RECONSTRUCTED
+    }
+
+    /**
+     * Branch table of the gesture, extracted free of Bukkit types so every path
+     * that decides whether items move can be pinned by tests.
+     *
+     * <p>Note there is no "was the event cancelled" input. Reading
+     * {@code isCancelled()} at HIGHEST misses a veto applied by a later handler,
+     * and — more importantly — CraftBukkit's cancel path only restores to the
+     * held slot for hand-thrown drops; its fallback branch calls
+     * {@code addItem}, which lands the stack in an arbitrary free slot. So the
+     * cancelled case is recognised by observing that the entity never reached
+     * the world <em>and</em> the held slot holds the stack again. Anything else
+     * aborts, which stops an inventory-window drag-out inside a
+     * drop-protected region from silently exchanging two unrelated stacks.</p>
+     */
+    static SwapDecision decide(
+        boolean sneakingAtDrop,
+        boolean sneakingNow,
+        boolean entityUsable,
+        boolean heldSlotHoldsDroppedItem,
+        boolean reconstructable
+    ) {
+        if (!sneakingAtDrop && !sneakingNow) {
+            return SwapDecision.SKIP_NOT_SNEAKING;
+        }
+        if (!entityUsable) {
+            return heldSlotHoldsDroppedItem
+                ? SwapDecision.SWAP_RESTORED_STACK
+                : SwapDecision.ABORT_ENTITY_GONE;
+        }
+        return reconstructable
+            ? SwapDecision.COMMIT_RECONSTRUCTED
+            : SwapDecision.ABORT_FOREIGN_SLOT;
+    }
+
+    /**
+     * Point of no return: destroys the item entity and writes the reconstructed
+     * stacks. Every item the entity carried is accounted for by
+     * {@code mainStack} plus {@code overflow}.
+     */
+    private static void commitSwap(
+        Player player,
+        PlayerInventory inv,
+        int heldSlot,
+        Item entity,
+        Reconstructed original
+    ) {
+        // getItemInOffHand hands back a live mirror of slot 40, so it is
+        // snapshotted before the first write rather than read across it.
+        ItemStack previousOffhand = inv.getItemInOffHand();
+        ItemStack newHeld = isEmpty(previousOffhand) ? null : previousOffhand.clone();
+        entity.remove();
+        inv.setItem(heldSlot, newHeld);
+        inv.setItemInOffHand(original.mainStack());
+        if (original.overflow() != null) {
+            returnToPlayer(player, original.overflow());
+        }
+        player.updateInventory();
+    }
+
+    /**
+     * Straight exchange of {@code heldSlot} and the off-hand, with no
+     * reconstruction. Used when the drop was cancelled upstream and the slot
+     * therefore still holds the untouched pre-drop stack — a pure exchange
+     * cannot change the item count no matter how the veto was resolved.
      *
      * <p>Writes to {@code heldSlot} explicitly rather than through
      * {@code setItemInMainHand}: that method resolves the slot at call time,
      * so a player who scrolled during the one-tick delay would have the swap
      * land on their newly-selected slot and lose whatever was in it.</p>
-     *
-     * <p>The slot must be overwritten rather than left alone: on a partial drop
-     * the leftover sitting there is part of {@code originalMain}, which is
-     * about to be written into the off-hand, so leaving it would duplicate it.
-     * That makes the occupant check load-bearing — it is what stops the
-     * overwrite from destroying an unrelated stack. The slot is accepted only
-     * when it is empty (whole-stack drop) or still holds the same item that was
-     * dropped (partial drop); anything else means the drop did not come from
-     * this slot, and since the dropped entity is already gone the only safe
-     * move is to hand the stack back.</p>
      */
-    private void swapHeldSlotWithOffhand(Player player, int heldSlot, ItemStack droppedItem) {
-        PlayerInventory inv = player.getInventory();
-        ItemStack occupant = inv.getItem(heldSlot);
-        ItemStack originalMain = reconstructOriginalMain(occupant, droppedItem);
-        if (originalMain == null) {
-            returnToPlayer(player, droppedItem);
-            player.updateInventory();
+    private static void swapHeldSlotWithOffhand(Player player, PlayerInventory inv, int heldSlot) {
+        ItemStack held = inv.getItem(heldSlot);
+        ItemStack offhand = inv.getItemInOffHand();
+        if (isEmpty(held) && isEmpty(offhand)) {
             return;
         }
-        inv.setItem(heldSlot, inv.getItemInOffHand());
-        inv.setItemInOffHand(originalMain);
+        // getItem / getItemInOffHand hand back live mirrors of the underlying
+        // slots, so both sides are cloned before either write lands.
+        ItemStack newOffhand = isEmpty(held) ? null : held.clone();
+        ItemStack newHeld = isEmpty(offhand) ? null : offhand.clone();
+        inv.setItem(heldSlot, newHeld);
+        inv.setItemInOffHand(newOffhand);
         player.updateInventory();
     }
 
     /**
      * Gives {@code stack} back to the player, falling back to a ground drop
-     * when the inventory is full. Used on the abort paths, where the item
-     * entity has already been removed and silently discarding the stack would
-     * be item loss.
+     * when the inventory is full. Used for the surplus of a merge that hit the
+     * stack-size cap: the dropped entity is gone by that point, so discarding
+     * the surplus would be item loss.
      */
     private static void returnToPlayer(Player player, ItemStack stack) {
         for (ItemStack leftover : player.getInventory().addItem(stack).values()) {
@@ -489,12 +631,17 @@ public final class OffhandSwapListener implements Listener {
      * Schedules {@code task} for the next tick, automatically releasing the
      * per-player lock on completion regardless of whether the task ran or the
      * player went offline first.
+     *
+     * <p>Dead players are skipped as well as offline ones: {@code isOnline()}
+     * stays true through the death screen, and an inventory written there is
+     * discarded on respawn — so a mutation that also consumed an item entity
+     * would destroy the items outright.</p>
      */
     private void schedule(Player player, Runnable task) {
         UUID uuid = player.getUniqueId();
         Bukkit.getScheduler().runTask(plugin, () -> {
             try {
-                if (player.isOnline()) {
+                if (player.isOnline() && !player.isDead()) {
                     task.run();
                 }
             } finally {
@@ -597,18 +744,38 @@ public final class OffhandSwapListener implements Listener {
      *       overwrote the held slot with the off-hand stack and destroyed
      *       whatever the player was really holding.</li>
      * </ul>
+     *
+     * <p>{@code isSimilar} is deliberately kept as the match test even though
+     * it can reject a genuine partial drop whose entity was mutated in place by
+     * another handler first (our own {@code BedrockEnchantmentHandler} strips
+     * {@code [GE]} lore from dropped stacks at HIGH, before this listener's
+     * HIGHEST). Loosening it to plain material equality would let an enchanted
+     * held stack absorb a dissimilar dropped one and clone its NBT, so the
+     * rarer mismatch is accepted: the caller leaves the entity on the ground
+     * and the gesture degrades to an ordinary drop.</p>
      */
-    private ItemStack reconstructOriginalMain(ItemStack remainder, ItemStack droppedItem) {
-        if (remainder == null || remainder.getType() == Material.AIR) {
-            return droppedItem.clone();
-        }
-        if (!remainder.isSimilar(droppedItem)) {
+    private Reconstructed reconstructOriginalMain(ItemStack remainder, ItemStack droppedItem) {
+        boolean slotEmptied = remainder == null || remainder.getType() == Material.AIR;
+        if (!slotEmptied && !remainder.isSimilar(droppedItem)) {
             return null;
         }
-        ItemStack merged = remainder.clone();
-        merged.setAmount(mergedMainAmount(
-            remainder.getAmount(), droppedItem.getAmount(), merged.getMaxStackSize()));
-        return merged;
+        // The remainder is the stack the server never handed to another
+        // handler, so it is the authoritative template when it exists.
+        ItemStack template = slotEmptied ? droppedItem : remainder;
+        int remainderAmount = slotEmptied ? 0 : remainder.getAmount();
+        int droppedAmount = droppedItem.getAmount();
+        int cap = template.getMaxStackSize();
+
+        ItemStack mainStack = template.clone();
+        mainStack.setAmount(mergedMainAmount(remainderAmount, droppedAmount, cap));
+
+        int surplus = overflowMainAmount(remainderAmount, droppedAmount, cap);
+        if (surplus <= 0) {
+            return new Reconstructed(mainStack, null);
+        }
+        ItemStack overflow = template.clone();
+        overflow.setAmount(surplus);
+        return new Reconstructed(mainStack, overflow);
     }
 
     /**
@@ -619,8 +786,9 @@ public final class OffhandSwapListener implements Listener {
      * (which previously caused Bukkit to auto-restore the stack and make the
      * total overshoot the cap), the merge is capped so an unstackable item can
      * never end up above its maximum. If a future refactor reintroduces the
-     * duplication path, the worst case is a silent cap rather than an actual
-     * exploit.</p>
+     * duplication path, the worst case is a cap rather than an actual exploit —
+     * and the capped-off surplus is handed back to the player via
+     * {@link #overflowMainAmount} rather than deleted.</p>
      *
      * <p>Package-private and free of Bukkit types so the arithmetic can be
      * covered without a running server.</p>
@@ -633,6 +801,26 @@ public final class OffhandSwapListener implements Listener {
         return total;
     }
 
+    /**
+     * Items the cap in {@link #mergedMainAmount} left over, which the caller
+     * must give back to the player. Silently discarding this was a latent
+     * item-loss path: the dropped entity is gone by then, so a capped merge
+     * destroyed the difference.
+     */
+    static int overflowMainAmount(int remainderAmount, int droppedAmount, int maxStackSize) {
+        int total = remainderAmount + droppedAmount;
+        if (maxStackSize > 0 && total > maxStackSize) {
+            return total - maxStackSize;
+        }
+        return 0;
+    }
+
     /** Result of a cursor → off-hand placement plan. */
     private record PlacementResult(ItemStack newOffhand, ItemStack newCursor) {}
+
+    /**
+     * A reconstructed pre-drop main-hand stack, split at the stack-size cap.
+     * {@code overflow} is null unless the merge exceeded the cap.
+     */
+    private record Reconstructed(ItemStack mainStack, ItemStack overflow) {}
 }
