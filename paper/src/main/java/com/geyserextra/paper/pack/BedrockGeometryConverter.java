@@ -326,17 +326,20 @@ public final class BedrockGeometryConverter {
      * <p>Coordinate mapping (item models, 0..16 range):</p>
      * <ul>
      *   <li>Bedrock cube origin (lower-X / lower-Y / lower-Z corner):
-     *       {@code (java.from.x - 8, java.from.y, java.from.z - 8)}.
-     *       The {@code -8} on X centres the model around the bone pivot;
-     *       Z is shifted by {@code -8} so the cube sits in the same depth
-     *       slice as Bedrock's standard held-item rendering.</li>
+     *       {@code (8 - java.to.x, java.from.y, java.from.z - 8)}.
+     *       X is <b>mirrored</b>, not merely shifted — Bedrock's X axis runs
+     *       opposite to Java's, so the lower-X corner comes from Java's
+     *       {@code to.x}. Z is shifted by {@code -8} so the cube sits in the
+     *       same depth slice as Bedrock's standard held-item rendering.</li>
      *   <li>Bedrock cube size: {@code java.to - java.from} per axis; sizes
      *       are clamped to a non-negative minimum so a degenerate cube
      *       doesn't crash the Bedrock renderer.</li>
      *   <li>Element rotation: {@code axis} → matching slot in Bedrock's
-     *       three-component rotation; only X negates (Rainbow build-39+
-     *       convention). Pivot maps similarly to origin (X centred,
-     *       Z shifted).</li>
+     *       three-component rotation, signed by {@link #ROT_X_SIGN} /
+     *       {@link #ROT_Y_SIGN} / {@link #ROT_Z_SIGN} — {@code (-x, -y, +z)},
+     *       the same convention Blockbench's Bedrock codec applies, and the
+     *       mirror partner of the X flip above. Pivot maps like origin
+     *       (X mirrored, Z shifted).</li>
      * </ul>
      *
      * <p>UV: this phase ignores per-face UV data. Each cube gets a single
@@ -369,15 +372,18 @@ public final class BedrockGeometryConverter {
      * <p>Coordinate mapping (item models, 0..16 range):</p>
      * <ul>
      *   <li>Bedrock cube origin (lower-X / lower-Y / lower-Z corner):
-     *       {@code (java.from.x - 8, java.from.y, java.from.z - 8)}.
-     *       The {@code -8} on X centres the model around the bone pivot;
-     *       Z is shifted by {@code -8} so the cube sits in the same depth
-     *       slice as Bedrock's standard held-item rendering.</li>
+     *       {@code (8 - java.to.x, java.from.y, java.from.z - 8)}.
+     *       X is <b>mirrored</b>, not merely shifted — Bedrock's X axis runs
+     *       opposite to Java's, so the lower-X corner comes from Java's
+     *       {@code to.x}. Z is shifted by {@code -8} so the cube sits in the
+     *       same depth slice as Bedrock's standard held-item rendering.</li>
      *   <li>Bedrock cube size: {@code java.to - java.from} per axis;
      *       clamped non-negative.</li>
      *   <li>Element rotation: {@code axis} maps to matching Bedrock cube
-     *       rotation slot; only X negates (Rainbow build-39+ convention),
-     *       Y and Z keep their sign.</li>
+     *       rotation slot, signed by {@link #ROT_X_SIGN} / {@link #ROT_Y_SIGN} /
+     *       {@link #ROT_Z_SIGN} — {@code (-x, -y, +z)}, the same convention
+     *       Blockbench's Bedrock codec applies, and the mirror partner of the
+     *       X flip above.</li>
      *   <li>Per-face UV: {@code java.uv = [u1, v1, u2, v2]} (0..16 abstract)
      *       becomes Bedrock {@code uv: [u1·sx, v1·sy], uv_size: [(u2-u1)·sx, (v2-v1)·sy]}
      *       where {@code sx = textureWidth/16} and {@code sy = textureHeight/16}.
@@ -787,10 +793,18 @@ public final class BedrockGeometryConverter {
             // ambiguity for the case that actually occurs in the wild: authors
             // reach for free rotation to express a flip (±180 on two axes) plus
             // a turn, and those reduce to a single axis, which every
-            // composition order agrees on. Genuinely three-axis rotations still
-            // fall through to the per-axis approximation — they cannot be
-            // settled without knowing Bedrock's order, and no model shipped
-            // here uses one.
+            // composition order agrees on.
+            //
+            // Genuinely three-axis rotations still fall through to the per-axis
+            // approximation, and that path remains UNVERIFIED: the Blockbench
+            // codec only pins the single-axis signs, and no component-wise sign
+            // rule reproduces the mirror conjugate M·(Rx·Ry·Rz)·M under any
+            // composition order. It is also not hypothetical — measured against
+            // the TrinityForge pack (2026-08-04), 220 of 628 free rotations do
+            // not reduce: boundary_cane 175, abyss_cane 35, gold_test and
+            // wood_test 5 each. Those four models are approximations today and
+            // were approximations before the Y sign was corrected; settling
+            // them needs Bedrock's actual composition order, not a sign table.
             float[] singleAxis = reduceToSingleAxis(e);
             if (singleAxis != null) {
                 return singleAxis;
