@@ -122,13 +122,17 @@ class VanillaBuiltinDisplaysTest {
     }
 
     @Test
-    @DisplayName("a handheld item's off hand comes out identical to its main hand")
-    void handheldOffHandMatchesMainHand() {
-        // The visible symptom of dropping handheld's left-hand slots: the off
-        // hand came out y=-90/z=-55 against the main hand's y=+90/z=+55, i.e.
-        // turned 180 degrees about Y with the roll reversed - blade backwards.
-        // Third person is the clean comparison because handheld's translation X
-        // is 0, so the two blocks must agree byte for byte.
+    @DisplayName("a handheld item's off hand carries its declared lefthand slot, mirrored from the main hand")
+    void handheldOffHandMirrorsMainHand() {
+        // handheld declares thirdperson_lefthand [0, 90, -55] against a right
+        // hand of [0, -90, 55], and both are emitted as authored, so the two
+        // hands come out opposite. This is why the slots have to be carried at
+        // all: leaving them null makes the off hand fall back to the RIGHT
+        // hand's values, which for handheld would render the two hands
+        // identical and lose the mirroring the model asked for.
+        //
+        // Third person is the clean comparison because handheld's translation
+        // X is 0, so nothing but the rotation can differ between the blocks.
         AttachableGenerationConfig config = new AttachableGenerationConfig(
             AttachableGenerationConfig.MODE_FULL, false);
         String anim = BedrockAttachableWriter.buildArtifacts(
@@ -142,7 +146,14 @@ class VanillaBuiltinDisplaysTest {
         String main = jsonBlockAfter(anim, "thirdperson_main_hand");
         String off = jsonBlockAfter(anim, "thirdperson_off_hand");
         assertThat(main).isNotNull();
-        assertThat(off).as("off-hand third-person animation").isEqualTo(main);
+        assertThat(main.replaceAll("\\s+", ""))
+            .contains("\"geyserextra_y\":{\"rotation\":[0.0,90.0,0.0]}")
+            .contains("\"geyserextra_z\":{\"rotation\":[0.0,0.0,55.0]}");
+        assertThat(off).as("off-hand third-person animation").isNotNull();
+        assertThat(off.replaceAll("\\s+", ""))
+            .as("declared lefthand emitted as authored, i.e. the mirror of the main hand")
+            .contains("\"geyserextra_y\":{\"rotation\":[0.0,-90.0,0.0]}")
+            .contains("\"geyserextra_z\":{\"rotation\":[0.0,0.0,-55.0]}");
     }
 
     @Nested

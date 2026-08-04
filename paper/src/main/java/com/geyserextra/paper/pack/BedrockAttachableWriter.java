@@ -43,6 +43,28 @@ import java.util.logging.Logger;
  * both {@code offsets_only} and {@code full} (auto-upgrade). Models without
  * {@code elements} use a Bedrock {@code texture_meshes} entry which extrudes
  * the PNG exactly like Java's {@code item/generated} renderer.</p>
+ *
+ * <p><b>Off hand.</b> The resolved {@code *_lefthand} rotation is emitted
+ * <em>as authored</em>. This deliberately does not reproduce vanilla
+ * {@code ItemTransform#apply(leftHand, …)}, which negates rotation Y and Z on
+ * top of whichever slot resolved. That negation exists to compensate Java's
+ * <em>mirrored left arm</em>, and Bedrock's off-hand attachment already
+ * accounts for handedness, so applying it here double-counted the mirror and
+ * put every held item 180° about Y in the off hand — the ±90° Y in
+ * {@code handheld} and friends flips sign, which is the whole visible
+ * symptom. java2bedrock, which this writer is a port of, likewise feeds the
+ * {@code lefthand} slots through the same formulas it uses for
+ * {@code righthand}, with no extra negation.</p>
+ *
+ * <p>What is <em>not</em> borrowed from java2bedrock is its shared root bone.
+ * It emits one identical root for both hands; this writer mirrors the
+ * first-person root, because unlike java2bedrock it resolves the per-item
+ * offset in the root's frame rather than emitting the Java translation
+ * componentwise. The two roots are therefore not the same quantity, and
+ * taking j2b's without also taking its translation handling drives
+ * first-person off-hand offsets past the bound the conversion IT enforces.
+ * Translation X still negates for the off hand, which is the one part of
+ * vanilla's rule that does carry over and is exactly what j2b does too.</p>
  */
 public final class BedrockAttachableWriter {
 
@@ -740,13 +762,11 @@ public final class BedrockAttachableWriter {
         // Off hand reads the model's own *_lefthand slots when present.
         JavaModelDisplay.Transform hand3rdOff = orIdentity(display.handTransformFor(false, true));
         JavaModelDisplay.Transform hand1stOff = orIdentity(display.handTransformFor(true, true));
-        // Java applies its left-hand rule (negate translation X, negate
-        // rotation Y and Z) to whatever transform the left hand resolves to —
-        // the declared *_lefthand slot when present, otherwise the right-hand
-        // one that ItemTransforms.Deserializer substitutes. It is never
-        // skipped, so the off-hand flag below does not depend on which slot
-        // supplied the values. See
-        // BedrockGeometryConverter#applyJavaLeftHandRotation.
+        // Resolution follows Mojang's ItemTransforms.Deserializer: the declared
+        // *_lefthand slot when present, otherwise the right-hand one it
+        // substitutes. What is NOT reproduced is the negation
+        // ItemTransform#apply layers on top of that slot — see the class
+        // javadoc's "Off hand" section.
 
         // Flat / texture_meshes (vanilla sword + texture swap): MUST NOT reuse
         // the operator Valhalla 3D firstPersonBasePose — cubes and
@@ -838,11 +858,10 @@ public final class BedrockAttachableWriter {
      * base pose, the x bone gets X rotation + translation + scale, and the
      * y/z bones get their single rotation axis (java2bedrock decomposition).
      *
-     * @param offHand {@code true} for the left/off hand, which applies
-     *                vanilla {@code ItemTransform#apply}'s left-hand rule
-     *                first: rotation Y and Z negate. Applies regardless of
-     *                whether the values came from a {@code *_lefthand} slot or
-     *                the right-hand fallback.
+     * @param offHand {@code true} for the left/off hand, which changes exactly
+     *                one thing: the sign of translation X. The rotation is used
+     *                as authored and the root bone is shared with the main
+     *                hand — see the class javadoc's "Off hand" section.
      */
     private static Map<String, Object> buildHoldAnimation(
         JavaModelDisplay.Transform transform,
@@ -850,13 +869,12 @@ public final class BedrockAttachableWriter {
         boolean offHand,
         AttachableGenerationConfig.BasePose firstPersonPose
     ) {
-        // Java's left-hand rule is one operation on one transform: rotation Y
-        // and Z negate AND translation X negates. Both halves, or neither —
-        // applying only the rotation half leaves the translation describing a
-        // pose the rotation no longer matches.
-        float[] javaRotation = offHand
-            ? BedrockGeometryConverter.applyJavaLeftHandRotation(transform.rotation())
-            : transform.rotation();
+        // The off hand takes the resolved *_lefthand transform AS AUTHORED —
+        // no rotation negation — and differs from the main hand only in the
+        // sign of translation X. That is java2bedrock's rule, and this code is
+        // a port of java2bedrock; see the class javadoc's "Off hand" section
+        // for why matching it beat reproducing Java's own left-hand rule.
+        float[] javaRotation = transform.rotation();
         float[] javaTranslation = offHand
             ? BedrockGeometryConverter.applyJavaLeftHandTranslation(transform.translation())
             : transform.translation();
@@ -929,18 +947,20 @@ public final class BedrockAttachableWriter {
             // satisfy small and oversized weapons at the same time.
             float[] basePos = firstPersonPose.position();
             // The base pose maps Bedrock's first-person arm frame onto Java's
-            // camera-space item frame. That mapping is handed, so the off hand
-            // needs its mirror image — the same (x, -y, -z) rotation and -x
-            // position rule Java applies to the transform itself.
+            // camera-space item frame, and that mapping is handed, so the off
+            // hand gets its mirror image. Kept — unlike the rotation negation
+            // removed above — because the per-item offset is resolved in this
+            // frame by convertTranslationInRootFrame: unmirroring the root
+            // while leaving that conversion in place drives
+            // minecraft_golden_sword_26's first-person off-hand offset to
+            // 18.34 against the 16-unit bound the conversion IT enforces.
+            // java2bedrock shares one root between the hands, but it also does
+            // not resolve offsets in the root frame — it emits the Java
+            // translation componentwise — so its root and ours are not the
+            // same quantity and cannot be borrowed independently.
             //
             // The third-person root gets away without this because its pose
-            // ([90, 0, 0] / [0, 13, -3]) is already mirror-invariant: rotation
-            // Y and Z and position X are all zero. The first-person pose
-            // ([90, 60, -40] / [4, 10, 4]) is not, so feeding the right-arm
-            // mapping to the left arm swings the item out of the viewport,
-            // which is why third-person off hand rendered correctly while
-            // first-person off hand showed nothing at all — for flat and 3D
-            // items alike, since both use a non-symmetric first-person pose.
+            // ([90, 0, 0] / [0, 13, -3]) is already mirror-invariant.
             root.put("rotation", List.of(
                 emittedRootRotation[0], emittedRootRotation[1], emittedRootRotation[2]));
             root.put("position", List.of(

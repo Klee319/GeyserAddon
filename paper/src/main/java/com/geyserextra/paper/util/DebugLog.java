@@ -10,12 +10,14 @@ import java.util.logging.Logger;
  * <p>The plugin's diagnostics were written against {@link Logger#fine}, and
  * none of them have ever been visible. Nothing in the plugin raises a log
  * level, so every {@code fine()} record is discarded before it reaches the
- * console — flipping {@code debugMode} to {@code true} changed only which
- * {@code fine()} calls were <em>reached</em>, not whether any of them printed.
- * The deployed server demonstrates it: with {@code debugMode: true},
- * {@code loadConfiguration} logs "Using configured extension data folder" at
- * INFO and "Config loaded from:" at FINE, and only the first appears in
- * {@code logs/latest.log}.</p>
+ * console — flipping {@code debugMode} to {@code true} changes only which
+ * {@code fine()} calls are <em>reached</em>, not whether any of them print.
+ * A deployed server's {@code logs/latest.log} shows it directly: of the calls
+ * that run unconditionally during enable, every {@code info()} one is present
+ * ("Using configured extension data folder", "Relocalised …") and every
+ * {@code fine()} one is missing ("Config loaded from: …", "Player settings
+ * manager initialized."). {@code CooldownBridgeListener#diagnostic} reached
+ * the same conclusion independently and works around it the same way.</p>
  *
  * <p>That is why this emits at INFO rather than raising a level. A plugin can
  * set its own {@code Logger} level, but the record still has to pass the

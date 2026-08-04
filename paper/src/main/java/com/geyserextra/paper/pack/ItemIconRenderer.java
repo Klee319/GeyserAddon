@@ -170,11 +170,53 @@ public final class ItemIconRenderer {
     private static final double AMBIENT_LIGHT = 0.4;
 
     /**
-     * Output edge length. Bedrock item icons are not limited to 16x16 — the
-     * sprite is scaled to the slot — so rendering larger keeps diagonal blades
-     * from turning into staircases at the sizes players actually see.
+     * Output edge length for a source texture of 64px or less. Bedrock item
+     * icons are not limited to 16x16 — the sprite is scaled to the slot — so
+     * rendering larger keeps diagonal blades from turning into staircases at
+     * the sizes players actually see.
      */
     public static final int DEFAULT_SIZE = 64;
+
+    /**
+     * Ceiling on {@link #sizeFor}. Past this the icon costs more to render and
+     * ship than a Bedrock inventory slot can show.
+     */
+    public static final int MAX_SIZE = 256;
+
+    /**
+     * Output edge length for a model textured by {@code sourceEdge}-pixel art.
+     *
+     * <p>A fixed {@link #DEFAULT_SIZE} silently <em>downscaled</em> every
+     * high-resolution item. The reference pack ships 128, 256 and 512px item
+     * textures, and rendering those into 64x64 threw the detail away: one
+     * 128px cane went from 864 distinct colours and no partial alpha to 337
+     * colours and 383 partially transparent pixels, which reads exactly as the
+     * reported "size and position are right but the quality is bad" — the
+     * silhouette survives a downscale, the artwork does not.
+     *
+     * <p>Rounding up to a whole multiple of the source keeps texel edges on
+     * output-pixel boundaries, so pixel art stays crisp instead of being
+     * resampled onto a grid that does not divide it. That is also why 32px art
+     * is not left at 64: it is already a clean 2x. The real repair is simply
+     * never choosing a size below the source.
+     *
+     * @param sourceEdge longest edge of the source texture, in pixels
+     */
+    public static int sizeFor(int sourceEdge) {
+        if (sourceEdge <= 0) {
+            return DEFAULT_SIZE;
+        }
+        if (sourceEdge >= MAX_SIZE) {
+            return MAX_SIZE;
+        }
+        if (sourceEdge <= DEFAULT_SIZE) {
+            // Whole multiple of the source that reaches DEFAULT_SIZE, so a
+            // 16px sprite still renders at 64 (4x) rather than at 16.
+            int multiple = Math.max(1, DEFAULT_SIZE / sourceEdge);
+            return sourceEdge * multiple;
+        }
+        return sourceEdge;
+    }
 
     /**
      * Supersampling factor. An axis-aligned model lands on exact sample

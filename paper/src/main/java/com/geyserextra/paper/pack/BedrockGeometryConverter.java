@@ -118,58 +118,26 @@ public final class BedrockGeometryConverter {
     }
 
     /**
-     * Applies Java's own left-hand rule to a display transform's rotation,
-     * <b>before</b> any Java&rarr;Bedrock conversion.
+     * Puts the off hand on the other side of the body: negates the X component
+     * of a display transform's translation, <b>before</b> any Java&rarr;Bedrock
+     * conversion.
      *
-     * <p>Vanilla {@code ItemTransform#apply(boolean leftHand, PoseStack)}
-     * negates the Y and Z rotation and the X translation whenever the item is
-     * rendered in the left hand:</p>
-     * <pre>
-     *   if (leftHand) { f1 = -f1; f2 = -f2; }
-     *   int i = leftHand ? -1 : 1;
-     *   poseStack.translate(i * translation.x(), translation.y(), translation.z());
-     * </pre>
-     * <p>This happens <b>unconditionally for the left hand</b> — it is not a
-     * fallback for models that omit {@code *_lefthand}. When a model does omit
-     * the slot, {@code ItemTransforms.Deserializer} substitutes the
-     * <i>right</i>-hand transform object, which is still not
-     * {@code NO_TRANSFORM}, so {@code apply} negates that too. A model that
-     * declares {@code firstperson_lefthand.rotation = [55, 0, -90]} against a
-     * right hand of {@code [55, 0, 90]} is therefore asking to be rendered at
-     * {@code +90} in both hands; forwarding the literal {@code -90} flips the
-     * blade the wrong way round. 84 of the 102 hand slots in the TrinityForge
-     * pack follow exactly that negated-Z pattern.</p>
+     * <p>This is the one part of vanilla's left-hand handling that carries over
+     * to Bedrock, and java2bedrock agrees — its off-hand animations differ from
+     * the main-hand ones only in emitting {@code +translation.x} where the main
+     * hand emits {@code -translation.x}. The rotation half of vanilla's rule
+     * ({@code ItemTransform#apply} also negates rotation Y and Z) is
+     * deliberately <em>not</em> reproduced, because it exists to compensate
+     * Java's mirrored left arm and Bedrock's off-hand attachment already
+     * accounts for handedness; see the "Off hand" section of
+     * {@link BedrockAttachableWriter}'s class javadoc for the full reasoning
+     * and for what went wrong when it was applied here.</p>
      *
-     * <p>The translation half of the same rule lives in
-     * {@link #applyJavaLeftHandTranslation}; the two are always applied
-     * together, because they are two halves of one {@code apply()} call.</p>
-     */
-    public static float[] applyJavaLeftHandRotation(float[] javaRotation) {
-        if (javaRotation == null || javaRotation.length < 3) {
-            return new float[]{0f, 0f, 0f};
-        }
-        return new float[]{javaRotation[0], -javaRotation[1], -javaRotation[2]};
-    }
-
-    /**
-     * The translation half of {@link #applyJavaLeftHandRotation}: vanilla
-     * {@code ItemTransform#apply(leftHand, PoseStack)} negates the X
-     * translation for the left hand, unconditionally and for whichever
-     * transform the slot resolved to.
-     *
-     * <p>Both halves have to be applied, and applied at the same point in the
-     * pipeline — <em>before</em> the Java&rarr;Bedrock mapping, on the declared
-     * values. What comes out is the transform Java actually renders; only then
-     * is it a righthand-shaped quantity that the single Java&rarr;Bedrock
-     * mirror ({@code x} negates) is allowed to touch.</p>
-     *
-     * <p>Applying the rule to the rotation but not the translation leaves the
-     * off hand's emitted X at {@code -declared.x} where the main hand's is
-     * {@code -rendered.x}, i.e. off by {@code 2 * declared.x} in the direction
-     * of the main hand — nothing at all for a weapon that declares no X
-     * offset, and a body-width for one that declares a large one. That
-     * proportionality is the signature to look for: it is what a sign error
-     * looks like, not what a wrong bone binding looks like.</p>
+     * <p>Getting this sign wrong is off by {@code 2 * declared.x} toward the
+     * main hand — nothing at all for a weapon that declares no X offset, and a
+     * body-width for one that declares a large one. That proportionality is the
+     * signature to look for: it is what a sign error looks like, not what a
+     * wrong bone binding looks like.</p>
      */
     public static float[] applyJavaLeftHandTranslation(float[] javaTranslation) {
         if (javaTranslation == null || javaTranslation.length < 3) {

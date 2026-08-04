@@ -25,15 +25,18 @@ public final class VanillaBuiltinDisplays {
      * {@code item/handheld} display.
      *
      * <p>The left-hand slots are <b>declared, not omitted</b>, and that
-     * distinction decides how the item sits in the off hand. Mojang's
+     * distinction decides how the item sits in the off hand: Mojang's
      * {@code ItemTransforms.Deserializer} substitutes the right-hand transform
-     * only when a {@code *_lefthand} entry is absent, and
-     * {@code ItemTransform#apply(leftHand, …)} negates rotation Y/Z either way.
-     * So an omitted slot renders mirrored, while handheld's declared
-     * {@code [0, 90, -55]} negates back to {@code [0, -90, 55]} — identical to
-     * the right hand. Leaving these null therefore turned every tool inherited
-     * from {@code item/handheld} 180° about Y in the off hand, blade pointing
-     * backwards, for the 84 pack entries that reach this constant.</p>
+     * only when a {@code *_lefthand} entry is absent. Handheld declares
+     * {@code [0, 90, -55]} against a right hand of {@code [0, -90, 55]}, and
+     * the writer emits whichever slot resolved as authored, so carrying these
+     * is what gives the off hand its mirrored pose. Leaving them null would
+     * fall back to the right-hand values and render both hands the same way,
+     * for the 84 pack entries that reach this constant.</p>
+     *
+     * <p>Note the writer does <em>not</em> apply
+     * {@code ItemTransform#apply(leftHand, …)}'s rotation negation on top —
+     * see the "Off hand" section of {@link BedrockAttachableWriter}.</p>
      */
     public static final JavaModelDisplay HANDHELD = new JavaModelDisplay(
         transform(0f, -90f, 25f, 1.13f, 3.2f, 1.13f, 0.68f),

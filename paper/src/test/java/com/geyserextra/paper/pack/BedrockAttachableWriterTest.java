@@ -536,12 +536,13 @@ class BedrockAttachableWriterTest {
      * against the same real-world transform values.
      */
     @Test
-    @DisplayName("off hand applies Java's left-hand rule to the declared *_lefthand slot")
+    @DisplayName("off hand emits the declared *_lefthand rotation as authored")
     void offHandUsesLeftHandTransform() {
         // Dagger-class: the left-hand slot states rotation.z = -90 against a
-        // right hand of +90. Vanilla ItemTransform#apply negates Y and Z for
-        // the left hand, so the author's -90 is a request to render at +90 —
-        // the same orientation as the right hand.
+        // right hand of +90. That declared -90 is what gets emitted. Vanilla
+        // would negate it back to +90 (ItemTransform#apply), but that negation
+        // compensates Java's mirrored left arm and Bedrock does not need it —
+        // see BedrockAttachableWriter's "Off hand" javadoc.
         JavaModelDisplay display = new JavaModelDisplay(
             new JavaModelDisplay.Transform(
                 new float[]{55f, 0f, 90f}, new float[]{1.13f, 3.2f, -2.12f},
@@ -567,21 +568,22 @@ class BedrockAttachableWriterTest {
 
         String thirdMain = extractAnimation(anim, "thirdperson_main_hand").replaceAll("\\s+", "");
         String thirdOff = extractAnimation(anim, "thirdperson_off_hand").replaceAll("\\s+", "");
-        // Java's left-hand rule turns the declared +7.5 into a rendered -7.5,
-        // the same side as the right hand's -6.5; the single Java->Bedrock
-        // mirror then negates both. Emitting -7.5 (mirroring the DECLARED
-        // value) put the weapon 15 units out on the main-hand side.
+        // Translation X still negates for the off hand — the one half of
+        // vanilla's left-hand rule that does carry over. The declared +7.5
+        // becomes -7.5, and the Java->Bedrock mirror negates it back to +7.5,
+        // putting the weapon on the off-hand side. Emitting the declared value
+        // unmirrored put it 15 units out on the main-hand side.
         assertThat(thirdMain).contains("\"position\":[6.5,4.0,0.5]");
         assertThat(thirdOff).contains("\"position\":[7.5,4.0,0.5]");
-        // Z comes out at +90 in BOTH hands: the author's -90 is pre-compensation
-        // for Java's negation. Emitting the literal -90 is what put the off-hand
-        // weapon 180 degrees round the wrong way.
+        // Rotation is NOT negated, so the hands come out opposite: the author's
+        // -90 stays -90. Forcing them equal (by also applying vanilla's
+        // rotation negation) is what put every off-hand item 180 degrees round.
         assertThat(thirdMain).contains("\"geyserextra_z\":{\"rotation\":[0.0,0.0,90.0]}");
-        assertThat(thirdOff).contains("\"geyserextra_z\":{\"rotation\":[0.0,0.0,90.0]}");
+        assertThat(thirdOff).contains("\"geyserextra_z\":{\"rotation\":[0.0,0.0,-90.0]}");
     }
 
     @Test
-    @DisplayName("off hand still gets Java's left-hand negation when no *_lefthand slot exists")
+    @DisplayName("off hand falls back to the right-hand slot, unnegated, when no *_lefthand exists")
     void offHandFallsBackToMirroredRightHand() {
         JavaModelDisplay display = new JavaModelDisplay(
             null,
@@ -599,17 +601,18 @@ class BedrockAttachableWriterTest {
         String anim = artifacts.get(BedrockAttachableWriter.animationEntryPath("test_plain"));
 
         // ItemTransforms.Deserializer substitutes the right-hand transform for
-        // the missing slot, and apply(leftHand=true) still negates it — the
-        // rule is unconditional, not a fallback. Java therefore renders this
-        // model lopsided: rendered X is +6.5 in the off hand against -6.5 in
-        // the main hand, which is the look that makes authors add an explicit
-        // *_lefthand slot. Reproducing Java means reproducing that, so the
-        // emitted X is the opposite of the main hand's — the reverse of the
-        // declared-slot case above, and the reason the sign cannot be decided
-        // from which hand it is.
+        // the missing slot, so that is what the off hand renders — unnegated,
+        // which leaves its rotation identical to the main hand's. Note this is
+        // the exact inverse of the declared-slot case above, where the two
+        // hands come out opposite: a model that pre-mirrors its lefthand slot
+        // gets mirrored hands, one that omits it gets matching hands. The
+        // rotation therefore cannot be decided from which hand it is, only
+        // from which slot supplied it.
         String off = extractAnimation(anim, "thirdperson_off_hand").replaceAll("\\s+", "");
+        assertThat(off).contains("\"geyserextra_z\":{\"rotation\":[0.0,0.0,90.0]}");
+        // Translation X still mirrors, so the item sits on the off-hand side
+        // even though the rotation matched.
         assertThat(off).contains("\"position\":[-6.5,4.0,0.5]");
-        assertThat(off).contains("\"geyserextra_z\":{\"rotation\":[0.0,0.0,-90.0]}");
         assertThat(extractAnimation(anim, "thirdperson_main_hand").replaceAll("\\s+", ""))
             .contains("\"position\":[6.5,4.0,0.5]");
     }

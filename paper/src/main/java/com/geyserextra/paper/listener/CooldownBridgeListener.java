@@ -5,6 +5,7 @@ import com.geyserextra.core.util.CustomItemCooldownGroups;
 import com.geyserextra.paper.GeyserExtraPaper;
 import com.geyserextra.paper.scanner.CustomItemScanner;
 import com.geyserextra.paper.util.BedrockPlayerUtil;
+import com.geyserextra.paper.util.DebugLog;
 import io.papermc.paper.event.player.PlayerItemGroupCooldownEvent;
 import org.bukkit.NamespacedKey;
 import org.bukkit.entity.Player;
@@ -44,9 +45,10 @@ public final class CooldownBridgeListener implements Listener {
      * Emits a per-event cooldown boundary trace, but only when
      * {@code general.debugMode} is set.
      *
-     * <p>Logged at INFO rather than FINE on purpose: the server runtime's
-     * handler is pinned to INFO, so FINE records are dropped before they reach
-     * the console and the trace would be invisible exactly when it is wanted.
+     * <p>Delegates to {@link DebugLog}, which exists because of the finding
+     * this method arrived at first: the server runtime's handler is pinned to
+     * INFO, so FINE records never reach the console and a {@code fine()} trace
+     * would be invisible exactly when it is wanted.</p>
      *
      * <p>Only cooldown-bearing events reach this. The per-input traces that
      * used to sit on interact, arm swing and melee damage are gone: they fired
@@ -55,9 +57,7 @@ public final class CooldownBridgeListener implements Listener {
      * trace does not already carry at the point the mapping is chosen.</p>
      */
     private void diagnostic(String message) {
-        if (plugin.getGeyserExtraConfig().general().debugMode()) {
-            plugin.getLogger().info(message);
-        }
+        DebugLog.log(plugin.getLogger(), () -> message);
     }
 
     public CooldownBridgeListener(GeyserExtraPaper plugin, CustomItemScanner scanner) {

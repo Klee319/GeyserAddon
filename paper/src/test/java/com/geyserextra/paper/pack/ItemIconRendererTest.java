@@ -2,6 +2,7 @@ package com.geyserextra.paper.pack;
 
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
 import javax.imageio.ImageIO;
@@ -568,5 +569,82 @@ class ItemIconRendererTest {
 
     private static String sanitize(String raw) {
         return raw.toLowerCase(java.util.Locale.ROOT).replaceAll("[^a-z0-9_]", "_");
+    }
+
+    @Nested
+    @DisplayName("output size follows the source resolution")
+    class OutputSize {
+
+        @Test
+        @DisplayName("a high-resolution texture is never rendered smaller than itself")
+        void highResolutionArtIsNotDownscaled() {
+            // The actual defect behind "size and centre are right but the
+            // quality is bad": every source above 64px was being resampled
+            // down to 64. The reference pack ships 128, 256 and 512px items.
+            assertThat(ItemIconRenderer.sizeFor(128)).isEqualTo(128);
+            assertThat(ItemIconRenderer.sizeFor(256)).isEqualTo(256);
+            assertThat(ItemIconRenderer.sizeFor(100)).isEqualTo(100);
+        }
+
+        @Test
+        @DisplayName("very large art is capped rather than shipped at full size")
+        void oversizedArtIsCapped() {
+            // A 512px icon is past what an inventory slot can show, so the cap
+            // is a deliberate downscale — the only one left.
+            assertThat(ItemIconRenderer.sizeFor(512)).isEqualTo(ItemIconRenderer.MAX_SIZE);
+            assertThat(ItemIconRenderer.sizeFor(4096)).isEqualTo(ItemIconRenderer.MAX_SIZE);
+        }
+
+        @Test
+        @DisplayName("small art is upscaled by a whole multiple so texels stay square")
+        void smallArtUpscalesByAWholeMultiple() {
+            // Whole multiples keep every source texel on output-pixel
+            // boundaries. A non-integer ratio is what turns pixel art into
+            // mush even when the output is larger than the input.
+            assertThat(ItemIconRenderer.sizeFor(16)).isEqualTo(64);
+            assertThat(ItemIconRenderer.sizeFor(32)).isEqualTo(64);
+            assertThat(ItemIconRenderer.sizeFor(64)).isEqualTo(64);
+            for (int source : new int[]{16, 32, 64}) {
+                assertThat(ItemIconRenderer.sizeFor(source) % source)
+                    .as("size for %dpx art divides evenly", source)
+                    .isZero();
+            }
+        }
+
+        @Test
+        @DisplayName("a missing or degenerate source size falls back to the default")
+        void degenerateSourceFallsBack() {
+            assertThat(ItemIconRenderer.sizeFor(0)).isEqualTo(ItemIconRenderer.DEFAULT_SIZE);
+            assertThat(ItemIconRenderer.sizeFor(-1)).isEqualTo(ItemIconRenderer.DEFAULT_SIZE);
+        }
+
+        @Test
+        @DisplayName("a 128px sprite keeps its detail instead of being crushed to 64")
+        void highResolutionRenderKeepsDetail() {
+            // End-to-end rather than arithmetic: renders the same model from a
+            // 128px texture and checks the icon comes out at 128, which is the
+            // property the pixel comparison in the bug report turned on.
+            BufferedImage texture = new BufferedImage(128, 128, BufferedImage.TYPE_INT_ARGB);
+            for (int y = 0; y < 128; y++) {
+                for (int x = 0; x < 128; x++) {
+                    // Fine checkerboard: survives a 1:1 render, disappears
+                    // under a 2:1 downscale.
+                    texture.setRGB(x, y, ((x + y) % 2 == 0) ? 0xFFFF0000 : 0xFF0000FF);
+                }
+            }
+            JavaModelGeometry geometry = new JavaModelGeometry(List.of(
+                new JavaModelGeometry.Element(
+                    new float[]{0f, 0f, 7.5f}, new float[]{16f, 16f, 8.5f}, null,
+                    Map.of("south", new JavaModelGeometry.Face(
+                        new float[]{0f, 0f, 16f, 16f}, "#layer0", 0)))));
+
+            BufferedImage icon = ItemIconRenderer.render(
+                geometry, null, null, texture,
+                ItemIconRenderer.sizeFor(128), null);
+
+            assertThat(icon).isNotNull();
+            assertThat(icon.getWidth()).isEqualTo(128);
+            assertThat(icon.getHeight()).isEqualTo(128);
+        }
     }
 }

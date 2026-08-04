@@ -1414,9 +1414,17 @@ public final class AutoBedrockPackBuilder {
                     // Leave it out; render() falls back to the primary texture.
                 }
             }
+            // Size the icon to the artwork, not to a constant: a fixed 64
+            // downscaled every texture above that and destroyed the detail.
+            // Per-face textures count too — a model whose sides are 128px is
+            // still a 128px model even when its primary layer is smaller.
+            int sourceEdge = Math.max(texture.getWidth(), texture.getHeight());
+            for (java.awt.image.BufferedImage img : perFace.values()) {
+                sourceEdge = Math.max(sourceEdge, Math.max(img.getWidth(), img.getHeight()));
+            }
             java.awt.image.BufferedImage icon = ItemIconRenderer.render(
                 geometry, task.gui(), perFace::get, texture,
-                ItemIconRenderer.DEFAULT_SIZE, logger);
+                ItemIconRenderer.sizeFor(sourceEdge), logger);
             if (icon == null) {
                 return null;
             }
