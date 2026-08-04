@@ -3,6 +3,7 @@ package com.geyserextra.paper.pack;
 import com.geyserextra.core.config.GeyserExtraConfig.AttachableGenerationConfig;
 
 import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -142,6 +143,192 @@ class VanillaBuiltinDisplaysTest {
         String off = jsonBlockAfter(anim, "thirdperson_off_hand");
         assertThat(main).isNotNull();
         assertThat(off).as("off-hand third-person animation").isEqualTo(main);
+    }
+
+    @Nested
+    @DisplayName("unresolved vanilla parent classification")
+    class ParentClassification {
+
+        @Test
+        @DisplayName("tool suffixes reach handheld across every material tier")
+        void toolSuffixesResolveToHandheld() {
+            // Suffix rather than an enumerated tier list, so copper (1.21.9)
+            // and any future material stay classified without an edit.
+            for (String name : new String[]{
+                "minecraft:item/netherite_sword", "item/copper_sword",
+                "minecraft:item/diamond_pickaxe", "minecraft:item/wooden_hoe",
+                "minecraft:item/netherite_axe", "minecraft:item/diamond_shovel"}) {
+                assertThat(VanillaBuiltinDisplays.forUnresolvedParent(name))
+                    .as(name).isSameAs(VanillaBuiltinDisplays.HANDHELD);
+                assertThat(VanillaBuiltinDisplays.nextBuiltinParent(name))
+                    .as(name).isEqualTo("item/generated");
+            }
+        }
+
+        @Test
+        @DisplayName("everything unmatched falls back to generated, not handheld")
+        void unmatchedNamesFallBackToGenerated() {
+            // This is the fix. The previous revision returned HANDHELD for any
+            // item/* name, which put full armour sets, ingots and shards into a
+            // sword grip. item/generated is what these actually inherit in the
+            // client jar (verified against 1.21.11).
+            for (String name : new String[]{
+                "minecraft:item/netherite_helmet", "minecraft:item/diamond_boots",
+                "minecraft:item/iron_ingot", "minecraft:item/emerald",
+                "minecraft:item/string", "minecraft:item/leather",
+                "minecraft:item/echo_shard", "minecraft:item/prismarine_shard",
+                "minecraft:item/turtle_scute", "minecraft:item/iron_chain",
+                "minecraft:item/netherite_scrap"}) {
+                assertThat(VanillaBuiltinDisplays.forUnresolvedParent(name))
+                    .as(name).isSameAs(VanillaBuiltinDisplays.GENERATED);
+                assertThat(VanillaBuiltinDisplays.nextBuiltinParent(name))
+                    .as(name).isNull();
+            }
+        }
+
+        @Test
+        @DisplayName("bow and its pulling frames carry bow's own asymmetric pose")
+        void bowFamilyResolvesToBow() {
+            for (String name : new String[]{
+                "minecraft:item/bow", "minecraft:item/bow_pulling_0",
+                "minecraft:item/bow_pulling_1", "minecraft:item/bow_pulling_2"}) {
+                assertThat(VanillaBuiltinDisplays.forUnresolvedParent(name))
+                    .as(name).isSameAs(VanillaBuiltinDisplays.BOW);
+            }
+            // The left hand is genuinely not a mirror here: Mojang negates Y/Z
+            // for the off hand, so -280 comes back as +280 against the main
+            // hand's +260. Twenty degrees apart, by declaration.
+            assertThat(VanillaBuiltinDisplays.BOW.thirdpersonRighthand().rotation())
+                .containsExactly(-80f, 260f, -40f);
+            assertThat(VanillaBuiltinDisplays.BOW.thirdpersonLefthand().rotation())
+                .containsExactly(-80f, -280f, 40f);
+        }
+
+        @Test
+        @DisplayName("mace, trident and spear each get their own vanilla pose")
+        void bespokeWeaponsAreNotLumpedIntoHandheld() {
+            assertThat(VanillaBuiltinDisplays.forUnresolvedParent("minecraft:item/mace"))
+                .isSameAs(VanillaBuiltinDisplays.HANDHELD_MACE);
+            assertThat(VanillaBuiltinDisplays.nextBuiltinParent("minecraft:item/mace"))
+                .isEqualTo("item/handheld");
+
+            // trident.json / netherite_spear.json are plain generated: the held
+            // pose lives in the separate *_in_hand model, and a pack model that
+            // parents on the flat one inherits the flat display in Java too.
+            assertThat(VanillaBuiltinDisplays.forUnresolvedParent("minecraft:item/trident"))
+                .isSameAs(VanillaBuiltinDisplays.GENERATED);
+            assertThat(VanillaBuiltinDisplays.forUnresolvedParent("minecraft:item/netherite_spear"))
+                .isSameAs(VanillaBuiltinDisplays.GENERATED);
+
+            assertThat(VanillaBuiltinDisplays.forUnresolvedParent("minecraft:item/trident_in_hand"))
+                .isSameAs(VanillaBuiltinDisplays.TRIDENT_IN_HAND);
+            assertThat(VanillaBuiltinDisplays.nextBuiltinParent("minecraft:item/trident_in_hand"))
+                .as("trident_in_hand has no parent in the client jar").isNull();
+
+            for (String name : new String[]{
+                "minecraft:item/spear_in_hand", "minecraft:item/netherite_spear_in_hand",
+                "minecraft:item/diamond_spear_in_hand"}) {
+                assertThat(VanillaBuiltinDisplays.forUnresolvedParent(name))
+                    .as(name).isSameAs(VanillaBuiltinDisplays.SPEAR_IN_HAND);
+            }
+        }
+
+        @Test
+        @DisplayName("spear_in_hand keeps its non-uniform scale")
+        void spearScaleIsNotCollapsedToAScalar() {
+            // 1.7/1.7/0.85 - the blade is stretched 2:1 against Z. A scalar
+            // scale here renders every spear stubby, which is why the builtin
+            // table needs a per-axis constructor at all.
+            assertThat(VanillaBuiltinDisplays.SPEAR_IN_HAND.thirdpersonRighthand().scale())
+                .containsExactly(1.7f, 1.7f, 0.85f);
+            assertThat(VanillaBuiltinDisplays.SPEAR_IN_HAND.firstpersonRighthand().scale())
+                .containsExactly(1.36f, 1.36f, 0.68f);
+        }
+
+        @Test
+        @DisplayName("rod-shaped vanilla items keep the handheld grip they really inherit")
+        void rodItemsAreNotDemotedToGenerated() {
+            // Regression guard for the new generated default: these five carry
+            // no tool suffix but do parent on item/handheld in the client jar,
+            // so a plain "default to generated" rule would have quietly flipped
+            // them from a grip to a flat hold. item/stick is referenced by the
+            // reference pack.
+            for (String name : new String[]{
+                "minecraft:item/stick", "minecraft:item/debug_stick",
+                "minecraft:item/blaze_rod", "minecraft:item/breeze_rod",
+                "minecraft:item/bone", "minecraft:item/bamboo"}) {
+                assertThat(VanillaBuiltinDisplays.forUnresolvedParent(name))
+                    .as(name).isSameAs(VanillaBuiltinDisplays.HANDHELD);
+            }
+            assertThat(VanillaBuiltinDisplays.forUnresolvedParent("minecraft:item/fishing_rod"))
+                .isSameAs(VanillaBuiltinDisplays.HANDHELD_ROD);
+            assertThat(VanillaBuiltinDisplays.nextBuiltinParent("minecraft:item/fishing_rod"))
+                .isEqualTo("item/handheld");
+        }
+
+        @Test
+        @DisplayName("non-item refs are still declined so the parent walk can stop")
+        void nonItemRefsReturnNull() {
+            assertThat(VanillaBuiltinDisplays.forUnresolvedParent("block/cube_all")).isNull();
+            assertThat(VanillaBuiltinDisplays.forUnresolvedParent("builtin/generated")).isNull();
+            assertThat(VanillaBuiltinDisplays.forUnresolvedParent(null)).isNull();
+            assertThat(VanillaBuiltinDisplays.forUnresolvedParent("")).isNull();
+            assertThat(VanillaBuiltinDisplays.nextBuiltinParent("block/cube_all")).isNull();
+        }
+
+        @Test
+        @DisplayName("display lookup and parent lookup never disagree")
+        void displayAndNextParentStayInSync() {
+            // The two entry points share one classifier precisely so they
+            // cannot drift: a name that yields a display must also yield a
+            // well-formed continuation, and a name that yields none must end
+            // the walk. Drift here silently truncates the merge and leaves
+            // ground/head unset on a whole family of items.
+            for (String name : new String[]{
+                "item/handheld", "item/generated", "item/handheld_rod",
+                "item/handheld_mace", "item/mace", "item/bow", "item/bow_pulling_2",
+                "item/crossbow", "item/crossbow_pulling_1", "item/shield",
+                "item/trident_in_hand", "item/spear_in_hand", "item/netherite_sword",
+                "item/emerald", "block/cube_all", "builtin/generated"}) {
+                boolean hasDisplay = VanillaBuiltinDisplays.forUnresolvedParent(name) != null;
+                String next = VanillaBuiltinDisplays.nextBuiltinParent(name);
+                if (!hasDisplay) {
+                    assertThat(next).as("%s yields no display", name).isNull();
+                } else if (next != null) {
+                    assertThat(VanillaBuiltinDisplays.forUnresolvedParent(next))
+                        .as("%s continues to %s, which must itself resolve", name, next)
+                        .isNotNull();
+                }
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("a pack model parented on item/bow inherits bow's pose, not a sword grip")
+    void bowParentResolvesThroughTheReader() throws Exception {
+        // End-to-end through the parent walk: this is the path that was
+        // returning HANDHELD for all 40 bow-family entries in the reference
+        // pack, so the unit-level classification alone is not enough of a guard.
+        Path model = tempDir.resolve("assets/minecraft/models/item/custom_bow.json");
+        Files.createDirectories(model.getParent());
+        Files.writeString(model, """
+            {"parent":"minecraft:item/bow_pulling_1","textures":{
+            "layer0":"minecraft:item/custom_bow"}}
+            """);
+
+        JavaPackReader reader = new JavaPackReader(
+            tempDir, "AUTO", Logger.getAnonymousLogger(), false);
+        JavaModelDisplay display =
+            reader.resolveDisplayFromModel("minecraft:item/custom_bow");
+
+        assertThat(display).isNotNull();
+        assertThat(display.thirdpersonRighthand().rotation())
+            .containsExactly(-80f, 260f, -40f);
+        assertThat(display.thirdpersonRighthand().translation())
+            .containsExactly(-1f, -2f, 2.5f);
+        // ground/head still arrive, because bow chains on to item/generated.
+        assertThat(display.ground()).as("ground inherited via bow -> generated").isNotNull();
+        assertThat(display.head()).as("head inherited via bow -> generated").isNotNull();
     }
 
     /**
