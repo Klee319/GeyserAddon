@@ -16,6 +16,7 @@ import org.bukkit.event.player.PlayerDropItemEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.PlayerInventory;
+import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.plugin.Plugin;
 
 import java.util.Map;
@@ -135,10 +136,20 @@ public final class OffhandSwapListener implements Listener {
             return;
         }
 
+        PlayerInventory inv = player.getInventory();
         Item entity = event.getItemDrop();
         ItemStack droppedSnapshot = entity.getItemStack().clone();
-        int heldSlot = player.getInventory().getHeldItemSlot();
+        int heldSlot = inv.getHeldItemSlot();
         boolean sneakingAtDrop = player.isSneaking();
+
+        // Post-drop count of the held slot, but only when it still holds the
+        // same item. The upstream-veto branch uses it to tell "the stack came
+        // back to this slot" from "this slot merely happens to hold something
+        // similar"; see decide().
+        ItemStack heldNow = inv.getItem(heldSlot);
+        int heldAmountAtDrop = heldNow != null && heldNow.isSimilar(droppedSnapshot)
+            ? heldNow.getAmount()
+            : 0;
 
         if (!tryAcquireOp(player)) {
             // A previous gesture is still in flight; the in-flight mutation
@@ -147,7 +158,7 @@ public final class OffhandSwapListener implements Listener {
             return;
         }
         schedule(player, () -> completeSneakDropSwap(
-            player, heldSlot, droppedSnapshot, entity, sneakingAtDrop));
+            player, heldSlot, droppedSnapshot, heldAmountAtDrop, entity, sneakingAtDrop));
     }
 
     /**
@@ -161,6 +172,7 @@ public final class OffhandSwapListener implements Listener {
         Player player,
         int heldSlot,
         ItemStack droppedSnapshot,
+        int heldAmountAtDrop,
         Item entity,
         boolean sneakingAtDrop
     ) {
@@ -182,8 +194,15 @@ public final class OffhandSwapListener implements Listener {
             : null;
         // Only meaningful when the entity never reached the world: it says the
         // held slot got the whole pre-drop stack back, which is how CraftBukkit
-        // resolves a cancelled hand-thrown drop.
-        boolean slotHoldsDrop = !isEmpty(occupant) && occupant.isSimilar(droppedSnapshot);
+        // resolves a cancelled hand-thrown drop. The count has to have grown by
+        // exactly the dropped amount — Paper's cancel fallback is a plain
+        // addItem() that lands in whatever slot is free, so "this slot holds a
+        // similar item" on its own would also match a slot that never received
+        // anything.
+        boolean slotHoldsDrop = !isEmpty(occupant)
+            && occupant.isSimilar(droppedSnapshot)
+            && heldSlotAbsorbedTheDrop(
+                heldAmountAtDrop, occupant.getAmount(), droppedSnapshot.getAmount());
 
         SwapDecision decision = decide(
             sneakingAtDrop, player.isSneaking(), entityUsable, slotHoldsDrop, original != null);
@@ -229,13 +248,22 @@ public final class OffhandSwapListener implements Listener {
      *
      * <p>Note there is no "was the event cancelled" input. Reading
      * {@code isCancelled()} at HIGHEST misses a veto applied by a later handler,
-     * and — more importantly — CraftBukkit's cancel path only restores to the
-     * held slot for hand-thrown drops; its fallback branch calls
-     * {@code addItem}, which lands the stack in an arbitrary free slot. So the
-     * cancelled case is recognised by observing that the entity never reached
-     * the world <em>and</em> the held slot holds the stack again. Anything else
-     * aborts, which stops an inventory-window drag-out inside a
-     * drop-protected region from silently exchanging two unrelated stacks.</p>
+     * and — more importantly — Paper's cancel path only restores to the held
+     * slot for hand-thrown drops; its fallback branch calls {@code addItem},
+     * which lands the stack in an arbitrary free slot. So the cancelled case is
+     * recognised by observing that the entity never reached the world
+     * <em>and</em> the held slot grew by exactly the dropped amount.</p>
+     *
+     * <p>What that guarantees, precisely: {@code SWAP_RESTORED_STACK} is a pure
+     * exchange of two slots, so it can never change the item count whatever the
+     * veto did. What it does <b>not</b> guarantee is that the drop originated
+     * from the held slot. {@code addItem} fills partial stacks before empty
+     * ones and scans the hotbar first, so a drag-out from an inventory window
+     * can be merged into a similar held stack and satisfy the test — the player
+     * then gets a hand swap they did not ask for. Ruling that out needs a
+     * "was this thrown from the hand" signal that Bukkit does not expose. The
+     * amount check does rule out the commoner case where the restore landed in
+     * some other slot entirely and the held slot merely looked similar.</p>
      */
     static SwapDecision decide(
         boolean sneakingAtDrop,
@@ -639,15 +667,25 @@ public final class OffhandSwapListener implements Listener {
      */
     private void schedule(Player player, Runnable task) {
         UUID uuid = player.getUniqueId();
-        Bukkit.getScheduler().runTask(plugin, () -> {
-            try {
-                if (player.isOnline() && !player.isDead()) {
-                    task.run();
+        try {
+            Bukkit.getScheduler().runTask(plugin, () -> {
+                try {
+                    if (player.isOnline() && !player.isDead()) {
+                        task.run();
+                    }
+                } finally {
+                    pendingOffhandOps.remove(uuid);
                 }
-            } finally {
-                pendingOffhandOps.remove(uuid);
-            }
-        });
+            });
+        } catch (Throwable failedToQueue) {
+            // runTask throws IllegalPluginAccessException once the plugin is
+            // being disabled (/reload, shutdown). Callers reserve the lock
+            // before calling in, so without this the UUID would stay in the
+            // pending set for the rest of the session and every later gesture
+            // and off-hand click correction for that player would be dropped.
+            pendingOffhandOps.remove(uuid);
+            throw failedToQueue;
+        }
     }
 
     private static boolean isEmpty(ItemStack stack) {
@@ -745,18 +783,21 @@ public final class OffhandSwapListener implements Listener {
      *       whatever the player was really holding.</li>
      * </ul>
      *
-     * <p>{@code isSimilar} is deliberately kept as the match test even though
-     * it can reject a genuine partial drop whose entity was mutated in place by
-     * another handler first (our own {@code BedrockEnchantmentHandler} strips
-     * {@code [GE]} lore from dropped stacks at HIGH, before this listener's
-     * HIGHEST). Loosening it to plain material equality would let an enchanted
-     * held stack absorb a dissimilar dropped one and clone its NBT, so the
-     * rarer mismatch is accepted: the caller leaves the entity on the ground
-     * and the gesture degrades to an ordinary drop.</p>
+     * <p>The match test is {@code isSimilar} widened to ignore lore, because a
+     * handler running earlier can rewrite the dropped entity's stack in place:
+     * this plugin's own {@code BedrockEnchantmentHandler} strips its injected
+     * {@code [GE]} lore from dropped items at HIGH, before this listener's
+     * HIGHEST. A plain {@code isSimilar} then rejects an ordinary partial drop
+     * of such an item — the gesture aborts for exactly the items players most
+     * want it on. Only lore is ignored; enchantments, damage, custom name and
+     * every other component still have to match, so a decorated stack can never
+     * absorb a plain one and clone its NBT.</p>
      */
     private Reconstructed reconstructOriginalMain(ItemStack remainder, ItemStack droppedItem) {
         boolean slotEmptied = remainder == null || remainder.getType() == Material.AIR;
-        if (!slotEmptied && !remainder.isSimilar(droppedItem)) {
+        if (!slotEmptied
+            && !remainder.isSimilar(droppedItem)
+            && !similarIgnoringLore(remainder, droppedItem)) {
             return null;
         }
         // The remainder is the stack the server never handed to another
@@ -776,6 +817,46 @@ public final class OffhandSwapListener implements Listener {
         ItemStack overflow = template.clone();
         overflow.setAmount(surplus);
         return new Reconstructed(mainStack, overflow);
+    }
+
+    /**
+     * Whether the held slot's count grew by exactly the dropped amount — what
+     * "Paper's cancel handling put the stack back here" looks like from the
+     * outside. A slot that never received anything keeps its pre-drop count and
+     * fails this even when it holds a similar item.
+     *
+     * <p>Package-private and free of Bukkit types so the guard can be pinned by
+     * tests.</p>
+     */
+    static boolean heldSlotAbsorbedTheDrop(
+        int heldAmountAtDrop, int occupantAmountNow, int droppedAmount) {
+        return occupantAmountNow == heldAmountAtDrop + droppedAmount;
+    }
+
+    /**
+     * {@link ItemStack#isSimilar} with lore excluded from the comparison.
+     *
+     * <p>Exists so that a handler which rewrites a dropped stack's lore in
+     * place before this listener runs cannot make a stack stop matching itself.
+     * Both sides are cloned, so neither the inventory nor the item entity is
+     * touched.</p>
+     */
+    private static boolean similarIgnoringLore(ItemStack a, ItemStack b) {
+        if (a.getType() != b.getType()) {
+            return false;
+        }
+        ItemStack strippedA = a.clone();
+        ItemStack strippedB = b.clone();
+        ItemMeta metaA = strippedA.getItemMeta();
+        ItemMeta metaB = strippedB.getItemMeta();
+        if (metaA == null || metaB == null) {
+            return false;
+        }
+        metaA.lore(null);
+        metaB.lore(null);
+        strippedA.setItemMeta(metaA);
+        strippedB.setItemMeta(metaB);
+        return strippedA.isSimilar(strippedB);
     }
 
     /**

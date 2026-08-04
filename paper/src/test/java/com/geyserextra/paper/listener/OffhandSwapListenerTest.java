@@ -145,6 +145,20 @@ class OffhandSwapListenerTest {
         }
 
         @Test
+        @DisplayName("a restore is only believed when the held slot grew by the dropped amount")
+        void restoreIsRecognisedByTheCountNotJustTheItemType() {
+            // Whole-stack drop: the slot was emptied, the cancel put it back.
+            assertThat(OffhandSwapListener.heldSlotAbsorbedTheDrop(0, 64, 64)).isTrue();
+            // Partial drop: 63 stayed behind, the cancelled 1 came back.
+            assertThat(OffhandSwapListener.heldSlotAbsorbedTheDrop(63, 64, 1)).isTrue();
+            // The restore landed in some other free slot -- Paper's cancel
+            // fallback is a plain addItem(). The held slot still holds a
+            // similar stack at its pre-drop count, and must NOT be swapped.
+            assertThat(OffhandSwapListener.heldSlotAbsorbedTheDrop(10, 10, 5)).isFalse();
+            assertThat(OffhandSwapListener.heldSlotAbsorbedTheDrop(0, 32, 64)).isFalse();
+        }
+
+        @Test
         @DisplayName("only one branch ever destroys the item entity")
         void exactlyOneBranchConsumesTheEntity() {
             // Every other outcome must leave the entity on the ground, which is
