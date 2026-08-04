@@ -809,9 +809,17 @@ public final class AutoBedrockPackBuilder {
         // and Bedrock clients drop stale cached packs reliably.
         int contentPatch = patchVersionFromContent(itemTextureJson, attachableArtifacts,
             entityTextureBytes, armorTextureBytes, itemTextureBytes);
+        // readPackVersionState() carries the last known hash forward across
+        // a promote (see its fallback branch): when the freshly built
+        // .pending.zip content hashes identically to what is already active,
+        // patchVersion below comes out equal to the version already on
+        // disk/cached by Bedrock clients. That is intentional, not a bug —
+        // identical bytes deserve an identical version so clients keep their
+        // cache instead of re-downloading a pack that did not actually
+        // change.
         PackVersionState prior = readPackVersionState(outputZip, logger);
         int patchVersion = nextMonotonicPatchVersion(
-            contentPatch, prior.lastPatch(), prior.lastContentHash());
+            contentPatch, prior.lastPatch(), prior.lastContentHash(), prior.hasContentHash());
         if (logger != null && patchVersion != contentPatch) {
             logger.info("[AutoPack] manifest patch " + contentPatch
                 + " raised to monotonic " + patchVersion
@@ -1039,13 +1047,29 @@ public final class AutoBedrockPackBuilder {
      * saturate — the live sidecar was already at 32219 of 32767, roughly 550
      * content changes from the point where the emitted version stops rising and
      * every Bedrock client silently keeps the pack it already cached.</p>
+     *
+     * <p>{@code hasLastContentHash} must be {@code false} whenever the caller
+     * cannot prove what hash the last emitted patch corresponds to (missing
+     * sidecar, unparseable line, no authoritative carry-over). Treating
+     * "unknown" as "content changed" is the fail-safe direction: worst case a
+     * client re-downloads a byte-identical pack. The reverse — treating
+     * "unknown" as "unchanged" — would let a genuinely changed pack keep its
+     * old version and leave clients stuck on stale content forever, which is
+     * strictly worse. This is also why {@code lastContentHash} alone cannot
+     * carry the "unknown" signal: {@code Math.floorMod(-1, 32768) == 32767} is
+     * a real, reachable hash value, so an in-band sentinel would make a
+     * genuine hash of 32767 indistinguishable from "unknown" and silently
+     * suppress a real content-changed bump.</p>
      */
-    static int nextMonotonicPatchVersion(int contentHash, int lastPatch, int lastContentHash) {
+    static int nextMonotonicPatchVersion(
+        int contentHash, int lastPatch, int lastContentHash, boolean hasLastContentHash
+    ) {
         int hash = Math.floorMod(contentHash, MAX_PACK_PATCH_VERSION + 1);
         if (lastPatch < 0) {
             lastPatch = 0;
         }
-        if (lastPatch > 0 && hash == Math.floorMod(lastContentHash, MAX_PACK_PATCH_VERSION + 1)) {
+        if (lastPatch > 0 && hasLastContentHash
+                && hash == Math.floorMod(lastContentHash, MAX_PACK_PATCH_VERSION + 1)) {
             return Math.min(lastPatch, MAX_PACK_SEQUENCE);
         }
         int next = Math.max(hash, lastPatch + 1);
@@ -1062,8 +1086,14 @@ public final class AutoBedrockPackBuilder {
         return Math.max(0, sequence) % (MAX_PACK_PATCH_VERSION + 1);
     }
 
-    private record PackVersionState(int lastPatch, int lastContentHash) {
-        static final PackVersionState EMPTY = new PackVersionState(0, -1);
+    /**
+     * {@code hasContentHash} makes "no known hash" an explicit flag instead
+     * of overloading {@code lastContentHash} with a magic sentinel value —
+     * see {@link #nextMonotonicPatchVersion} for why {@code -1} could not be
+     * used safely (its floorMod collides with a real content hash of 32767).
+     */
+    record PackVersionState(int lastPatch, int lastContentHash, boolean hasContentHash) {
+        static final PackVersionState EMPTY = new PackVersionState(0, -1, false);
     }
 
     private static Path packVersionSidecar(Path outputZip) {
@@ -1076,7 +1106,7 @@ public final class AutoBedrockPackBuilder {
      * first monotonic build after upgrade still jumps above a high client
      * cache (e.g. 26001).
      */
-    private static PackVersionState readPackVersionState(Path outputZip, Logger logger) {
+    static PackVersionState readPackVersionState(Path outputZip, Logger logger) {
         Path sidecar = packVersionSidecar(outputZip);
         if (Files.isRegularFile(sidecar)) {
             try {
@@ -1086,11 +1116,22 @@ public final class AutoBedrockPackBuilder {
                     String patchLine = lines.get(0).trim().replace("\uFEFF", "");
                     int patch = Integer.parseInt(patchLine);
                     int hash = -1;
+                    boolean hasHash = false;
                     if (lines.size() > 1) {
-                        hash = Integer.parseInt(lines.get(1).trim().replace("\uFEFF", ""));
+                        // A present-but-unparseable second line still leaves
+                        // hasHash=false: only a line that actually parses
+                        // counts as a known hash, matching the "unknown \u21D2
+                        // treat as changed" fail-safe documented on
+                        // nextMonotonicPatchVersion.
+                        try {
+                            hash = Integer.parseInt(lines.get(1).trim().replace("\uFEFF", ""));
+                            hasHash = true;
+                        } catch (NumberFormatException ignored) {
+                            // fall through with hasHash=false
+                        }
                     }
                     if (patch >= 0) {
-                        return new PackVersionState(patch, hash);
+                        return new PackVersionState(patch, hash, hasHash);
                     }
                 }
             } catch (Exception ex) {
@@ -1105,19 +1146,45 @@ public final class AutoBedrockPackBuilder {
         // so a promote-race cannot let the next pending regress below what
         // clients may already have cached from the active pack.
         int fromActiveSibling = 0;
+        boolean carryHash = false;
+        int carriedHash = -1;
         String name = outputZip.getFileName().toString();
         if (name.endsWith(".pending.zip")) {
             Path active = outputZip.resolveSibling(
                 name.substring(0, name.length() - ".pending.zip".length()) + ".zip");
-            fromActiveSibling = Math.max(
-                readPatchVersionFromZip(active, logger),
-                readPackVersionState(active, logger).lastPatch());
+            int activeZipPatch = readPatchVersionFromZip(active, logger);
+            // Recurses into readPackVersionState(active, ...); `active` never
+            // ends in ".pending.zip" (the suffix was just stripped off), so
+            // this terminates in the sidecar/zip-manifest branches above
+            // instead of looping.
+            //
+            // This branch is the NORMAL path after every promote, not a rare
+            // edge case: GeyserExtraExtension.java:369-375 moves the pending
+            // sidecar onto the active name as part of promoting a build, so
+            // by the time Paper starts again there is routinely no pending
+            // sidecar left to read directly — the active sibling's state is
+            // the only place the last emitted hash still exists.
+            PackVersionState activeSidecar = readPackVersionState(active, logger);
+            fromActiveSibling = Math.max(activeZipPatch, activeSidecar.lastPatch());
+            // Only trust the active sidecar's hash when it is at least as
+            // fresh as everything else on disk for this pack. Without this
+            // guard, a stale pending zip left over at a higher version than
+            // the active sidecar knows about could get paired with an
+            // older hash, making nextMonotonicPatchVersion wrongly report
+            // "unchanged" for content that has since moved on.
+            if (activeSidecar.hasContentHash()
+                    && activeSidecar.lastPatch() >= Math.max(fromZip, activeZipPatch)) {
+                carryHash = true;
+                carriedHash = activeSidecar.lastContentHash();
+            }
         }
         int floor = Math.max(fromZip, fromActiveSibling);
-        return floor > 0 ? new PackVersionState(floor, -1) : PackVersionState.EMPTY;
+        return floor > 0
+            ? new PackVersionState(floor, carriedHash, carryHash)
+            : PackVersionState.EMPTY;
     }
 
-    private static void writePackVersionState(
+    static void writePackVersionState(
         Path outputZip, int patchVersion, int contentHash, Logger logger
     ) {
         Path sidecar = packVersionSidecar(outputZip);
