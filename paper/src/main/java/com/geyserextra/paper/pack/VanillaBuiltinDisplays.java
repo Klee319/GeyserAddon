@@ -16,18 +16,38 @@ package com.geyserextra.paper.pack;
  */
 public final class VanillaBuiltinDisplays {
 
-    /** {@code item/handheld} display (right-hand slots only; writer mirrors left). */
+    /**
+     * {@code item/handheld} display.
+     *
+     * <p>The left-hand slots are <b>declared, not omitted</b>, and that
+     * distinction decides how the item sits in the off hand. Mojang's
+     * {@code ItemTransforms.Deserializer} substitutes the right-hand transform
+     * only when a {@code *_lefthand} entry is absent, and
+     * {@code ItemTransform#apply(leftHand, …)} negates rotation Y/Z either way.
+     * So an omitted slot renders mirrored, while handheld's declared
+     * {@code [0, 90, -55]} negates back to {@code [0, -90, 55]} — identical to
+     * the right hand. Leaving these null therefore turned every tool inherited
+     * from {@code item/handheld} 180° about Y in the off hand, blade pointing
+     * backwards, for the 84 pack entries that reach this constant.</p>
+     */
     public static final JavaModelDisplay HANDHELD = new JavaModelDisplay(
         transform(0f, -90f, 25f, 1.13f, 3.2f, 1.13f, 0.68f),
         transform(0f, -90f, 55f, 0f, 4f, 0.5f, 0.85f),
         null,
         null,
-        null);
+        null,
+        transform(0f, 90f, -25f, 1.13f, 3.2f, 1.13f, 0.68f),
+        transform(0f, 90f, -55f, 0f, 4f, 0.5f, 0.85f));
 
     /**
      * {@code item/generated} display. Supplies ground/head and the flatter
      * third-person hold used by non-tool 2D items; handheld overrides the
      * hand slots when both are merged.
+     *
+     * <p>Left-hand slots stay null on purpose: {@code generated.json} genuinely
+     * omits them, so Mojang mirrors the right hand and so must this. Its
+     * {@code fixed} slot is dropped because Bedrock renders item frames from the
+     * icon sprite, where an attachable cannot reach.</p>
      */
     public static final JavaModelDisplay GENERATED = new JavaModelDisplay(
         transform(0f, -90f, 25f, 1.13f, 3.2f, 1.13f, 0.68f),

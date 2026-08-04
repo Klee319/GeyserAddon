@@ -1111,6 +1111,13 @@ public final class JavaPackReader {
                 if (gui == null) gui = builtin.gui();
                 if (ground == null) ground = builtin.ground();
                 if (head == null) head = builtin.head();
+                // The left-hand slots must come across too. A missing
+                // *_lefthand means "mirror the right hand", so dropping
+                // handheld's declared entries here does not fall back to
+                // nothing — it actively flips every inherited tool 180 degrees
+                // about Y in the off hand.
+                if (firstHandLeft == null) firstHandLeft = builtin.firstpersonLefthand();
+                if (thirdHandLeft == null) thirdHandLeft = builtin.thirdpersonLefthand();
                 current = VanillaBuiltinDisplays.nextBuiltinParent(current);
                 hops++;
                 continue;
