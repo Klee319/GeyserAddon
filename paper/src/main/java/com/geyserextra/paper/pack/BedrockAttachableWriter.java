@@ -77,14 +77,17 @@ public final class BedrockAttachableWriter {
      * <p>Naming the off-hand bone explicitly — {@code c.item_slot == 'off_hand'
      * ? 'leftitem' : 'rightitem'} — was tried and <b>reverted</b>. The theory
      * was that the query failed to yield {@code leftitem}, because off-hand
-     * items rendered on the right arm displaced by their declared X offset
+     * items rendered displaced toward the main hand by their declared X offset
      * (greataxe 15.5 a body-width out, rapier 7.5 beside the hand, mace 0
-     * directly on it). The zero-offset case did rule out an X-sign cause, but
-     * it did not establish the binding as the cause. In game the explicit
-     * binding made things <em>worse</em>: third-person off hand had been
-     * correct and stopped being so, which is what a binding to a bone the
-     * player skeleton does not expose looks like. The query stays until
-     * something identifies the real off-hand fault.</p>
+     * directly on it). In game the explicit binding made things <em>worse</em>:
+     * third-person off hand stopped rendering where it had, which is what a
+     * binding to a bone the player skeleton does not expose looks like. The
+     * query is correct and stays.</p>
+     *
+     * <p>The displacement was not a binding fault at all: the off hand was
+     * emitting the wrong sign on translation X, which displaces an item in
+     * proportion to its declared offset and leaves a zero-offset item exactly
+     * where it belongs — the mace. See {@link #MIRROR_X}.</p>
      */
     private static final String ROOT_BONE_BINDING =
         "c.item_slot == 'head' ? 'head' : q.item_slot_to_bone_name(c.item_slot)";
@@ -108,7 +111,8 @@ public final class BedrockAttachableWriter {
         BedrockGeometryConverter.TranslationFrame.ZXY;
 
     /**
-     * Both hands negate the declared translation X.
+     * The Java&rarr;Bedrock frame mirror: negate translation X. One rule, both
+     * hands, applied to what Java <em>renders</em>.
      *
      * <p>Let {@code d} be the declared translation and {@code J} what Java
      * actually renders, after {@code ItemTransform#apply} negates X for the
@@ -118,17 +122,23 @@ public final class BedrockAttachableWriter {
      *   off  hand, d = lefthand:   J = (-d.x, d.y, d.z)
      * </pre>
      * <p>A model that omits {@code *_lefthand} gets the righthand transform
-     * substituted and still runs that negation, so {@code J} lands on the same
-     * value from either source. The main-hand mapping {@code J -> emitted} is
-     * confirmed correct in game and it negates X; Bedrock does not mirror the
-     * left arm's attachable frame for us — established when the first-person
-     * off-hand root had to be mirrored by hand to become visible at all — so
-     * the off hand needs the same mapping, i.e. negating X there too.</p>
+     * substituted and still runs that negation, so the source slot tells you
+     * nothing — {@code J} is what matters and it is always reachable. The
+     * main-hand mapping {@code J -> emitted} is confirmed correct in game and
+     * it negates X, so {@code emitted.x = -J.x} in both hands.
+     * {@link BedrockGeometryConverter#applyJavaLeftHandTranslation} produces
+     * {@code J} for the off hand; this flag is then the same mirror the main
+     * hand gets.</p>
      *
-     * <p>Keeping {@code +d.x} for lefthand-sourced transforms (java2bedrock's
-     * separate lefthand branch) lands the item {@code 2*d.x} off. This was
-     * briefly suspected of being the cause of off-hand items rendering on the
-     * right arm; it was not — see {@link #ROOT_BONE_BINDING}.</p>
+     * <p>This flag used to be applied to {@code d} directly, which for the off
+     * hand emits {@code -d.x = +J.x} — the right magnitude on the wrong side,
+     * {@code 2*d.x} out toward the main hand. The greataxe
+     * ({@code thirdperson_lefthand.translation.x = 15.5}) landed 31 units off;
+     * a mace declaring {@code 0} landed correctly. That an item with no
+     * declared X offset was unaffected was read at the time as ruling a sign
+     * error <em>out</em> (see {@link #ROOT_BONE_BINDING}) — it is in fact the
+     * clearest evidence for one, since a sign error is exactly the fault whose
+     * magnitude is proportional to the value it flips.</p>
      */
     private static final boolean MIRROR_X = true;
 
@@ -822,9 +832,16 @@ public final class BedrockAttachableWriter {
         boolean offHand,
         AttachableGenerationConfig.BasePose firstPersonPose
     ) {
+        // Java's left-hand rule is one operation on one transform: rotation Y
+        // and Z negate AND translation X negates. Both halves, or neither —
+        // applying only the rotation half leaves the translation describing a
+        // pose the rotation no longer matches.
         float[] javaRotation = offHand
             ? BedrockGeometryConverter.applyJavaLeftHandRotation(transform.rotation())
             : transform.rotation();
+        float[] javaTranslation = offHand
+            ? BedrockGeometryConverter.applyJavaLeftHandTranslation(transform.translation())
+            : transform.translation();
 
         float[] rotation = BedrockGeometryConverter.convertRotation(javaRotation);
         // The root rotation has to be known before the translation is mapped:
@@ -839,7 +856,7 @@ public final class BedrockAttachableWriter {
                 THIRD_PERSON_BASE_ROTATION.get(1),
                 THIRD_PERSON_BASE_ROTATION.get(2)};
         float[] position = BedrockGeometryConverter.convertTranslationInRootFrame(
-            transform.translation(), emittedRootRotation, MIRROR_X, TRANSLATION_FRAME);
+            javaTranslation, emittedRootRotation, MIRROR_X, TRANSLATION_FRAME);
         float[] scale = BedrockGeometryConverter.convertScale(transform.scale());
 
         // Bedrock composes a child bone inside its parent's scale, so the
@@ -892,7 +909,6 @@ public final class BedrockAttachableWriter {
             // display-scale-dependent root nudges made the root item-specific
             // too, which double-counted the same information and could never
             // satisfy small and oversized weapons at the same time.
-            float[] baseRot = firstPersonPose.rotation();
             float[] basePos = firstPersonPose.position();
             // The base pose maps Bedrock's first-person arm frame onto Java's
             // camera-space item frame. That mapping is handed, so the off hand

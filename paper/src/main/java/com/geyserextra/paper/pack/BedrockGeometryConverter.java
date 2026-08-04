@@ -25,10 +25,37 @@ import java.util.logging.Logger;
 public final class BedrockGeometryConverter {
 
     /**
-     * Java display rotation (x, y, z degrees) → Bedrock animation bone
-     * rotation. java2bedrock convention: X and Y negate, Z keeps its sign
-     * (the X-mirrored geometry flips the apparent handedness of the X and Y
-     * axes but not Z).
+     * The one Java&rarr;Bedrock rotation sign convention this converter uses,
+     * for <b>every</b> rotation it emits: X and Y negate, Z keeps its sign.
+     *
+     * <p>Ground truth is Blockbench, which is what authors preview against and
+     * what every Bedrock pack in the wild is built with. Its Bedrock codec
+     * writes exactly this triple when exporting the model it is displaying —
+     * cubes, bones, locators and texture meshes all go through the same rule:</p>
+     * <pre>
+     *   // js/formats/bedrock/bedrock.js, compileCube / compileGroup
+     *   template.rotation = cube.rotation.slice();
+     *   template.rotation.forEach((br, axis) =&gt; { if (axis != 2) template.rotation[axis] *= -1 });
+     * </pre>
+     * <p>and its Java codec writes {@code element.rotation.x/y/z} straight from
+     * the same internal value with no sign change, so "Blockbench internal" and
+     * "Java model JSON" are the same numbers. The X negation is not the
+     * geometry mirror ({@code origin.x = 8 - to.x}) — that is applied
+     * separately and on top; the triple above is what remains once the mirror
+     * is accounted for.</p>
+     *
+     * <p>Cube rotations used to run on a second, contradictory table
+     * ({@code -x, +y, +z}) taken from GeyserMC Rainbow's
+     * {@code GeometryMapper.getBedrockRotation}, which carries a
+     * "TODO check if these angle transformations are right" on that very line.
+     * Rainbow's X and Z agree with Blockbench; only Y does not. That made a
+     * Y-axis element rotation come out 2&times;&theta; away from where Java
+     * puts it — for the 広辞苑 book, whose covers rotate about Y at a pivot on
+     * the spine, a 182&deg; error that swings each cover clear of the pages
+     * while leaving its silhouette unchanged, so it reads as "the cover is
+     * offset from the book" rather than as a rotation fault. Nothing else in
+     * the pack noticed, because X- and Z-axis element rotations convert
+     * identically under both tables.</p>
      */
     private static final float ROT_X_SIGN = -1f;
     private static final float ROT_Y_SIGN = -1f;
@@ -75,16 +102,42 @@ public final class BedrockGeometryConverter {
      * blade the wrong way round. 84 of the 102 hand slots in the TrinityForge
      * pack follow exactly that negated-Z pattern.</p>
      *
-     * <p>The X translation half of the same rule is expressed through
-     * {@link #convertTranslation}'s {@code mirrorX} flag: Java's {@code -1}
-     * and Bedrock's own X mirror cancel, so an off-hand transform passes
-     * {@code mirrorX = false} and keeps its declared X.</p>
+     * <p>The translation half of the same rule lives in
+     * {@link #applyJavaLeftHandTranslation}; the two are always applied
+     * together, because they are two halves of one {@code apply()} call.</p>
      */
     public static float[] applyJavaLeftHandRotation(float[] javaRotation) {
         if (javaRotation == null || javaRotation.length < 3) {
             return new float[]{0f, 0f, 0f};
         }
         return new float[]{javaRotation[0], -javaRotation[1], -javaRotation[2]};
+    }
+
+    /**
+     * The translation half of {@link #applyJavaLeftHandRotation}: vanilla
+     * {@code ItemTransform#apply(leftHand, PoseStack)} negates the X
+     * translation for the left hand, unconditionally and for whichever
+     * transform the slot resolved to.
+     *
+     * <p>Both halves have to be applied, and applied at the same point in the
+     * pipeline — <em>before</em> the Java&rarr;Bedrock mapping, on the declared
+     * values. What comes out is the transform Java actually renders; only then
+     * is it a righthand-shaped quantity that the single Java&rarr;Bedrock
+     * mirror ({@code x} negates) is allowed to touch.</p>
+     *
+     * <p>Applying the rule to the rotation but not the translation leaves the
+     * off hand's emitted X at {@code -declared.x} where the main hand's is
+     * {@code -rendered.x}, i.e. off by {@code 2 * declared.x} in the direction
+     * of the main hand — nothing at all for a weapon that declares no X
+     * offset, and a body-width for one that declares a large one. That
+     * proportionality is the signature to look for: it is what a sign error
+     * looks like, not what a wrong bone binding looks like.</p>
+     */
+    public static float[] applyJavaLeftHandTranslation(float[] javaTranslation) {
+        if (javaTranslation == null || javaTranslation.length < 3) {
+            return new float[]{0f, 0f, 0f};
+        }
+        return new float[]{-javaTranslation[0], javaTranslation[1], javaTranslation[2]};
     }
 
     /**
@@ -97,14 +150,18 @@ public final class BedrockGeometryConverter {
      *   <li>third-person: {@code (-x, y, z)}</li>
      *   <li>first-person: {@code (-x, y, -z)}</li>
      * </ul>
-     * <p>A transform read from a {@code *_lefthand} slot already states its X
-     * for the left hand, so it passes {@code mirrorX = false} and keeps
-     * {@code +x} — this is java2bedrock's split between its righthand and
-     * lefthand animation branches. Negating a lefthand X on top of that
-     * double-flips the weapon to the far side of the hand.</p>
+     * <p>The input must be the translation Java <em>renders</em>, not the one
+     * the model declares: for the off hand, run
+     * {@link #applyJavaLeftHandTranslation} first and then pass
+     * {@code mirrorX = true} like any other transform. There is no
+     * "lefthand-sourced" special case here — which slot the values came from
+     * says nothing about whether Java's left-hand negation has been applied to
+     * them, because {@code ItemTransforms.Deserializer} substitutes the
+     * right-hand object for a missing slot and {@code apply()} negates that
+     * too.</p>
      *
-     * @param mirrorX {@code true} for righthand-sourced transforms (negate X),
-     *                {@code false} for lefthand-sourced ones (keep X)
+     * @param mirrorX {@code true} to negate X (the Java&rarr;Bedrock mirror);
+     *                {@code false} only for callers that have already mirrored
      */
     public static float[] convertTranslation(
         float[] javaTranslation, boolean firstPerson, boolean mirrorX
@@ -738,7 +795,7 @@ public final class BedrockGeometryConverter {
             if (singleAxis != null) {
                 return singleAxis;
             }
-            return new float[]{-e[0], e[1], e[2]};
+            return convertRotation(e);
         }
         return convertSingleAxisRotation(
             rotation.axis() != null ? rotation.axis() : "y", rotation.angle());
@@ -760,6 +817,14 @@ public final class BedrockGeometryConverter {
      * <p>Angles are searched at 1° resolution and then refined, which covers
      * Blockbench output (it writes two decimals but authors work in whole
      * degrees) without a full matrix decomposition.</p>
+     *
+     * <p>The target matrix is built {@code Rx·Ry·Rz}, which is vanilla's order
+     * — the type Mojang added for multi-axis element rotation in 1.21.11
+     * (25w46a) is named {@code CuboidRotation.EulerXYZRotation}. That fixes
+     * which of the two candidate answers is the model's real shape: 広辞苑's
+     * {@code {-180, -89, 180}} covers fold to {@code Ry(-91)} under this order
+     * and to {@code Ry(+91)} under the ones that put Y at an end, and only
+     * {@code -91} lands the cover flush against the page block.</p>
      */
     private static float[] reduceToSingleAxis(float[] euler) {
         double[][] target = mul(axisMatrix(0, euler[0]),
@@ -819,18 +884,14 @@ public final class BedrockGeometryConverter {
 
     private static float[] convertSingleAxisRotation(String rawAxis, float angle) {
         String axis = rawAxis.toLowerCase(Locale.ROOT);
-        // Rainbow GeometryMapper.getBedrockRotation (build 39+): only the X
-        // angle negates in the X-mirrored geometry frame; Y and Z keep their
-        // sign. This deliberately differs from the display-rotation sign
-        // matrix above (ROT_*_SIGN) — cube-local rotations and animation-bone
-        // rotations use different conventions on Bedrock, and Rainbow's
-        // empirically-validated table is the ground truth for the cube side
-        // (upstream note: Z was wrongly inverted before build 39; Y never
-        // inverts).
+        // Same sign convention as every other rotation this converter emits —
+        // see ROT_*_SIGN. Cube-local rotations and animation-bone rotations do
+        // NOT use different conventions on Bedrock; believing they did is what
+        // put the Y sign wrong here.
         return switch (axis) {
-            case "x" -> new float[]{-angle, 0f, 0f};
-            case "z" -> new float[]{0f, 0f, angle};
-            default  -> new float[]{0f, angle, 0f}; // "y" or unknown axis falls back to Y
+            case "x" -> new float[]{ROT_X_SIGN * angle, 0f, 0f};
+            case "z" -> new float[]{0f, 0f, ROT_Z_SIGN * angle};
+            default  -> new float[]{0f, ROT_Y_SIGN * angle, 0f}; // "y" or unknown axis falls back to Y
         };
     }
 

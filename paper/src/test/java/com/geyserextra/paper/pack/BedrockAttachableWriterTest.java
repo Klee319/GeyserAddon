@@ -57,8 +57,9 @@ class BedrockAttachableWriterTest {
 
         String anim = animationJson(display, geometry);
 
-        // Both third-person hands, against convertTranslation on the same
-        // declared translation the writer reads for that hand.
+        // Both third-person hands, against convertTranslation on the
+        // translation Java renders for that hand — the declared value for the
+        // main hand, the left-hand-negated one for the off hand.
         assertThat(extractAnimation(anim, "thirdperson_main_hand").replaceAll("\\s+", ""))
             .as("third-person main hand must stay on the reference mapping")
             .contains(positionLiteral(BedrockGeometryConverter.convertTranslation(
@@ -66,7 +67,8 @@ class BedrockAttachableWriterTest {
         assertThat(extractAnimation(anim, "thirdperson_off_hand").replaceAll("\\s+", ""))
             .as("third-person off hand must stay on the reference mapping")
             .contains(positionLiteral(BedrockGeometryConverter.convertTranslation(
-                new float[]{15.5f, 13f, 1.5f}, false, true)));
+                BedrockGeometryConverter.applyJavaLeftHandTranslation(
+                    new float[]{15.5f, 13f, 1.5f}), false, true)));
     }
 
     /** The emitted JSON form of a position triple, whitespace already stripped. */
@@ -516,13 +518,12 @@ class BedrockAttachableWriterTest {
 
         String thirdMain = extractAnimation(anim, "thirdperson_main_hand").replaceAll("\\s+", "");
         String thirdOff = extractAnimation(anim, "thirdperson_off_hand").replaceAll("\\s+", "");
-        // Both hands negate the declared X. Java renders this model mirrored:
-        // apply() turns the declared +7.5 into -7.5, matching the right hand's
-        // -6.5 in a frame that is itself mirrored. Bedrock does not mirror the
-        // left arm's attachable frame for us, so reproducing that appearance
-        // takes opposite emitted signs rather than equal ones.
+        // Java's left-hand rule turns the declared +7.5 into a rendered -7.5,
+        // the same side as the right hand's -6.5; the single Java->Bedrock
+        // mirror then negates both. Emitting -7.5 (mirroring the DECLARED
+        // value) put the weapon 15 units out on the main-hand side.
         assertThat(thirdMain).contains("\"position\":[6.5,4.0,0.5]");
-        assertThat(thirdOff).contains("\"position\":[-7.5,4.0,0.5]");
+        assertThat(thirdOff).contains("\"position\":[7.5,4.0,0.5]");
         // Z comes out at +90 in BOTH hands: the author's -90 is pre-compensation
         // for Java's negation. Emitting the literal -90 is what put the off-hand
         // weapon 180 degrees round the wrong way.
@@ -551,14 +552,14 @@ class BedrockAttachableWriterTest {
         // ItemTransforms.Deserializer substitutes the right-hand transform for
         // the missing slot, and apply(leftHand=true) still negates it — the
         // rule is unconditional, not a fallback. Java therefore renders this
-        // model *un*mirrored: the off hand ends up on the same visual side as
-        // the main hand, which is the lopsided look that makes authors add an
-        // explicit *_lefthand slot. Since Bedrock's left arm frame is not
-        // mirrored either, matching that takes an equal emitted X, not an
-        // opposite one — the reverse of the declared-slot case above, and the
-        // reason the sign cannot simply follow which hand it is.
+        // model lopsided: rendered X is +6.5 in the off hand against -6.5 in
+        // the main hand, which is the look that makes authors add an explicit
+        // *_lefthand slot. Reproducing Java means reproducing that, so the
+        // emitted X is the opposite of the main hand's — the reverse of the
+        // declared-slot case above, and the reason the sign cannot be decided
+        // from which hand it is.
         String off = extractAnimation(anim, "thirdperson_off_hand").replaceAll("\\s+", "");
-        assertThat(off).contains("\"position\":[6.5,4.0,0.5]");
+        assertThat(off).contains("\"position\":[-6.5,4.0,0.5]");
         assertThat(off).contains("\"geyserextra_z\":{\"rotation\":[0.0,0.0,-90.0]}");
         assertThat(extractAnimation(anim, "thirdperson_main_hand").replaceAll("\\s+", ""))
             .contains("\"position\":[6.5,4.0,0.5]");

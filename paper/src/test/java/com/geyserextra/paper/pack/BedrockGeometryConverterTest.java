@@ -323,7 +323,7 @@ class BedrockGeometryConverterTest {
     }
 
     @Nested
-    @DisplayName("element rotation signs (Rainbow build-39+ convention: -x, +y, +z)")
+    @DisplayName("element rotation signs (Blockbench Bedrock codec: -x, -y, +z)")
     class ElementRotationSigns {
 
         private float[] rotationFor(String axis, float angle) {
@@ -344,7 +344,7 @@ class BedrockGeometryConverterTest {
         }
 
         @Test
-        @DisplayName("X-axis rotation negates (Rainbow: X axis inverted on Bedrock)")
+        @DisplayName("X-axis rotation negates")
         void xAxisNegates() {
             float[] rot = rotationFor("x", 22.5f);
             assertThat(rot[0]).isCloseTo(-22.5f, EPS);
@@ -353,24 +353,66 @@ class BedrockGeometryConverterTest {
         }
 
         @Test
-        @DisplayName("Y-axis rotation keeps its sign (Rainbow build 39+: Y NOT inverted)")
-        void yAxisKeepsSign() {
-            // Regression lock: the pre-review code negated Y (java2bedrock
-            // convention), which mirrors 45-degree cross pieces / angled
-            // blades relative to Rainbow's validated output.
+        @DisplayName("Y-axis rotation negates")
+        void yAxisNegates() {
+            // Blockbench's Bedrock codec writes [-x, -y, +z] for the model it
+            // is displaying, and its Java codec writes the same internal
+            // rotation out verbatim — so Y negates between the two formats.
+            // Rainbow's GeometryMapper keeps +y (under a "TODO check if these
+            // angle transformations are right"); following it here rotated
+            // every Y-axis element by 2*angle away from Java, which for the
+            // 広辞苑 book covers (Y, pivot on the spine) read as the covers
+            // sitting off the pages.
             float[] rot = rotationFor("y", 45f);
             assertThat(rot[0]).isCloseTo(0f, EPS);
-            assertThat(rot[1]).isCloseTo(45f, EPS);
+            assertThat(rot[1]).isCloseTo(-45f, EPS);
             assertThat(rot[2]).isCloseTo(0f, EPS);
         }
 
         @Test
-        @DisplayName("Z-axis rotation keeps its sign (Rainbow build 39+ fixed Z inversion)")
+        @DisplayName("Z-axis rotation keeps its sign")
         void zAxisKeepsSign() {
             float[] rot = rotationFor("z", -22.5f);
             assertThat(rot[0]).isCloseTo(0f, EPS);
             assertThat(rot[1]).isCloseTo(0f, EPS);
             assertThat(rot[2]).isCloseTo(-22.5f, EPS);
+        }
+
+        @Test
+        @DisplayName("cube rotations use the same sign convention as display rotations")
+        void matchesDisplayRotationConvention() {
+            // One convention for the whole pipeline. Two contradictory tables
+            // is what let the Y sign be wrong on one side and right on the
+            // other for as long as it was.
+            float[] display = BedrockGeometryConverter.convertRotation(
+                new float[]{22.5f, 45f, -22.5f});
+            assertThat(rotationFor("x", 22.5f)[0]).isCloseTo(display[0], EPS);
+            assertThat(rotationFor("y", 45f)[1]).isCloseTo(display[1], EPS);
+            assertThat(rotationFor("z", -22.5f)[2]).isCloseTo(display[2], EPS);
+        }
+
+        @Test
+        @DisplayName("a free-rotation triple that folds to one axis converts as that axis")
+        void eulerFoldedToSingleAxisUsesTheAxisRule() {
+            // 広辞苑's cover: {-180, -89, 180} composes (Rx·Ry·Rz, the order
+            // vanilla's CuboidRotation.EulerXYZRotation names) to a plain
+            // Ry(-91), so it must come out as the Y rule applied to -91 —
+            // independent of whatever order Bedrock composes a triple in.
+            JavaModelGeometry.Element element = new JavaModelGeometry.Element(
+                new float[]{5.05f, 10f, 6.7f}, new float[]{11.075f, 18f, 6.75f},
+                JavaModelGeometry.ElementRotation.ofEuler(
+                    new float[]{6.5875f, 14f, 7.875f},
+                    new float[]{-180f, -89f, 180f}, false),
+                Map.of("north", new JavaModelGeometry.Face(
+                    new float[]{0.5f, 0.5f, 6f, 7.5f}, "#0", 0)));
+            List<Map<String, Object>> cubes =
+                BedrockGeometryConverter.convertElementsToCubes(
+                    new JavaModelGeometry(List.of(element)), 64, 64, null);
+            @SuppressWarnings("unchecked")
+            List<Number> rotation = (List<Number>) cubes.get(0).get("rotation");
+            assertThat(rotation.get(0).floatValue()).isCloseTo(0f, EPS);
+            assertThat(rotation.get(1).floatValue()).isCloseTo(91f, EPS);
+            assertThat(rotation.get(2).floatValue()).isCloseTo(0f, EPS);
         }
     }
 
@@ -420,22 +462,45 @@ class BedrockGeometryConverterTest {
     }
 
     @Nested
-    @DisplayName("convertTranslation (mirrorX selects righthand vs lefthand source)")
+    @DisplayName("convertTranslation (the single Java->Bedrock X mirror)")
     class TranslationSigns {
 
         @Test
-        @DisplayName("third person: righthand source negates X, lefthand source keeps it")
-        void thirdPersonMirrorXSelectsSign() {
+        @DisplayName("both hands negate X once, on the transform Java renders")
+        void bothHandsNegateRenderedX() {
+            // Greataxe third person. The author writes the lefthand slot as the
+            // mirror of the righthand one, so vanilla ItemTransform#apply's
+            // negation lands both hands on the same rendered translation — and
+            // the emitted Bedrock offset must therefore be the same too.
             float[] righthand = new float[]{-15.5f, 13f, 1.5f};
             float[] lefthand = new float[]{15.5f, 13f, 1.5f};
             float[] main = BedrockGeometryConverter.convertTranslation(righthand, false, true);
-            float[] off = BedrockGeometryConverter.convertTranslation(lefthand, false, false);
+            float[] off = BedrockGeometryConverter.convertTranslation(
+                BedrockGeometryConverter.applyJavaLeftHandTranslation(lefthand), false, true);
             assertThat(main[0]).isCloseTo(15.5f, EPS);
-            // A real *_lefthand value passes through unchanged, so the two
-            // hands end up mirrored instead of stacked on the same side.
             assertThat(off[0]).isCloseTo(15.5f, EPS);
             assertThat(main[1]).isCloseTo(13f, EPS);
             assertThat(main[2]).isCloseTo(1.5f, EPS);
+        }
+
+        @Test
+        @DisplayName("skipping the left-hand negation puts the off hand 2*x out")
+        void skippingLeftHandNegationDoublesTheError() {
+            // Regression lock for the fault this replaced: mirroring the
+            // DECLARED lefthand X instead of the rendered one. The error is
+            // 2*declared.x — 31 units for the greataxe, and exactly zero for an
+            // item that declares no X offset, which is why a zero-offset mace
+            // looked fine and was misread as clearing the sign of suspicion.
+            float[] lefthand = new float[]{15.5f, 13f, 1.5f};
+            float[] correct = BedrockGeometryConverter.convertTranslation(
+                BedrockGeometryConverter.applyJavaLeftHandTranslation(lefthand), false, true);
+            float[] wrong = BedrockGeometryConverter.convertTranslation(lefthand, false, true);
+            assertThat(correct[0] - wrong[0]).isCloseTo(2f * 15.5f, EPS);
+
+            float[] noOffset = new float[]{0f, 13f, 1.5f};
+            assertThat(BedrockGeometryConverter.convertTranslation(
+                    BedrockGeometryConverter.applyJavaLeftHandTranslation(noOffset), false, true)[0])
+                .isCloseTo(BedrockGeometryConverter.convertTranslation(noOffset, false, true)[0], EPS);
         }
 
         @Test
