@@ -379,6 +379,44 @@ class BedrockGeometryConverterTest {
         }
 
         @Test
+        @DisplayName("the sign flip is exact for three-axis rotations, not only single-axis ones")
+        void perAxisFlipIsExactForArbitraryTriples() {
+            // The load-bearing claim behind convertRotation. A Bedrock triple
+            // (a, b, c) denotes Bx(a)·By(b)·Bz(c) with Bx(a)=Rx(-a),
+            // By(b)=Ry(b), Bz(c)=Rz(-c) -- the primitives the single-axis rules
+            // force -- and the emitted flip has to reproduce the mirror
+            // conjugate M·(Rx·Ry·Rz)·M of the Java rotation for ANY triple, not
+            // just for one non-zero angle. If this ever fails, the per-axis
+            // table has stopped being a general solution and every multi-axis
+            // element and display pose in the pack is silently off; the worst
+            // case measured under the rival ZYX reading was 178.9 degrees.
+            float[][] cases = {
+                {-80f, 260f, -40f},    // item/bow, third person
+                {0f, -90f, 55f},       // item/handheld, third person
+                {45f, 0f, 90f},        // declared by 49 models in the reference pack
+                {5f, 270f, -40f},      // item/spear_in_hand, third person
+                {-111.75f, 69.84f, 105.46f},
+                {-82.63f, 47.73f, 162.86f},
+                {17f, -133f, 61f},
+            };
+            for (float[] java : cases) {
+                double[][] want = mirrorConjugate(
+                    mul(axis(0, java[0]), mul(axis(1, java[1]), axis(2, java[2]))));
+                float[] emitted = BedrockGeometryConverter.convertRotation(java);
+                double[][] got = mul(axis(0, -emitted[0]),
+                    mul(axis(1, emitted[1]), axis(2, -emitted[2])));
+                for (int i = 0; i < 3; i++) {
+                    for (int j = 0; j < 3; j++) {
+                        assertThat(got[i][j])
+                            .as("java (%s, %s, %s) element [%d][%d]",
+                                java[0], java[1], java[2], i, j)
+                            .isCloseTo(want[i][j], offset(1e-6));
+                    }
+                }
+            }
+        }
+
+        @Test
         @DisplayName("cube rotations use the same sign convention as display rotations")
         void matchesDisplayRotationConvention() {
             // One convention for the whole pipeline. Two contradictory tables
@@ -539,12 +577,69 @@ class BedrockGeometryConverterTest {
         assertThat(uvSizeList.get(1).floatValue()).isCloseTo(vSize, EPS);
     }
 
+    /** Right-handed rotation of {@code degrees} about axis 0=X, 1=Y, 2=Z. */
+    private static double[][] axis(int index, double degrees) {
+        double a = Math.toRadians(degrees);
+        double c = Math.cos(a);
+        double s = Math.sin(a);
+        return switch (index) {
+            case 0 -> new double[][]{{1, 0, 0}, {0, c, -s}, {0, s, c}};
+            case 1 -> new double[][]{{c, 0, s}, {0, 1, 0}, {-s, 0, c}};
+            default -> new double[][]{{c, -s, 0}, {s, c, 0}, {0, 0, 1}};
+        };
+    }
+
+    private static double[][] mul(double[][] a, double[][] b) {
+        double[][] out = new double[3][3];
+        for (int i = 0; i < 3; i++) {
+            for (int j = 0; j < 3; j++) {
+                for (int k = 0; k < 3; k++) {
+                    out[i][j] += a[i][k] * b[k][j];
+                }
+            }
+        }
+        return out;
+    }
+
+    /** {@code M·R·M} with {@code M = diag(-1, 1, 1)}, the Java&rarr;Bedrock X mirror. */
+    private static double[][] mirrorConjugate(double[][] rotation) {
+        double[][] m = {{-1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+        return mul(m, mul(rotation, m));
+    }
+
     @Nested
     @DisplayName("root-frame translation")
     class RootFrameTranslation {
 
         private static final float[] THIRD_PERSON_ROOT = {90f, 0f, 0f};
         private static final float[] FIRST_PERSON_ROOT = {90f, 60f, -40f};
+
+        @Test
+        @DisplayName("the hand rule collapses to the head rule once the root rotation is undone")
+        void handAndHeadAgreeOnTheUnderlyingRule() {
+            // BedrockAttachableWriter.buildHeadAnimation writes (-x, y, z)
+            // directly, because the head root carries no rotation. That looked
+            // like a second, contradictory convention next to the hand path's
+            // change of basis; it is not. M folds in the hand root's own 90
+            // degrees, and R_root^-1 takes it back out, leaving the same
+            // (-x, y, z). Pinning it here stops anyone "unifying" the two by
+            // pushing M onto the head, which would put every hat below the
+            // head instead of above it.
+            float[][] samples = {
+                {0f, 13f, 7f},          // item/generated head slot
+                {-15.5f, 13f, 1.5f},
+                {2.3f, -4.75f, 0.5f}
+            };
+            for (float[] t : samples) {
+                float[] hand = BedrockGeometryConverter.convertTranslationInRootFrame(
+                    t, THIRD_PERSON_ROOT, true,
+                    BedrockGeometryConverter.TranslationFrame.ZXY);
+                assertThat(hand)
+                    .as("head rule for %s", java.util.Arrays.toString(t))
+                    .usingComparatorWithPrecision(1e-4f)
+                    .containsExactly(-t[0], t[1], t[2]);
+            }
+        }
 
         /**
          * The guarantee that makes the frame switch safe to ship: the

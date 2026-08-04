@@ -963,7 +963,21 @@ public final class BedrockAttachableWriter {
         return Math.round(value * 100f) / 100f;
     }
 
-    /** Third-person head-slot pose: Java renders head items at 62.5% scale. */
+    /**
+     * Third-person head-slot pose: Java renders head items at 62.5% scale.
+     *
+     * <p>The position is a plain X mirror here rather than the change of basis
+     * the hand path runs
+     * ({@link BedrockGeometryConverter#convertTranslationInRootFrame}), and that
+     * is not an inconsistency between the two paths — it is the same rule with a
+     * different root. The hand root declares a rotation ({@code [90, 0, 0]} in
+     * third person), so the offset has to be re-expressed in that rotated frame;
+     * the head root declares only a translation ({@link #HEAD_BASE_POSITION}),
+     * so the change of basis collapses to the mirror alone. Substituting the
+     * hand path's {@code M} here would put every hat below the head, because
+     * {@code M} folds in the hand root's own 90° — see the note on that
+     * method.</p>
+     */
     private static Map<String, Object> buildHeadAnimation(
         JavaModelDisplay.Transform transform
     ) {

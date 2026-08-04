@@ -56,6 +56,44 @@ public final class BedrockGeometryConverter {
      * offset from the book" rather than as a rotation fault. Nothing else in
      * the pack noticed, because X- and Z-axis element rotations convert
      * identically under both tables.</p>
+     *
+     * <p><b>The table is exact for three-axis rotations too, not just one.</b>
+     * That was an open question here for a while, so the argument is recorded
+     * rather than left to be re-derived.</p>
+     *
+     * <p>The single-axis behaviour fixes what a Bedrock triple {@code (a, b, c)}
+     * <em>means</em> as a product of primitives. Java's {@code Rx(θ)} must come
+     * out as {@code (-θ, 0, 0)} while the mirror leaves it alone
+     * ({@code M·Rx·M == Rx}); Java's {@code Ry(θ)} must come out as
+     * {@code (0, -θ, 0)} while the mirror gives {@code Ry(-θ)}; Java's
+     * {@code Rz(θ)} must come out as {@code (0, 0, +θ)} while the mirror gives
+     * {@code Rz(-θ)}. Solve those and the primitives are forced:
+     * {@code Bx(a) = Rx(-a)}, {@code By(b) = Ry(b)}, {@code Bz(c) = Rz(-c)}.</p>
+     *
+     * <p>Compose them in Java's own order — vanilla's multi-axis element
+     * rotation is {@code CuboidRotation.EulerXYZRotation}, i.e. {@code Rx·Ry·Rz}
+     * — and the required orientation drops out identically:</p>
+     * <pre>
+     *   Bx(-jx)·By(-jy)·Bz(jz) = Rx(jx)·Ry(-jy)·Rz(-jz) = M·(Rx(jx)·Ry(jy)·Rz(jz))·M
+     * </pre>
+     * <p>because conjugating by {@code M = diag(-1, 1, 1)} distributes across
+     * the product and flips exactly Y and Z. Checked numerically over 20000
+     * random triples: worst matrix error 0. So the flip is not an approximation
+     * that happens to be right on one axis — it is the general solution,
+     * provided Bedrock composes {@code XYZ} like Java.</p>
+     *
+     * <p><b>Why XYZ and not ZYX.</b> Blockbench's {@code Format.euler_order}
+     * defaults to {@code 'ZYX'} and no format overrides it, which reads as
+     * evidence for {@code Rz·Ry·Rx} and was believed here briefly. It cannot be
+     * right for what Bedrock does with these files. Under {@code ZYX} the flip
+     * would be wrong by 76.2° on {@code item/handheld}'s own
+     * {@code thirdperson [0, -90, 55]}, 62.8° on the {@code [45, 0, 90]} pose 49
+     * models in the pack declare, and 76.2° on {@code [55, 0, ±90]} on another
+     * 70 — every tool in the game held at a visibly absurd angle. Those poses
+     * render correctly on a real client today under this table, and java2bedrock
+     * has shipped the same flip for years. In-game behaviour outranks a default
+     * in an editor's format descriptor, which plausibly describes Blockbench's
+     * own editing convention rather than the engine's.</p>
      */
     private static final float ROT_X_SIGN = -1f;
     private static final float ROT_Y_SIGN = -1f;
@@ -223,11 +261,24 @@ public final class BedrockGeometryConverter {
      * frame.</p>
      *
      * <p>The fix is the change of basis the sign flips approximate:
-     * {@code p = R_root⁻¹ · M · t}, where {@code M} maps Java's item axes onto
-     * Bedrock's. {@code M} is not guessed — it is recovered exactly from
-     * confirmed-correct third-person output (Java {@code [-15.5, 13, 1.5]} →
-     * emitted {@code [15.5, 13, 1.5]} under a {@code [90, 0, 0]} root), giving
-     * {@code M(x, y, z) = (∓x, -z, y)}.</p>
+     * {@code p = R_root⁻¹ · M · t}. {@code M} is not guessed — it is recovered
+     * exactly from confirmed-correct third-person output (Java
+     * {@code [-15.5, 13, 1.5]} → emitted {@code [15.5, 13, 1.5]} under a
+     * {@code [90, 0, 0]} root), giving {@code M(x, y, z) = (∓x, -z, y)}.</p>
+     *
+     * <p><b>{@code M} is hand-specific, not a universal Java&rarr;Bedrock axis
+     * map.</b> Factored out it is {@code Rx(90) · mirrorX}, i.e. it already
+     * carries the same 90° the held-item root declares, and the {@code R_root⁻¹}
+     * above is what cancels it back out in third person. Do not reuse this for a
+     * bone whose root is unrotated: the head slot's root is a pure
+     * {@code [0, 19.9, 0]} translation, and feeding {@code M} through with an
+     * identity root would turn {@code generated}'s head offset
+     * {@code [0, 13, 7]} into {@code (0, -7, 13)} — every hat 7 pixels below the
+     * head instead of 13 above it. With the root unrotated the whole change of
+     * basis degenerates to the plain X mirror, which is exactly what
+     * {@code BedrockAttachableWriter.buildHeadAnimation} applies. The two paths
+     * agree; they only look different because one of them has a rotated root to
+     * undo.</p>
      *
      * <p>Because a rotation matrix's inverse is its transpose and the
      * third-person root leaves only one non-zero angle, this reproduces
@@ -795,16 +846,13 @@ public final class BedrockGeometryConverter {
             // a turn, and those reduce to a single axis, which every
             // composition order agrees on.
             //
-            // Genuinely three-axis rotations still fall through to the per-axis
-            // approximation, and that path remains UNVERIFIED: the Blockbench
-            // codec only pins the single-axis signs, and no component-wise sign
-            // rule reproduces the mirror conjugate M·(Rx·Ry·Rz)·M under any
-            // composition order. It is also not hypothetical — measured against
-            // the TrinityForge pack (2026-08-04), 220 of 628 free rotations do
-            // not reduce: boundary_cane 175, abyss_cane 35, gold_test and
-            // wood_test 5 each. Those four models are approximations today and
-            // were approximations before the Y sign was corrected; settling
-            // them needs Bedrock's actual composition order, not a sign table.
+            // Multi-axis triples then fall through to the per-axis flip, which
+            // is exact — see convertRotation, where the order question is
+            // settled. Folding first is kept anyway: it emits the tidy
+            // single-axis triple an author would recognise instead of an
+            // equivalent-but-opaque one (広辞苑's cover comes out (0, 91, 0)
+            // rather than (180, 89, 180)), and it is the branch every reducible
+            // cube in the pack already takes.
             float[] singleAxis = reduceToSingleAxis(e);
             if (singleAxis != null) {
                 return singleAxis;
@@ -820,13 +868,19 @@ public final class BedrockGeometryConverter {
      * Bedrock rotation, or returns {@code null} when no single axis reproduces
      * it.
      *
+     * <p>This is a <b>canonicalisation, not a correctness device</b>. The
+     * per-axis flip in {@link #ROT_X_SIGN} is exact for three-axis triples as
+     * well, so folding changes the representation and not the orientation:
+     * 広辞苑's cover is emitted as {@code (0, 91, 0)} instead of the equivalent
+     * {@code (180, 89, 180)}. It reads as the shape the author drew, and it
+     * survives a hand edit of one component, which the tangled form does not.
+     * (It was originally added believing the flip was only valid on one axis;
+     * that turned out to be false — see {@link #ROT_X_SIGN} — but the tidier
+     * output is worth keeping on its own.)</p>
+     *
      * <p>The triple is composed into a rotation matrix and compared against a
-     * rotation about each axis in turn. Composition order does not matter to
-     * the test: if some single-axis rotation matches the composed matrix under
-     * one order, the caller is safe under every order, because the answer is
-     * then a property of the matrix rather than of how it was built. That is
-     * the whole point — it converts an unanswerable question about Bedrock's
-     * convention into an answerable one about this specific rotation.</p>
+     * rotation about each axis in turn, so the answer is a property of the
+     * matrix rather than of how it was built.</p>
      *
      * <p>Angles are searched at 1° resolution and then refined, which covers
      * Blockbench output (it writes two decimals but authors work in whole

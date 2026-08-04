@@ -105,8 +105,20 @@ class TrinityForgePackConversionIT {
             .allSatisfy(k -> assertThat(threeD).contains(k));
     }
 
+    /**
+     * All hand-held animation blocks the writer emits for this config
+     * (see {@code BedrockAttachableWriter#buildAnimationJson}: {@code
+     * forceFirstPersonOnly=false} in the config built above means the
+     * third-person pair is never skipped).
+     */
+    private static final String[] HAND_BLOCKS = {
+        "firstperson_main_hand", "firstperson_off_hand",
+        "thirdperson_main_hand", "thirdperson_off_hand"
+    };
+
     @Test
-    @DisplayName("first-person offsets stay bounded once the root scale is divided out")
+    @DisplayName("every hand-held offset (first/third person, main/off hand) stays bounded "
+        + "once the root scale is divided out")
     void firstPersonOffsetsStayBounded() {
         Path pack = resolvePack();
         Logger logger = Logger.getLogger(TrinityForgePackConversionIT.class.getName());
@@ -129,19 +141,40 @@ class TrinityForgePackConversionIT {
                 continue;
             }
             String anim = artifacts.get(BedrockAttachableWriter.animationEntryPath(key));
-            float[] pos = firstPersonPosition(anim);
             // Java's own first-person translations on this pack top out at
             // ~9 px on a single axis (greataxe [0,4,-9], long spear
             // [-5.25,-7.25,-1]). Anything beyond 16 px would put the item a
             // full block off the hand, which is what the previous 1.5x/2.0x
             // amplification produced before the translation was zeroed.
-            for (float v : pos) {
-                assertThat(Math.abs(v)).as("first-person offset axis for " + key)
-                    .isLessThanOrEqualTo(16f);
+            //
+            // Every hand block is checked, not just first-person main hand:
+            // the off hand runs an extra transform
+            // (BedrockGeometryConverter#applyJavaLeftHandTranslation, which
+            // negates Java's translation X per vanilla
+            // ItemTransform#apply(leftHand, ...)) that main hand never sees,
+            // so a regression confined to that path would previously have
+            // gone unnoticed, and third person shares the very same
+            // convertTranslationInRootFrame call (just a different fixed root
+            // rotation/position), so the same one-block-width ceiling applies
+            // there too. Measured on this pack today (worst axis per block,
+            // all from minecraft_golden_sword_26 except first-person main
+            // hand): firstperson_main_hand=5.98 (blaze_rod_400014),
+            // firstperson_off_hand=14.24, thirdperson_main_hand=15.5,
+            // thirdperson_off_hand=15.5 -- all inside the 16 limit, but the
+            // third-person pair has only 0.5 of headroom, i.e. it was almost
+            // entirely unguarded before this check existed.
+            for (String block : HAND_BLOCKS) {
+                float[] pos = handPosition(anim, block);
+                for (float v : pos) {
+                    assertThat(Math.abs(v))
+                        .as("hand offset axis for " + key + " (" + block + ")")
+                        .isLessThanOrEqualTo(16f);
+                }
             }
             // ...and it must not be zeroed either: the item-specific offset is
             // the whole reason different weapons sit differently in the hand.
             if (hasNonZeroTranslation(def.display().firstpersonRighthand().translation())) {
+                float[] pos = handPosition(anim, "firstperson_main_hand");
                 assertThat(Math.abs(pos[0]) + Math.abs(pos[1]) + Math.abs(pos[2]))
                     .as("first-person offset preserved for " + key)
                     .isGreaterThan(0f);
@@ -198,13 +231,21 @@ class TrinityForgePackConversionIT {
         return raw.toLowerCase(java.util.Locale.ROOT).replaceAll("[^a-z0-9_]", "_");
     }
 
-    /** Reads {@code geyserextra_x.position} out of the first-person main-hand animation. */
-    private static float[] firstPersonPosition(String animJson) {
+    /**
+     * Reads {@code geyserextra_x.position} out of the named hand animation
+     * block, e.g. {@code "firstperson_main_hand"} or
+     * {@code "firstperson_off_hand"} — matching the keys
+     * {@link BedrockAttachableWriter}'s {@code buildAnimationJson} emits
+     * ({@code animPrefix + "firstperson_main_hand"} /
+     * {@code "firstperson_off_hand"} / {@code "thirdperson_main_hand"} /
+     * {@code "thirdperson_off_hand"}).
+     */
+    private static float[] handPosition(String animJson, String block) {
         String compact = animJson.replaceAll("\\s+", "");
-        int slot = compact.indexOf(".firstperson_main_hand\"");
-        assertThat(slot).as("first-person main hand animation present").isGreaterThan(0);
+        int slot = compact.indexOf("." + block + "\"");
+        assertThat(slot).as(block + " animation present").isGreaterThan(0);
         int posAt = compact.indexOf("\"position\":[", slot);
-        assertThat(posAt).as("position channel present").isGreaterThan(0);
+        assertThat(posAt).as("position channel present for " + block).isGreaterThan(0);
         int start = posAt + "\"position\":[".length();
         int end = compact.indexOf(']', start);
         String[] parts = compact.substring(start, end).split(",");
