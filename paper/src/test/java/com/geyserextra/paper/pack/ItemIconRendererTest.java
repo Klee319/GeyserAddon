@@ -63,9 +63,13 @@ class ItemIconRendererTest {
 
         assertThat(icon).isNotNull();
         // Java's V axis runs downward in texture space while the GUI Y axis
-        // runs up, so texture top-left must land at icon top-left.
+        // runs up, so texture top-left must land at icon top-left. Every
+        // corner shares the same shading factor (one flat south-facing quad;
+        // see southFaceGetsPartialShade() below for the 0.5130679 derivation),
+        // so the colours here are the originals with each channel scaled by
+        // 0x83 = round(255 * 0.5130679).
         assertThat(cornerColours(icon)).containsExactly(
-            0xFFFF0000, 0xFF00FF00, 0xFF0000FF, 0xFFFFFF00);
+            0xFF830000, 0xFF008300, 0xFF000083, 0xFF838300);
     }
 
     @Test
@@ -142,10 +146,14 @@ class ItemIconRendererTest {
 
         assertThat(icon).isNotNull();
         int[] corners = cornerColours(icon);
+        // Shaded by the same south-face factor as unrotatedQuadKeepsTextureOrientation
+        // (0x83 = round(255 * 0.5130679)) — this test is about sampling the
+        // right row of the PNG, not about the shading arithmetic, so it just
+        // carries the same scaled channel through.
         assertThat(corners[0]).as("top of the icon samples the top of the PNG")
-            .isEqualTo(0xFFFF0000);
+            .isEqualTo(0xFF830000);
         assertThat(corners[2]).as("bottom of the icon samples the bottom of the PNG")
-            .isEqualTo(0xFF0000FF);
+            .isEqualTo(0xFF000083);
     }
 
     @Test
@@ -171,8 +179,12 @@ class ItemIconRendererTest {
             primary, 32, null);
 
         assertThat(icon).isNotNull();
-        assertThat(icon.getRGB(8, 16)).as("left half uses #0").isEqualTo(0xFFFF0000);
-        assertThat(icon.getRGB(24, 16)).as("right half uses #1").isEqualTo(0xFF00FF00);
+        // Both elements are south-facing at identity gui, so both get the
+        // same shading factor as unrotatedQuadKeepsTextureOrientation
+        // (0x83 = round(255 * 0.5130679)); this test is about which texture
+        // layer paints which half, not about the shading arithmetic.
+        assertThat(icon.getRGB(8, 16)).as("left half uses #0").isEqualTo(0xFF830000);
+        assertThat(icon.getRGB(24, 16)).as("right half uses #1").isEqualTo(0xFF008300);
     }
 
     @Test
@@ -222,6 +234,135 @@ class ItemIconRendererTest {
                     new float[]{8f, 8f, 8f}, "z", 45f, rescale),
                 Map.of("south", face))));
         return ItemIconRenderer.render(geometry, null, null, solid(0xFFFFFFFF), 64, null);
+    }
+
+    // -----------------------------------------------------------------
+    // shading arithmetic
+    //
+    // ItemIconRenderer.shadeFactor is package-visible specifically so these
+    // tests can pin it against hand-fed normals: an axis-aligned normal like
+    // (1,0,0) cannot be exercised through render() at identity display.gui,
+    // because a face whose normal has zero Z is by construction edge-on to
+    // this renderer's orthographic-along-Z camera (zero screen area — the
+    // same degeneracy edgeOnProjectionFallsBack tests above), and there is no
+    // rotation that makes such a face visible without also rotating its
+    // normal away from the axis-aligned value being pinned here.
+    //
+    // Expected factors were computed independently in Python from the two
+    // citable sources documented on ItemIconRenderer.LIGHT0_3D and
+    // LIGHT0_FLAT: DIFFUSE_LIGHT_0/1 = normalize(0.2,1,-0.7) /
+    // normalize(-0.2,1,0.7), pre-rotated by the matrix each of
+    // GlStateManager#setupGui3DDiffuseLighting / #setupGuiFlatDiffuseLighting
+    // builds. As stored:
+    //   LIGHT0_3D   ~= (-0.93344, -0.26269, -0.24430)
+    //   LIGHT1_3D   ~= (-0.10357, -0.97661, +0.18845)
+    //   LIGHT0_FLAT ~= (-0.22252, -0.17150, +0.95973)
+    //   LIGHT1_FLAT ~= (-0.21501, -0.97183, +0.09657)
+    // shadeFactor dots these against flipY(normal), not the caller's normal
+    // (see its javadoc), so a hand-fed n=(0,1,0) meets the light's -Y term.
+    // Working the 3D rig through that for the three cases below:
+    //   n=( 1,0,0): dot(L0)=-0.9334, dot(L1)=-0.1036 (both <=0) -> 0.4 exactly
+    //   n=(-1,0,0): dot(L0)=+0.9334, dot(L1)=+0.1036 -> (1.037)*0.6+0.4=1.022 -> clamped 1.0
+    //   n=( 0,0,1): dot(L0)=-0.2443, dot(L1)=+0.1884 -> 0.1884*0.6+0.4=0.51307 (matches the
+    //               south-face corners pinned in unrotatedQuadKeepsTextureOrientation)
+    // Only LIGHT0_3D/LIGHT1_3D carry a baked scaling(1,-1,1); the flat matrix
+    // has none, and that asymmetry is vanilla's, not a porting slip — it is
+    // unobservable in vanilla because the flat rig only ever meets flat quads
+    // whose normal has no Y term, but we apply it to the reference pack's 49
+    // front-lit models that do have real geometry.
+    // -----------------------------------------------------------------
+
+    @Test
+    @DisplayName("a face normal with both dot products negative is fully unlit at the 0.4 ambient floor")
+    void fullyUnlitFaceHitsAmbientFloor() {
+        // Both LIGHT0_3D.x and LIGHT1_3D.x are negative (the rotated light
+        // pair points generally toward -X here), so against n=(1,0,0),
+        // max(0,dot) is 0 for both lights regardless of floating-point noise
+        // in the light vectors — this pins the additive term at exactly 0,
+        // not just "small".
+        assertThat(ItemIconRenderer.shadeFactor(new double[]{1, 0, 0}, false))
+            .as("unlit normal lands on the ambient floor")
+            .isEqualTo(0.4, org.assertj.core.data.Offset.offset(1e-9));
+    }
+
+    @Test
+    @DisplayName("a face normal with a large combined dot product clamps at full brightness")
+    void clampedFaceStaysAtFullBrightness() {
+        // n=(-1,0,0) is the negation of the unlit case above, so both dot
+        // products flip positive and sum to ~1.037, which after
+        // *0.6+0.4 = ~1.022 would overshoot 1.0 without the min() clamp.
+        assertThat(ItemIconRenderer.shadeFactor(new double[]{-1, 0, 0}, false))
+            .as("clamped normal is capped at 1.0, not left at the ~1.022 raw sum")
+            .isEqualTo(1.0, org.assertj.core.data.Offset.offset(1e-9));
+    }
+
+    @Test
+    @DisplayName("the south face's normal lands at the specific mid-range factor 0.51307")
+    void southFaceGetsPartialShade() {
+        // n=(0,0,1) is exactly the unrotated south face's outward normal
+        // (verified geometrically in ItemIconRenderer#faceNormal's javadoc),
+        // so this also documents the multiplier behind
+        // unrotatedQuadKeepsTextureOrientation's 0x83 corner colours.
+        assertThat(ItemIconRenderer.shadeFactor(new double[]{0, 0, 1}, false))
+            .isEqualTo(0.5130679, org.assertj.core.data.Offset.offset(1e-6));
+    }
+
+    @Test
+    @DisplayName("the top of an item is lit and its underside is not, never the other way round")
+    void shadeIsBrighterOnTopThanUnderneath() {
+        // The one assertion in this group that is about physics rather than
+        // arithmetic, and the only one that can catch a Y-sign error: the
+        // three tests above all use normals whose Y component is zero, so
+        // they pass identically whether the light rig is right way up or
+        // upside down. It shipped upside down once. Mojang's light matrix
+        // ends in scaling(1, -1, 1), which compensates for the GUI pose stack
+        // having flipped the geometry to Y-down; this renderer keeps pos[]
+        // Y-up and flips only in toScreenY, so carrying that scale over
+        // inverted the Y term and lit every icon from below - top face 0.4,
+        // bottom face 1.0, exactly reversed.
+        double up = ItemIconRenderer.shadeFactor(new double[]{0, 1, 0}, false);
+        double down = ItemIconRenderer.shadeFactor(new double[]{0, -1, 0}, false);
+        assertThat(up).as("top face").isEqualTo(1.0, org.assertj.core.data.Offset.offset(1e-9));
+        assertThat(down).as("underside")
+            .isEqualTo(0.4, org.assertj.core.data.Offset.offset(1e-9));
+        assertThat(up).as("the top must be the brighter of the two").isGreaterThan(down);
+    }
+
+    @Test
+    @DisplayName("a camera-facing surface is untouched under the flat rig but dimmed under the 3D one")
+    void frontLitCameraFacingSurfaceIsUnshaded() {
+        // This is the whole reason gui_light is plumbed through at all. A
+        // camera-facing normal is what almost every front-lit model presents
+        // at identity display.gui, and Java leaves it at full brightness -
+        // that is why an inventory sprite is pixel-identical to its source
+        // PNG. Picking the wrong rig here does not merely shift a highlight,
+        // it multiplies the entire icon by 0.513, which is *darker* than the
+        // unshaded output this renderer produced before shading existed.
+        assertThat(ItemIconRenderer.shadeFactor(new double[]{0, 0, 1}, true))
+            .as("front-lit, camera-facing")
+            .isEqualTo(1.0, org.assertj.core.data.Offset.offset(1e-9));
+        assertThat(ItemIconRenderer.shadeFactor(new double[]{0, 0, 1}, false))
+            .as("the same surface under the 3D rig, for contrast")
+            .isEqualTo(0.5130679, org.assertj.core.data.Offset.offset(1e-6));
+    }
+
+    @Test
+    @DisplayName("the flat rig is a genuinely different rig, not the 3D one under another name")
+    void flatRigDiffersFromTheThreeDimensionalRigAwayFromTheCamera() {
+        // Guards the frontLit flag actually reaching a different light pair.
+        // If someone collapsed the two rigs back into one, the camera-facing
+        // assertion above would still be the only thing to fail and could be
+        // "fixed" by tweaking a constant; these off-axis normals pin that the
+        // two matrices genuinely diverge.
+        assertThat(ItemIconRenderer.shadeFactor(new double[]{-1, 0, 0}, true))
+            .as("-X is partially lit under the flat rig but clamps under the 3D one")
+            .isEqualTo(0.6625187, org.assertj.core.data.Offset.offset(1e-6));
+        assertThat(ItemIconRenderer.shadeFactor(new double[]{0, 0, -1}, true))
+            .as("the back face sits on the ambient floor under the flat rig")
+            .isEqualTo(0.4, org.assertj.core.data.Offset.offset(1e-9));
+        assertThat(ItemIconRenderer.shadeFactor(new double[]{0, 0, -1}, false))
+            .as("the 3D rig still finds light on that same back face")
+            .isEqualTo(0.5465801, org.assertj.core.data.Offset.offset(1e-6));
     }
 
     private static BufferedImage solid(int argb) {
@@ -297,6 +438,17 @@ class ItemIconRendererTest {
         int rendered = 0;
         int blank = 0;
         int multiTexture = 0;
+        // Sanity check requested alongside the shading change: render each
+        // model a second time against a flat white texture so every opaque
+        // pixel's channel value *is* the shading factor (255*factor), then
+        // track the global min/max across the whole pack. If normals came
+        // out backwards this would read as uniformly ~0.4 (everything facing
+        // away from both lights) or uniformly ~1.0 (everything facing both);
+        // a real spread confirms per-face normals vary as expected.
+        BufferedImage white = solid(0xFFFFFFFF);
+        int shadeMin = 255;
+        int shadeMax = 0;
+        java.util.Map<String, int[]> perIconRange = new java.util.LinkedHashMap<>();
         for (Map.Entry<JavaPackReader.CmdKey, JavaPackReader.JavaModelDefinition> e
                 : reader.scan().entrySet()) {
             JavaPackReader.JavaModelDefinition def = e.getValue();
@@ -331,6 +483,30 @@ class ItemIconRendererTest {
             }
             ImageIO.write(icon, "PNG",
                 dump.resolve(sanitize(e.getKey().toString()) + ".png").toFile());
+
+            BufferedImage whiteIcon = ItemIconRenderer.render(
+                def.geometry(), gui, ignored -> white, white,
+                ItemIconRenderer.DEFAULT_SIZE, logger);
+            if (whiteIcon != null) {
+                int iconMin = 255;
+                int iconMax = 0;
+                for (int y = 0; y < whiteIcon.getHeight(); y++) {
+                    for (int x = 0; x < whiteIcon.getWidth(); x++) {
+                        int argb = whiteIcon.getRGB(x, y);
+                        if ((argb >>> 24) <= 8) {
+                            continue;
+                        }
+                        int channel = (argb >> 16) & 0xFF; // r==g==b on a white texel
+                        iconMin = Math.min(iconMin, channel);
+                        iconMax = Math.max(iconMax, channel);
+                    }
+                }
+                if (iconMax > 0) {
+                    perIconRange.put(e.getKey().toString(), new int[]{iconMin, iconMax});
+                    shadeMin = Math.min(shadeMin, iconMin);
+                    shadeMax = Math.max(shadeMax, iconMax);
+                }
+            }
         }
 
         Assumptions.assumeTrue(rendered + blank > 0, "pack has no 3D models");
@@ -343,6 +519,26 @@ class ItemIconRendererTest {
         // to painting the primary artwork everywhere.
         assertThat(multiTexture).as("models resolving more than one texture layer")
             .isGreaterThan(0);
+
+        System.out.println("[IconRender shading] min factor=" + (shadeMin / 255.0)
+            + " (byte " + shadeMin + "), max factor=" + (shadeMax / 255.0)
+            + " (byte " + shadeMax + ") across " + (rendered + blank) + " real 3D icons");
+        // Name a couple of concrete icons and their own per-icon spread, so a
+        // uniformly-flat individual icon (the actual failure mode a wrong
+        // normal produces — see the class javadoc) is visible even if it
+        // happened to average out against the rest of the pack.
+        perIconRange.entrySet().stream().limit(3).forEach(en ->
+            System.out.println("[IconRender shading]   " + en.getKey()
+                + ": min=" + (en.getValue()[0] / 255.0) + " max=" + (en.getValue()[1] / 255.0)));
+        // 0x66 = round(255*0.4) is the ambient floor; nothing can render
+        // darker than that, and nothing can exceed the min(1,...) clamp.
+        assertThat(shadeMin).as("no pixel is darker than the 0.4 ambient floor")
+            .isGreaterThanOrEqualTo(0x66 - 1);
+        assertThat(shadeMax).as("no pixel exceeds the clamp").isLessThanOrEqualTo(255);
+        // Guard against the exact backwards-normal failure mode this check
+        // exists to catch: every face landing on the same value.
+        assertThat(shadeMax).as("shading is not uniformly flat across the pack")
+            .isGreaterThan(shadeMin);
     }
 
     // -----------------------------------------------------------------

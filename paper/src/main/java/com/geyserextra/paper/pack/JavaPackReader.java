@@ -898,6 +898,12 @@ public final class JavaPackReader {
         }
         String current = modelRef;
         int hops = 0;
+        // gui_light inherits like any other model field — nearest declaration
+        // wins — and it decides which of Java's two inventory diffuse light
+        // rigs the icon renderer has to use. Tracked on the way down so it is
+        // already known by the time the elements are found; the format default
+        // when nobody declares one is "side".
+        Boolean guiLightFront = null;
         while (current != null && hops < 8) {
             Path modelFile = resolveModelFile(current);
             if (modelFile == null) {
@@ -910,6 +916,10 @@ public final class JavaPackReader {
                 logger.warning("[JavaPack] failed to read model JSON " + modelFile
                     + " for elements extraction: " + ex.getMessage());
                 break;
+            }
+            if (guiLightFront == null
+                && modelJson.get("gui_light") instanceof String rawGuiLight) {
+                guiLightFront = "front".equalsIgnoreCase(rawGuiLight.trim());
             }
             Object elementsObj = modelJson.get("elements");
             if (elementsObj instanceof List<?> rawList) {
@@ -930,7 +940,15 @@ public final class JavaPackReader {
                     }
                 }
                 if (!parsed.isEmpty()) {
-                    return new JavaModelGeometry(parsed);
+                    // The elements walk stops here, but gui_light may still be
+                    // declared further up (a Blockbench model that parents on
+                    // item/generated inherits "front" from it), so finish that
+                    // half of the resolution separately rather than defaulting
+                    // to "side" just because this file was silent.
+                    boolean front = guiLightFront != null
+                        ? guiLightFront
+                        : resolveGuiLightFront(modelJson.get("parent"), hops);
+                    return new JavaModelGeometry(parsed, front);
                 }
                 // List was non-empty but every entry failed to parse — treat
                 // as malformed and stop walking rather than silently inheriting
@@ -946,6 +964,54 @@ public final class JavaPackReader {
             hops++;
         }
         return null;
+    }
+
+    /**
+     * Continues a parent walk looking only for {@code gui_light}, for the case
+     * where {@link #resolveElementsFromModel} found the elements before any
+     * model in the chain declared one. The two fields resolve independently
+     * because the elements walk stops at the first declaration by design (see
+     * above) while {@code gui_light} keeps inheriting past it.
+     *
+     * <p>Returns {@code true} for {@code "front"}. The fallback is {@code false}
+     * ({@code "side"}), which is the model format's own default and also what
+     * an unresolvable parent has to mean — except for the vanilla parents the
+     * pack does not ship, which
+     * {@link VanillaBuiltinDisplays#forUnresolvedParent(String)} recognises:
+     * every {@code item/*} builtin chains to {@code item/generated}, and
+     * {@code generated.json} declares {@code "gui_light": "front"}.</p>
+     *
+     * @param hopsSoFar hops already spent by the caller, so the combined walk
+     *                  still respects the same cycle bound
+     */
+    private boolean resolveGuiLightFront(Object parentRef, int hopsSoFar) {
+        String current = parentRef instanceof String s && !s.isBlank() ? s : null;
+        int hops = hopsSoFar;
+        while (current != null && hops < 8) {
+            Path modelFile = resolveModelFile(current);
+            if (modelFile == null) {
+                // Not in the pack: only Mojang's own item parents remain, and
+                // they all reach item/generated, which is front-lit.
+                return VanillaBuiltinDisplays.forUnresolvedParent(current) != null;
+            }
+            Map<String, Object> modelJson;
+            try {
+                modelJson = readJsonObject(modelFile);
+            } catch (IOException ex) {
+                if (debug) {
+                    logger.log(Level.FINE,
+                        "[JavaPack] gui_light walk stopped at unreadable " + modelFile, ex);
+                }
+                return false;
+            }
+            if (modelJson.get("gui_light") instanceof String raw) {
+                return "front".equalsIgnoreCase(raw.trim());
+            }
+            Object next = modelJson.get("parent");
+            current = next instanceof String s && !s.isBlank() ? s : null;
+            hops++;
+        }
+        return false;
     }
 
     /**

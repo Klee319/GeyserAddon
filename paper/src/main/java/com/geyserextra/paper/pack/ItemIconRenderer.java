@@ -39,8 +39,135 @@ import java.util.logging.Logger;
  * centring). Depth resolves with a plain z-buffer: no translucency sorting, so
  * a model that overlaps itself with semi-transparent faces will differ from
  * Java. None of the weapon models do.</p>
+ *
+ * <p><b>Shading:</b> Java does not blit the raw texel for a 3D item icon — it
+ * runs the core-shader two-directional diffuse formula
+ * ({@code assets/minecraft/shaders/include/light.glsl}, misode/mcmeta
+ * {@code assets} branch):</p>
+ * <pre>
+ * lightAccum = min(1, (max(0,dot(L0,n)) + max(0,dot(L1,n))) * 0.6 + 0.4)
+ * colour.rgb *= lightAccum   // alpha untouched
+ * </pre>
+ * <p>{@code n} is the face normal computed after the element rotation and
+ * {@code display.gui} transform have been applied to the corners (see
+ * {@link #faceNormal}), and {@code L0}/{@code L1} are the two light
+ * directions Java binds for that space.</p>
+ *
+ * <p>Which pair depends on the model's resolved {@code gui_light}, exactly as
+ * in Java: {@code "side"} (the format default) uses what
+ * {@code Lighting.setupFor3DItems()} binds, {@code "front"} uses
+ * {@code setupForFlatItems()}'s. That distinction is not academic here — in
+ * the reference pack <b>49 of the 57 element-bearing models declare
+ * {@code "gui_light": "front"}</b>, and shading those with the 3D rig would
+ * render them markedly darker than Java does (a camera-facing surface is
+ * {@code 1.0} under the flat rig and {@code 0.513} under the 3D one). See
+ * {@link #LIGHT0_3D} and {@link #LIGHT0_FLAT} for the matrices and their
+ * citations, and {@link #shadeFactor} for the one adjustment this renderer
+ * has to make to Mojang's numbers.</p>
  */
 public final class ItemIconRenderer {
+
+    /**
+     * Vanilla {@code Lighting.DIFFUSE_LIGHT_0}/{@code DIFFUSE_LIGHT_1}
+     * (decompiled {@code com.mojang.blaze3d.platform.Lighting}, 1.21.4-era
+     * source, cross-checked against an independent reimplementation that
+     * documents the same constants for the same purpose):
+     * <ul>
+     *   <li>{@code https://github.com/mil1dude/source-code/blob/369de544c3b8115893731d1189bfcd5ae0bdbbb2/src/game/java/com/mojang/blaze3d/platform/Lighting.java}
+     *       — {@code DIFFUSE_LIGHT_0 = new Vector3f(0.2F, 1.0F, -0.7F).normalize()},
+     *       {@code DIFFUSE_LIGHT_1 = new Vector3f(-0.2F, 1.0F, 0.7F).normalize()},
+     *       and both {@code setupForFlatItems()}/{@code setupFor3DItems()}
+     *       feed this same pair through {@code RenderSystem.setupGuiFlatDiffuseLighting}
+     *       / {@code setupGui3DDiffuseLighting} respectively — the flat/3D
+     *       split is in which pre-rotation matrix is applied to them (below),
+     *       not in the base vectors.</li>
+     *   <li>{@code https://github.com/Llama-Collective/renderer/blob/79f15b5f6e9c42a4fc7fe2748d192c1e8ea29ac9/src/render/items/itemLighting.ts}
+     *       — independent reimplementation citing "Vanilla (Lighting.java:37)"
+     *       for the identical {@code normalize(0.2,1.0,-0.7)} /
+     *       {@code normalize(-0.2,1.0,0.7)} pair, corroborating the decompile.</li>
+     * </ul>
+     * We only need <b>1.21.11</b> confidence for the base vectors and the
+     * pre-rotation matrix below; the mil1dude source is tagged 1.21.4, and
+     * Mojang has not touched {@code Lighting} between those releases in any
+     * changelog or diff surfaced by this research, so the risk is judged low,
+     * but it is not a same-version primary source and is flagged as such.
+     */
+    private static final double[] DIFFUSE_LIGHT_0 = normalize(0.2, 1.0, -0.7);
+
+    /** See {@link #DIFFUSE_LIGHT_0}. */
+    private static final double[] DIFFUSE_LIGHT_1 = normalize(-0.2, 1.0, 0.7);
+
+    /**
+     * {@code DIFFUSE_LIGHT_0}/{@code DIFFUSE_LIGHT_1} pre-transformed by the
+     * exact matrix {@code com.mojang.blaze3d.platform.GlStateManager
+     * #setupGui3DDiffuseLighting} builds, ported term-for-term rather than
+     * baked to a literal so the derivation stays checkable against the source
+     * comment below:
+     * <pre>
+     * new Matrix4f()
+     *     .scaling(1.0F, -1.0F, 1.0F)
+     *     .rotateYXZ(1.0821041F, 3.2375858F, 0.0F)
+     *     .rotateYXZ((float) (-Math.PI / 8), (float) (Math.PI * 3.0 / 4.0), 0.0F);
+     * </pre>
+     * from the same source as {@link #DIFFUSE_LIGHT_0}
+     * ({@code src/game/java/com/mojang/blaze3d/platform/GlStateManager.java},
+     * same commit). {@code rotateYXZ(y, x, z)} is JOML's
+     * {@code rotateY(y).rotateX(x).rotateZ(z)} which, per JOML's own
+     * {@code Matrix4f.java} source, right-multiplies the existing matrix — so
+     * transforming a vector applies the *last* {@code rotateYXZ} call first.
+     * Reading the chain right-to-left as applied-to-the-vector order:
+     * {@code Rx(3π/4) → Ry(-π/8) → Rx(3.2375858) → Ry(1.0821041) → Scale(1,-1,1)}.
+     * {@link #rotateX(double[], double)}/{@link #rotateY(double[], double)}
+     * below use the same sign convention as {@link #applyGuiTransform}
+     * (verified against JOML {@code Matrix4f.rotationX/rotationY}), so this
+     * reuses that convention rather than introducing a second one.
+     *
+     * <p>The trailing {@code scaling(1, -1, 1)} is kept verbatim; the single
+     * compensation this renderer needs is applied on the normal instead, once,
+     * in {@link #shadeFactor}.</p>
+     */
+    private static final double[] LIGHT0_3D = flipY(rotateY(
+        rotateX(rotateY(rotateX(DIFFUSE_LIGHT_0, 3.0 * Math.PI / 4.0), -Math.PI / 8.0),
+            3.2375858), 1.0821041));
+
+    /** See {@link #LIGHT0_3D}. */
+    private static final double[] LIGHT1_3D = flipY(rotateY(
+        rotateX(rotateY(rotateX(DIFFUSE_LIGHT_1, 3.0 * Math.PI / 4.0), -Math.PI / 8.0),
+            3.2375858), 1.0821041));
+
+    /**
+     * The {@code gui_light: "front"} pair — what
+     * {@code Lighting.setupForFlatItems()} binds, via
+     * {@code GlStateManager#setupGuiFlatDiffuseLighting} from the same source
+     * and commit as {@link #LIGHT0_3D}:
+     * <pre>
+     * new Matrix4f().rotationY((float) (-Math.PI / 8)).rotateX((float) (Math.PI * 3.0 / 4.0));
+     * </pre>
+     * {@code rotationY} <em>sets</em> the matrix (it is not the accumulating
+     * {@code rotateY}), and {@code rotateX} then right-multiplies, so a vector
+     * gets {@code Rx(3π/4)} first and {@code Ry(-π/8)} second — the same first
+     * two steps as the 3D rig, without the level rotation or the scale that
+     * follow them there.
+     *
+     * <p>Sanity check that this is the right pair for flat items: a
+     * camera-facing surface ({@code n = (0, 0, 1)}) comes out at exactly
+     * {@code 1.0} here, which is why an inventory sprite looks identical to
+     * its source PNG. Under the 3D rig the same surface is {@code 0.513}.</p>
+     */
+    private static final double[] LIGHT0_FLAT =
+        rotateY(rotateX(DIFFUSE_LIGHT_0, 3.0 * Math.PI / 4.0), -Math.PI / 8.0);
+
+    /** See {@link #LIGHT0_FLAT}. */
+    private static final double[] LIGHT1_FLAT =
+        rotateY(rotateX(DIFFUSE_LIGHT_1, 3.0 * Math.PI / 4.0), -Math.PI / 8.0);
+
+    /**
+     * Vanilla's ambient/diffuse split from {@code light.glsl}: RGB is
+     * multiplied by {@code min(1, (d0+d1)*LIGHT_POWER + AMBIENT_LIGHT)}, alpha
+     * is untouched.
+     */
+    private static final double LIGHT_POWER = 0.6;
+    private static final double AMBIENT_LIGHT = 0.4;
 
     /**
      * Output edge length. Bedrock item icons are not limited to 16x16 — the
@@ -148,7 +275,8 @@ public final class ItemIconRenderer {
                     continue;
                 }
                 drewAnything |= drawFace(
-                    element, face, f, texture, rot, trans, scale, colour, depth, ss);
+                    element, face, f, texture, rot, trans, scale,
+                    geometry.guiLightFront(), colour, depth, ss);
             }
         }
 
@@ -199,6 +327,7 @@ public final class ItemIconRenderer {
         float[] guiRotation,
         float[] guiTranslation,
         float[] guiScale,
+        boolean frontLit,
         int[] colour,
         float[] depth,
         int ss
@@ -222,11 +351,141 @@ public final class ItemIconRenderer {
             uv[i] = cornerUv(face, i, texture);
         }
 
+        // Flat shading: one normal for the whole quad, taken after rotation
+        // and the gui transform so a tilted/rotated element shades correctly
+        // instead of by its untransformed axis-aligned direction (see class
+        // javadoc "Shading" section). The quad is planar (rotation and the
+        // single-axis rescale both preserve planarity), so any two edges from
+        // the same corner give the same normal as the other triangle would.
+        float shade = (float) shadeFactor(faceNormal(pos[0], pos[1], pos[2]), frontLit);
+
         boolean drew = rasterize(pos[0], pos[1], pos[2], uv[0], uv[1], uv[2],
-            texture, colour, depth, ss);
+            texture, shade, colour, depth, ss);
         drew |= rasterize(pos[0], pos[2], pos[3], uv[0], uv[2], uv[3],
-            texture, colour, depth, ss);
+            texture, shade, colour, depth, ss);
         return drew;
+    }
+
+    /**
+     * Outward face normal from three corners in the renderer's screen space
+     * ({@code +X} right, {@code +Y} up, {@code +Z} toward the camera — see
+     * class javadoc). Winding verified empirically against an unrotated south
+     * face (Java's {@code FaceInfo.SOUTH} corner order): with
+     * {@code cross(pos1-pos0, pos2-pos0)} an unrotated south face (which sits
+     * at {@code z = 0.5} facing the camera) comes out {@code (0,0,1)}, and the
+     * unrotated north face (facing away, at {@code z = -0.5}) comes out
+     * {@code (0,0,-1)} — both outward, so this is the correct operand order
+     * and not its negation.
+     */
+    private static double[] faceNormal(float[] p0, float[] p1, float[] p2) {
+        double ex = p1[0] - p0[0], ey = p1[1] - p0[1], ez = p1[2] - p0[2];
+        double fx = p2[0] - p0[0], fy = p2[1] - p0[1], fz = p2[2] - p0[2];
+        double nx = ey * fz - ez * fy;
+        double ny = ez * fx - ex * fz;
+        double nz = ex * fy - ey * fx;
+        double len = Math.sqrt(nx * nx + ny * ny + nz * nz);
+        if (len < 1e-9) {
+            // Degenerate quad (zero-area element, e.g. a from==to plane
+            // viewed exactly edge-on so the two edges are parallel). No
+            // well-defined normal; fully unlit is the least-wrong answer and
+            // matches what an edge-on triangle contributes to the image
+            // anyway (near-zero screen area).
+            return new double[]{0.0, 0.0, 0.0};
+        }
+        return new double[]{nx / len, ny / len, nz / len};
+    }
+
+    /**
+     * Vanilla's two-directional diffuse formula, ported verbatim from
+     * {@code minecraft_mix_light_separate} in {@code light.glsl} (see class
+     * javadoc): {@code min(1, (max(0,dot(L0,n)) + max(0,dot(L1,n))) * 0.6 + 0.4)}.
+     * A degenerate (zero-length) normal dots to zero with both lights and
+     * lands on the ambient floor, {@link #AMBIENT_LIGHT}.
+     *
+     * <p><b>The normal is flipped in Y first.</b> Mojang's light matrices are
+     * expressed in the space the GUI pose stack leaves the geometry in, and
+     * that stack flips Y; this renderer keeps {@code pos[]} Y-up all the way
+     * through {@link #faceNormal} and flips once at the very end, in
+     * {@link #toScreenY}. One flip on the normal puts the two back in the same
+     * space and lets both matrices above stay verbatim copies of the source.
+     * Skipping it inverts the Y term of the dot product, and that is not
+     * subtle: it renders every icon lit from underneath — for a vanilla block
+     * icon ({@code display.gui} rotation {@code [30, 225, 0]}) the top face
+     * drops to the {@link #AMBIENT_LIGHT} floor 0.4 and the hidden underside
+     * goes to 1.0, where the top should be the brightest face of the three
+     * visible ones (1.0 / 0.65 / 0.4). It shipped that way once, because every
+     * normal that is convenient to hand-write in a test has {@code y == 0} and
+     * is therefore blind to it.</p>
+     *
+     * <p>The flip applies to <em>both</em> rigs, even though only the 3D
+     * matrix carries a {@code scaling(1, -1, 1)} of its own. That asymmetry is
+     * vanilla's: {@code setupGuiFlatDiffuseLighting} genuinely omits the
+     * scaling. It is invisible in vanilla because the flat rig is only ever
+     * bound for flat quads, whose normal has no Y term either way — but we
+     * bind it for the reference pack's 49 front-lit models that do have real
+     * geometry, so the flip has to be here rather than folded into
+     * {@link #LIGHT0_FLAT}. Reading the two rigs off the one validated case
+     * (the block icon above, where the correct answer is
+     * {@code dot(LIGHT0_3D, flipY(n))}) fixes the eye-space normal as
+     * {@code flipY(n)} for everything drawn in the same pass, flat rig
+     * included.</p>
+     *
+     * <p>Package-visible so the test can pin the arithmetic against hand-fed
+     * normals directly. An axis-aligned normal like {@code (1,0,0)} cannot be
+     * exercised through {@link #render} at identity {@code display.gui}: a
+     * face whose normal has zero Z is by construction edge-on to this
+     * renderer's orthographic-along-Z camera, so {@link #rasterize} sees zero
+     * screen area and never calls this method for it — there is no rotation
+     * that makes such a face visible without also changing its normal away
+     * from the axis-aligned value the test wants to pin.</p>
+     *
+     * @param frontLit the model's resolved {@code gui_light == "front"}
+     */
+    static double shadeFactor(double[] normal, boolean frontLit) {
+        double[] n = flipY(normal);
+        double[] light0 = frontLit ? LIGHT0_FLAT : LIGHT0_3D;
+        double[] light1 = frontLit ? LIGHT1_FLAT : LIGHT1_3D;
+        double d0 = Math.max(0.0, dot(light0, n));
+        double d1 = Math.max(0.0, dot(light1, n));
+        return Math.min(1.0, (d0 + d1) * LIGHT_POWER + AMBIENT_LIGHT);
+    }
+
+    /** {@code scaling(1, -1, 1)}. */
+    private static double[] flipY(double[] v) {
+        return new double[]{v[0], -v[1], v[2]};
+    }
+
+    private static double dot(double[] a, double[] b) {
+        return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    }
+
+    private static double[] normalize(double x, double y, double z) {
+        double len = Math.sqrt(x * x + y * y + z * z);
+        return new double[]{x / len, y / len, z / len};
+    }
+
+    /**
+     * Rotation about X, using the same sign convention as
+     * {@link #applyGuiTransform}'s X block ({@code y' = y*cos - z*sin},
+     * {@code z' = y*sin + z*cos}), which matches JOML's
+     * {@code Matrix4f.rotationX} (verified against JOML source: the resulting
+     * matrix has {@code m11=cos, m12=sin, m21=-sin, m22=cos} in JOML's
+     * column-major layout, which is exactly this formula).
+     */
+    private static double[] rotateX(double[] v, double angle) {
+        double cos = Math.cos(angle), sin = Math.sin(angle);
+        return new double[]{v[0], v[1] * cos - v[2] * sin, v[1] * sin + v[2] * cos};
+    }
+
+    /**
+     * Rotation about Y, using the same sign convention as
+     * {@link #applyGuiTransform}'s Y block ({@code x' = x*cos + z*sin},
+     * {@code z' = -x*sin + z*cos}), verified against JOML's
+     * {@code Matrix4f.rotationY} the same way as {@link #rotateX}.
+     */
+    private static double[] rotateY(double[] v, double angle) {
+        double cos = Math.cos(angle), sin = Math.sin(angle);
+        return new double[]{v[0] * cos + v[2] * sin, v[1], -v[0] * sin + v[2] * cos};
     }
 
     /**
@@ -470,6 +729,7 @@ public final class ItemIconRenderer {
         float[] a, float[] b, float[] c,
         float[] uvA, float[] uvB, float[] uvC,
         BufferedImage texture,
+        float shade,
         int[] colour, float[] depth, int ss
     ) {
         float ax = toScreenX(a[0], ss), ay = toScreenY(a[1], ss);
@@ -514,7 +774,7 @@ public final class ItemIconRenderer {
                     continue;
                 }
                 depth[idx] = z;
-                colour[idx] = argb;
+                colour[idx] = shaded(argb, shade);
                 drew = true;
             }
         }
@@ -536,6 +796,23 @@ public final class ItemIconRenderer {
         int x = clamp((int) Math.floor(u), 0, texture.getWidth() - 1);
         int y = clamp((int) Math.floor(v), 0, spriteHeight(texture) - 1);
         return texture.getRGB(x, y);
+    }
+
+    /**
+     * Multiplies the RGB channels of a straight (non-premultiplied) ARGB
+     * texel by the face's shading factor, leaving alpha untouched — matching
+     * {@code minecraft_mix_light_separate}'s {@code color.rgb * lightAccum}
+     * (alpha passes through unmodified). Applying this before the value
+     * enters {@code colour[]} means {@link #downsample}'s premultiplication
+     * sees already-shaded colour, so it does not need to know about shading
+     * at all.
+     */
+    private static int shaded(int argb, float shade) {
+        int a = argb >>> 24;
+        int r = clamp(Math.round(((argb >> 16) & 0xFF) * shade), 0, 255);
+        int g = clamp(Math.round(((argb >> 8) & 0xFF) * shade), 0, 255);
+        int b = clamp(Math.round((argb & 0xFF) * shade), 0, 255);
+        return (a << 24) | (r << 16) | (g << 8) | b;
     }
 
     private static int clamp(int value, int min, int max) {

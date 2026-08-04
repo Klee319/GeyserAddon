@@ -15,12 +15,29 @@ import java.util.Objects;
  * When at least one face declares a UV region, the Bedrock converter emits
  * the per-face UV form (geometry 1.16.0+) so each cube face samples the
  * correct portion of the source texture, matching Java's rendering.</p>
+ *
+ * <p>{@code guiLightFront} carries the model's resolved {@code gui_light}.
+ * It rides along with the elements because it is resolved by the same parent
+ * walk and consumed by the same renderer: {@link ItemIconRenderer} needs it to
+ * pick between the two diffuse light rigs Java binds for the inventory, and
+ * getting it wrong makes an icon visibly too dark. In the reference pack 49 of
+ * the 57 element-bearing models declare {@code "front"}, so this is the common
+ * case rather than the exception.</p>
  */
-public record JavaModelGeometry(List<Element> elements) {
+public record JavaModelGeometry(List<Element> elements, boolean guiLightFront) {
 
     public JavaModelGeometry {
         Objects.requireNonNull(elements, "elements must not be null");
         elements = List.copyOf(elements);
+    }
+
+    /**
+     * Geometry with the format default {@code gui_light: "side"}. Kept so call
+     * sites that only care about the shapes — the Bedrock cube converter and
+     * its tests — do not have to state a lighting mode they never read.
+     */
+    public JavaModelGeometry(List<Element> elements) {
+        this(elements, false);
     }
 
     /** True when at least one element is present. */
