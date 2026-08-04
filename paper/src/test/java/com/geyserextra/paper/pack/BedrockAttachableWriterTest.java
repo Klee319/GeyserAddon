@@ -7,6 +7,8 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.offset;
@@ -371,9 +373,9 @@ class BedrockAttachableWriterTest {
         // Must NOT use Valhalla 3D frame.
         assertThat(compact).doesNotContain("\"position\":[25.0,7.0,10.0]");
         assertThat(compact).doesNotContain("\"scale\":3.2");
-        // Flat-only pose: [0,15,4]/1.75.
+        // Flat-only pose: [0,15,4]/1.5.
         assertThat(compact).contains(
-            "\"geyserextra\":{\"rotation\":[90.0,60.0,-40.0],\"position\":[0.0,17.7,4.0],\"scale\":1.75");
+            "\"geyserextra\":{\"rotation\":[90.0,60.0,-40.0],\"position\":[0.0,17.7,4.0],\"scale\":1.5");
         // Handheld FP translation kept.
         assertThat(compact).doesNotContainPattern(
             "\"geyserextra_x\":\\{\"rotation\":\\[[^]]+\\],\"position\":\\[-?0\\.0,-?0\\.0,-?0\\.0\\]");
@@ -400,9 +402,9 @@ class BedrockAttachableWriterTest {
             artifacts.get(BedrockAttachableWriter.animationEntryPath("test_mace")),
             "firstperson_main_hand");
         String compact = firstMain.replaceAll("\\s+", "");
-        // Flat pose [0,15,4]/1.75 (no oversize when display scale 0.68).
+        // Flat pose [0,15,4]/1.5 (no oversize when display scale 0.68).
         assertThat(compact).contains(
-            "\"geyserextra\":{\"rotation\":[90.0,60.0,-40.0],\"position\":[0.0,17.7,4.0],\"scale\":1.75");
+            "\"geyserextra\":{\"rotation\":[90.0,60.0,-40.0],\"position\":[0.0,17.7,4.0],\"scale\":1.5");
     }
 
     @Test
@@ -426,10 +428,57 @@ class BedrockAttachableWriterTest {
             artifacts.get(BedrockAttachableWriter.animationEntryPath("flat_item")),
             "firstperson_main_hand");
         String compact = firstMain.replaceAll("\\s+", "");
-        // Fixed flat pose [0,15,4]/1.75 regardless of the display scale.
+        // Fixed flat pose [0,15,4]/1.5 regardless of the display scale.
         assertThat(compact).contains(
-            "\"geyserextra\":{\"rotation\":[90.0,60.0,-40.0],\"position\":[0.0,17.7,4.0],\"scale\":1.75");
+            "\"geyserextra\":{\"rotation\":[90.0,60.0,-40.0],\"position\":[0.0,17.7,4.0],\"scale\":1.5");
         assertThat(firstMain).contains("geyserextra_x");
+    }
+
+    @Test
+    @DisplayName("flat and 3D items get the same first-person root scale")
+    void flatAndGeometryPathsAgreeOnFirstPersonRootScale() {
+        // The regression this pins: the flat root scale was an eyeballed 1.75
+        // against the 3D path's 1.5, so the same Java display scale rendered
+        // 16.7% larger whenever a model happened to lack an `elements` block.
+        // Whether the operator authored real cubes is not a property of the
+        // frame mapping, so it must not change how big the item is; the two
+        // paths having drifted apart is what made the mace visibly outsize
+        // Bedrock's own vanilla mace. Asserting they agree — rather than
+        // re-pinning 1.5 a fourth time — is what catches a future one-sided
+        // nudge, which is exactly how this arose.
+        JavaModelDisplay display = VanillaBuiltinDisplays.HANDHELD_MACE;
+        AttachableGenerationConfig config =
+            new AttachableGenerationConfig(AttachableGenerationConfig.MODE_OFFSETS_ONLY, false);
+
+        String flat = rootScaleOfFirstPersonMainHand("flat_mace", display, null, config);
+        String solid = rootScaleOfFirstPersonMainHand(
+            "solid_mace", display, cubeGeometry(), config);
+
+        assertThat(flat)
+            .as("texture-only and cube-bearing items must be the same size in hand")
+            .isEqualTo(solid);
+    }
+
+    /** Single 1x1x1 cube — enough to send an item down the full-geometry path. */
+    private static JavaModelGeometry cubeGeometry() {
+        return new JavaModelGeometry(List.of(new JavaModelGeometry.Element(
+            new float[]{7f, 7f, 7f}, new float[]{9f, 9f, 9f}, null)));
+    }
+
+    private static String rootScaleOfFirstPersonMainHand(
+        String iconKey,
+        JavaModelDisplay display,
+        JavaModelGeometry geometry,
+        AttachableGenerationConfig config
+    ) {
+        Map<String, String> artifacts = BedrockAttachableWriter.buildArtifacts(
+            iconKey, display, geometry, "textures/items/" + iconKey, 16, 16, config, null);
+        String anim = extractAnimation(
+            artifacts.get(BedrockAttachableWriter.animationEntryPath(iconKey)),
+            "firstperson_main_hand").replaceAll("\\s+", "");
+        Matcher m = Pattern.compile("\"geyserextra\":\\{[^}]*\"scale\":([0-9.]+)").matcher(anim);
+        assertThat(m.find()).as("root scale present in %s", iconKey).isTrue();
+        return m.group(1);
     }
 
     /**

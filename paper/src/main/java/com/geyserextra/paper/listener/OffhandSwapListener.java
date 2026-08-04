@@ -1,6 +1,7 @@
 package com.geyserextra.paper.listener;
 
 import com.geyserextra.paper.util.BedrockPlayerUtil;
+import com.geyserextra.paper.util.DebugLog;
 
 import org.bukkit.Bukkit;
 import org.bukkit.Material;
@@ -133,6 +134,14 @@ public final class OffhandSwapListener implements Listener {
     public void onPlayerDropItem(PlayerDropItemEvent event) {
         Player player = event.getPlayer();
         if (!BedrockPlayerUtil.isBedrockPlayer(player)) {
+            // Logged because this is the one branch that used to fail in total
+            // silence: a Java player dropping an item looks exactly like a
+            // Bedrock player whose detection failed, and nothing downstream
+            // ever runs to say so. The UUID is here because the fallback leg of
+            // the detection keys on its version nibble.
+            DebugLog.log(plugin.getLogger(),
+                () -> "Sneak-drop swap ignored for " + player.getName()
+                    + ": not detected as a Bedrock player (uuid=" + player.getUniqueId() + ")");
             return;
         }
 
@@ -155,8 +164,16 @@ public final class OffhandSwapListener implements Listener {
             // A previous gesture is still in flight; the in-flight mutation
             // already represents the player's intent, so dropping the extra
             // request keeps state consistent.
+            DebugLog.log(plugin.getLogger(),
+                () -> "Sneak-drop swap ignored for " + player.getName()
+                    + ": a previous gesture is still in flight");
             return;
         }
+        DebugLog.log(plugin.getLogger(),
+            () -> "Sneak-drop candidate from " + player.getName()
+                + ": sneakingAtDrop=" + sneakingAtDrop
+                + ", heldSlot=" + heldSlot
+                + ", dropped=" + describeStack(droppedSnapshot));
         schedule(player, () -> completeSneakDropSwap(
             player, heldSlot, droppedSnapshot, heldAmountAtDrop, entity, sneakingAtDrop));
     }
@@ -208,20 +225,21 @@ public final class OffhandSwapListener implements Listener {
             sneakingAtDrop, player.isSneaking(), entityUsable, slotHoldsDrop, original != null);
 
         switch (decision) {
-            case SKIP_NOT_SNEAKING -> plugin.getLogger().fine(
+            case SKIP_NOT_SNEAKING -> DebugLog.log(plugin.getLogger(),
                 () -> "Sneak-drop swap skipped for " + player.getName()
                     + ": not sneaking at drop time nor on the following tick");
-            case ABORT_ENTITY_GONE -> plugin.getLogger().fine(
+            case ABORT_ENTITY_GONE -> DebugLog.log(plugin.getLogger(),
                 () -> "Sneak-drop swap aborted for " + player.getName()
                     + ": the dropped entity never reached the world and the held slot"
                     + " does not hold the stack back (held=" + describeStack(occupant)
                     + ", dropped=" + describeStack(droppedSnapshot) + ")");
-            case ABORT_FOREIGN_SLOT -> plugin.getLogger().fine(() -> String.format(
+            case ABORT_FOREIGN_SLOT -> DebugLog.log(plugin.getLogger(), () -> String.format(
                 "Sneak-drop swap aborted for %s: held slot %d holds %s, dropped %s",
                 player.getName(), heldSlot, describeStack(occupant), describeStack(liveDrop)));
             case SWAP_RESTORED_STACK -> {
-                plugin.getLogger().fine(() -> "Sneak-drop swap for " + player.getName()
-                    + ": drop was cancelled upstream, swapping the restored stack directly");
+                DebugLog.log(plugin.getLogger(),
+                    () -> "Sneak-drop swap for " + player.getName()
+                        + ": drop was cancelled upstream, swapping the restored stack directly");
                 swapHeldSlotWithOffhand(player, inv, heldSlot);
             }
             case COMMIT_RECONSTRUCTED -> commitSwap(player, inv, heldSlot, entity, original);

@@ -38,6 +38,7 @@ import com.geyserextra.paper.command.StatisticsCommand;
 import com.geyserextra.paper.command.TooltipCommand;
 import com.geyserextra.paper.display.DisplayManager;
 import com.geyserextra.paper.settings.PlayerSettingsManager;
+import com.geyserextra.paper.util.DebugLog;
 import com.geyserextra.paper.util.JapaneseTranslationLoader;
 
 import java.io.IOException;
@@ -250,11 +251,10 @@ public final class GeyserExtraPaper extends JavaPlugin {
         Path configPath = getExtensionDataFolder().resolve(CONFIG_FILE);
         config = GeyserExtraConfig.loadOrCreate(configPath);
 
-        getLogger().fine("Config loaded from: " + configPath.toAbsolutePath());
-
-        if (config.general().debugMode()) {
-            getLogger().fine("Debug mode enabled.");
-        }
+        // Before the first DebugLog.log call, so the config's own load is the
+        // first thing the operator sees when they turn debugging on.
+        DebugLog.setEnabled(config.general().debugMode());
+        DebugLog.log(getLogger(), () -> "Config loaded from: " + configPath.toAbsolutePath());
     }
 
     /**

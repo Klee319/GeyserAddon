@@ -787,14 +787,32 @@ public final class BedrockAttachableWriter {
 
     /**
      * FP root for texture-only / {@code texture_meshes} items.
-     * Based on Kas-tle java2bedrock ({@code [4,10,4]/1.5}) with a nudge:
-     * −X toward the camera; Y a bit below mid-screen; scale above stock j2b.
+     * Based on Kas-tle java2bedrock ({@code [4,10,4]/1.5}), repositioned:
+     * −X toward the camera, Y a bit below mid-screen.
+     *
+     * <p>The <b>scale stays at java2bedrock's 1.5</b>, matching the 3D path.
+     * It was 1.75 — an eyeballed "a bit bigger than stock j2b" with no
+     * derivation behind it — and that inflated every texture-only item by
+     * 16.7% against both the reference implementation and Bedrock's own
+     * vanilla rendering of the same item. It showed up on the mace because the
+     * overshoot is proportional to the Java display scale and
+     * {@code handheld_mace} carries the largest one in the builtin set (0.9,
+     * against 0.68 for ordinary handheld tools), so the same 16.7% error is at
+     * its most visible there. Two root scales for the same frame mapping was
+     * the real defect: whether a model happens to declare {@code elements} is
+     * not a reason for the identical Java display scale to render at two
+     * different sizes.</p>
+     *
+     * <p>The position divergence from j2b is left alone deliberately — it is
+     * the part that is currently reported as correct, and
+     * {@link #buildHoldAnimation} divides the per-item offset by this scale, so
+     * changing the scale alone resizes the mesh without moving it.</p>
      */
     private static final AttachableGenerationConfig.BasePose FLAT_FIRST_PERSON_POSE =
         new AttachableGenerationConfig.BasePose(
             new float[]{90f, 60f, -40f},
             new float[]{0f, 15f, 4f},
-            1.75f);
+            1.5f);
 
     /**
      * Returns {@code pose} with the operator's first-person height correction

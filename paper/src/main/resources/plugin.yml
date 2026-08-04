@@ -46,9 +46,12 @@ commands:
     permission: geyserextra.settings
   geyserextra:
     # "ga" removed for the same reason as "menu" above: it was shadowing the
-    # operator's own /ga binding.
+    # operator's own /ga binding. "ge" is kept: it is the alias the operator
+    # actually reaches for, nothing else on this server registers it, and
+    # losing it left the whole menu — and with it /offhand and the tooltip
+    # settings — with no discoverable entry point.
     description: GeyserExtra master command (opens the Bedrock menu)
-    aliases: [gxa]
+    aliases: [ge, gxa]
     permission: geyserextra.menu
 permissions:
   geyserextra.offhand:
