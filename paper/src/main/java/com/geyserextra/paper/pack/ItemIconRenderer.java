@@ -200,6 +200,13 @@ public final class ItemIconRenderer {
      * is not left at 64: it is already a clean 2x. The real repair is simply
      * never choosing a size below the source.
      *
+     * <p>The multiple rounds <em>up</em>, and that direction is the whole
+     * point: a floor division only reaches {@link #DEFAULT_SIZE} for the exact
+     * divisors of it, and sends everything else <em>below</em> the fixed size
+     * this method was written to replace — 48px art to 48, 33px to 33. Ceiling
+     * keeps both properties at once (never under 64, always a whole multiple),
+     * at the cost of overshooting a little: 48px art renders at 96.
+     *
      * @param sourceEdge longest edge of the source texture, in pixels
      */
     public static int sizeFor(int sourceEdge) {
@@ -210,9 +217,10 @@ public final class ItemIconRenderer {
             return MAX_SIZE;
         }
         if (sourceEdge <= DEFAULT_SIZE) {
-            // Whole multiple of the source that reaches DEFAULT_SIZE, so a
-            // 16px sprite still renders at 64 (4x) rather than at 16.
-            int multiple = Math.max(1, DEFAULT_SIZE / sourceEdge);
+            // Smallest whole multiple of the source that reaches DEFAULT_SIZE,
+            // so a 16px sprite renders at 64 (4x) rather than at 16, and a
+            // 48px one at 96 rather than at the 48 a floor division gives.
+            int multiple = (DEFAULT_SIZE + sourceEdge - 1) / sourceEdge;
             return sourceEdge * multiple;
         }
         return sourceEdge;

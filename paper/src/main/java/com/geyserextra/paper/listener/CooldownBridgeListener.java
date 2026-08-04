@@ -20,6 +20,7 @@ import org.bukkit.event.player.PlayerQuitEvent;
 
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -40,6 +41,8 @@ public final class CooldownBridgeListener implements Listener {
     private final GeyserExtraPaper plugin;
     private final CustomItemScanner scanner;
     private final Map<UUID, RecentMapping> recentMappings = new ConcurrentHashMap<>();
+    /** Mapping names already reported as unmappable, so the warning fires once each. */
+    private final Set<String> invalidGroupsWarned = ConcurrentHashMap.newKeySet();
 
     /**
      * Emits a per-event cooldown boundary trace, but only when
@@ -154,8 +157,18 @@ public final class CooldownBridgeListener implements Listener {
             String group = CustomItemCooldownGroups.forMapping(mapping.name());
             NamespacedKey key = group != null ? NamespacedKey.fromString(group) : null;
             if (key == null) {
-                plugin.getLogger().fine("[CooldownBridge] Invalid synthetic group for "
-                    + mapping.name());
+                // WARNING, not fine(): this is the one branch where the
+                // Bedrock overlay silently does not happen, and fine() records
+                // never reach the console (see DebugLog). Reporting it only
+                // under debugMode would hide the failure exactly when someone
+                // is asking why the cooldown gauge never appears. Warned once
+                // per mapping because the cause is a fixed property of the
+                // item name, so repeating it per use adds nothing.
+                if (invalidGroupsWarned.add(mapping.name())) {
+                    plugin.getLogger().warning("[CooldownBridge] Cannot mirror the cooldown for "
+                        + mapping.name() + ": '" + group + "' is not a valid namespaced key,"
+                        + " so Bedrock will show no cooldown overlay for it.");
+                }
                 return;
             }
             // This fires one nested PlayerItemGroupCooldownEvent. The

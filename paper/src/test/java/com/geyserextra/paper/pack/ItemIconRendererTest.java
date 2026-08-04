@@ -612,6 +612,30 @@ class ItemIconRendererTest {
         }
 
         @Test
+        @DisplayName("art that does not divide 64 is rounded up, never below the old fixed 64")
+        void nonDivisorArtRoundsUpRatherThanDown() {
+            // The bug this pins: the multiple was computed with a floor
+            // division, so anything that is not an exact divisor of 64 landed
+            // BELOW 64 -- 48px art rendered at 48, 33px at 33, worse than the
+            // fixed size this method replaced. Only the divisors {16, 32, 64}
+            // reached 64, and those were the only values the sibling test
+            // exercised, so the suite stayed green.
+            for (int source = 1; source < ItemIconRenderer.DEFAULT_SIZE; source++) {
+                int size = ItemIconRenderer.sizeFor(source);
+                assertThat(size)
+                    .as("size for %dpx art is at least the old fixed default", source)
+                    .isGreaterThanOrEqualTo(ItemIconRenderer.DEFAULT_SIZE);
+                assertThat(size % source)
+                    .as("size for %dpx art (%d) is a whole multiple of it", source, size)
+                    .isZero();
+            }
+            // Spot values, so a failure names the case rather than a loop index.
+            assertThat(ItemIconRenderer.sizeFor(48)).isEqualTo(96);
+            assertThat(ItemIconRenderer.sizeFor(24)).isEqualTo(72);
+            assertThat(ItemIconRenderer.sizeFor(20)).isEqualTo(80);
+        }
+
+        @Test
         @DisplayName("a missing or degenerate source size falls back to the default")
         void degenerateSourceFallsBack() {
             assertThat(ItemIconRenderer.sizeFor(0)).isEqualTo(ItemIconRenderer.DEFAULT_SIZE);
