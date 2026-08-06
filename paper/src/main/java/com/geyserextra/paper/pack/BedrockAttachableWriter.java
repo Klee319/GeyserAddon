@@ -44,27 +44,35 @@ import java.util.logging.Logger;
  * {@code elements} use a Bedrock {@code texture_meshes} entry which extrudes
  * the PNG exactly like Java's {@code item/generated} renderer.</p>
  *
- * <p><b>Off hand.</b> The resolved {@code *_lefthand} rotation is emitted
- * <em>as authored</em>. This deliberately does not reproduce vanilla
- * {@code ItemTransform#apply(leftHand, …)}, which negates rotation Y and Z on
- * top of whichever slot resolved. That negation exists to compensate Java's
- * <em>mirrored left arm</em>, and Bedrock's off-hand attachment already
- * accounts for handedness, so applying it here double-counted the mirror and
- * put every held item 180° about Y in the off hand — the ±90° Y in
- * {@code handheld} and friends flips sign, which is the whole visible
- * symptom. java2bedrock, which this writer is a port of, likewise feeds the
- * {@code lefthand} slots through the same formulas it uses for
- * {@code righthand}, with no extra negation.</p>
+ * <p><b>Off hand.</b> Exactly two things make the off hand different, and
+ * both live on the transform, never on the root:</p>
+ * <ul>
+ *   <li>the resolved {@code *_lefthand} slot is used (the declared one, or the
+ *       right-hand transform {@code ItemTransforms.Deserializer} substitutes
+ *       when it is absent), and</li>
+ *   <li>vanilla {@code ItemTransform#apply(leftHand, …)} is applied to it:
+ *       rotation Y and Z negate, translation X negates. Both halves or
+ *       neither — they are one {@code apply()} call.</li>
+ * </ul>
  *
- * <p>What is <em>not</em> borrowed from java2bedrock is its shared root bone.
- * It emits one identical root for both hands; this writer mirrors the
- * first-person root, because unlike java2bedrock it resolves the per-item
- * offset in the root's frame rather than emitting the Java translation
- * componentwise. The two roots are therefore not the same quantity, and
- * taking j2b's without also taking its translation handling drives
- * first-person off-hand offsets past the bound the conversion IT enforces.
- * Translation X still negates for the off hand, which is the one part of
- * vanilla's rule that does carry over and is exactly what j2b does too.</p>
+ * <p><b>The root bone is shared</b>, byte for byte, between the hands, in
+ * first person as well as third, exactly as java2bedrock emits it. Bedrock's
+ * own off-hand attachment already places and orients the item for the left
+ * arm; that plus Java's left-hand rule is the whole of handedness, and any
+ * third application double-counts.</p>
+ *
+ * <p>Both of those were got wrong, in opposite directions, and the way they
+ * were told apart is worth keeping. The first-person root <em>was</em>
+ * mirrored, which broke first-person off hand only — a book model rendered
+ * perfectly in third person and did not appear at all in first person, the
+ * mirrored {@code [90, -60, 40]} root having swung it out of the viewport.
+ * That was then misdiagnosed as a rotation-sign fault and "fixed" by dropping
+ * the negation above, which left the root mirror in place and additionally
+ * turned every off-hand item 90° in <em>third</em> person, where no mirror had
+ * ever existed. Third person is therefore the clean discriminator for the
+ * rotation rule (no root mirror can confound it) and first person is the clean
+ * discriminator for the root. Read separately they agree: negate the
+ * transform, share the root.</p>
  */
 public final class BedrockAttachableWriter {
 
@@ -869,12 +877,13 @@ public final class BedrockAttachableWriter {
         boolean offHand,
         AttachableGenerationConfig.BasePose firstPersonPose
     ) {
-        // The off hand takes the resolved *_lefthand transform AS AUTHORED —
-        // no rotation negation — and differs from the main hand only in the
-        // sign of translation X. That is java2bedrock's rule, and this code is
-        // a port of java2bedrock; see the class javadoc's "Off hand" section
-        // for why matching it beat reproducing Java's own left-hand rule.
-        float[] javaRotation = transform.rotation();
+        // Java's left-hand rule is one operation on one transform: rotation Y
+        // and Z negate AND translation X negates. Both halves, or neither —
+        // applying only one leaves the translation describing a pose the
+        // rotation no longer matches.
+        float[] javaRotation = offHand
+            ? BedrockGeometryConverter.applyJavaLeftHandRotation(transform.rotation())
+            : transform.rotation();
         float[] javaTranslation = offHand
             ? BedrockGeometryConverter.applyJavaLeftHandTranslation(transform.translation())
             : transform.translation();
@@ -883,11 +892,10 @@ public final class BedrockAttachableWriter {
         // The root rotation has to be known before the translation is mapped:
         // the offset is expressed in the root's local frame, and the off hand's
         // root is mirrored (see below).
-        float handSign = offHand ? -1f : 1f;
         float[] emittedRootRotation = firstPerson
             ? new float[]{firstPersonPose.rotation()[0],
-                handSign * firstPersonPose.rotation()[1],
-                handSign * firstPersonPose.rotation()[2]}
+                firstPersonPose.rotation()[1],
+                firstPersonPose.rotation()[2]}
             : new float[]{THIRD_PERSON_BASE_ROTATION.get(0),
                 THIRD_PERSON_BASE_ROTATION.get(1),
                 THIRD_PERSON_BASE_ROTATION.get(2)};
@@ -946,25 +954,23 @@ public final class BedrockAttachableWriter {
             // too, which double-counted the same information and could never
             // satisfy small and oversized weapons at the same time.
             float[] basePos = firstPersonPose.position();
-            // The base pose maps Bedrock's first-person arm frame onto Java's
-            // camera-space item frame, and that mapping is handed, so the off
-            // hand gets its mirror image. Kept — unlike the rotation negation
-            // removed above — because the per-item offset is resolved in this
-            // frame by convertTranslationInRootFrame: unmirroring the root
-            // while leaving that conversion in place drives
-            // minecraft_golden_sword_26's first-person off-hand offset to
-            // 18.34 against the 16-unit bound the conversion IT enforces.
-            // java2bedrock shares one root between the hands, but it also does
-            // not resolve offsets in the root frame — it emits the Java
-            // translation componentwise — so its root and ours are not the
-            // same quantity and cannot be borrowed independently.
-            //
-            // The third-person root gets away without this because its pose
-            // ([90, 0, 0] / [0, 13, -3]) is already mirror-invariant.
+            // ONE root for both hands, exactly as java2bedrock emits it
+            // ("geyser_custom": rotation/position identical in the main-hand
+            // and off-hand animations). This root was mirrored for a while —
+            // rotation Y/Z and position X negated for the off hand — on the
+            // theory that the pose maps a handed arm frame. It does not:
+            // Bedrock's off-hand attachment already places and orients the
+            // item for the left arm, so mirroring here double-counted and was
+            // the real cause of the first-person off-hand faults. The
+            // signature was that it was first-person ONLY: a book model came
+            // out perfect in third person, where no mirror has ever been
+            // applied, and did not render at all in first person, where the
+            // mirrored [90, -60, 40] / [-4, …] root swung it clean out of the
+            // viewport. Java's left-hand rule on the transform (above) is what
+            // handles handedness, and it is enough on its own.
             root.put("rotation", List.of(
                 emittedRootRotation[0], emittedRootRotation[1], emittedRootRotation[2]));
-            root.put("position", List.of(
-                handSign * basePos[0], basePos[1], basePos[2]));
+            root.put("position", List.of(basePos[0], basePos[1], basePos[2]));
             root.put("scale", firstPersonPose.scale());
         } else {
             root.put("rotation", THIRD_PERSON_BASE_ROTATION);

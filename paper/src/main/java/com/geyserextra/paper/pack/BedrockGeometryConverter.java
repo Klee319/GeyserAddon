@@ -118,20 +118,48 @@ public final class BedrockGeometryConverter {
     }
 
     /**
-     * Puts the off hand on the other side of the body: negates the X component
-     * of a display transform's translation, <b>before</b> any Java&rarr;Bedrock
-     * conversion.
+     * Applies Java's own left-hand rule to a display transform's rotation,
+     * <b>before</b> any Java&rarr;Bedrock conversion.
      *
-     * <p>This is the one part of vanilla's left-hand handling that carries over
-     * to Bedrock, and java2bedrock agrees — its off-hand animations differ from
-     * the main-hand ones only in emitting {@code +translation.x} where the main
-     * hand emits {@code -translation.x}. The rotation half of vanilla's rule
-     * ({@code ItemTransform#apply} also negates rotation Y and Z) is
-     * deliberately <em>not</em> reproduced, because it exists to compensate
-     * Java's mirrored left arm and Bedrock's off-hand attachment already
-     * accounts for handedness; see the "Off hand" section of
-     * {@link BedrockAttachableWriter}'s class javadoc for the full reasoning
-     * and for what went wrong when it was applied here.</p>
+     * <p>Vanilla {@code ItemTransform#apply(boolean leftHand, PoseStack)}
+     * negates rotation Y and Z whenever the item renders in the left hand,
+     * unconditionally and for whichever transform the slot resolved to. A model
+     * that declares {@code thirdperson_lefthand.rotation = [0, 90, -55]}
+     * against a right hand of {@code [0, -90, 55]} is therefore asking to be
+     * rendered at {@code [0, -90, 55]} in <em>both</em> hands; the declared
+     * values are pre-compensation for this negation, not the pose the author
+     * wants to see. 52 of the reference pack's 100 display-bearing models
+     * declare the slots that way.</p>
+     *
+     * <p>This was removed once, on the theory that Bedrock's off-hand
+     * attachment already accounts for handedness so the negation would
+     * double-count. It does not: what actually double-counted was the
+     * first-person root mirror, which is why the symptom was first reported as
+     * first-person only. Dropping the negation instead turned every off-hand
+     * item 90&deg; in <em>third</em> person too, where no mirror had ever been
+     * applied. The negation stays; see {@code buildHoldAnimation} for the root
+     * that went away in its place.</p>
+     *
+     * <p>The translation half lives in
+     * {@link #applyJavaLeftHandTranslation}; the two are always applied
+     * together, because they are two halves of one {@code apply()} call.</p>
+     */
+    public static float[] applyJavaLeftHandRotation(float[] javaRotation) {
+        if (javaRotation == null || javaRotation.length < 3) {
+            return new float[]{0f, 0f, 0f};
+        }
+        return new float[]{javaRotation[0], -javaRotation[1], -javaRotation[2]};
+    }
+
+    /**
+     * The translation half of {@link #applyJavaLeftHandRotation}: negates the X
+     * component of a display transform's translation, <b>before</b> any
+     * Java&rarr;Bedrock conversion.
+     *
+     * <p>java2bedrock reaches the same emitted value by a different route: it
+     * writes {@code +translation.x} for the off hand against
+     * {@code -translation.x} for the main hand, which is what this negation
+     * followed by the single Java&rarr;Bedrock mirror comes out to.</p>
      *
      * <p>Getting this sign wrong is off by {@code 2 * declared.x} toward the
      * main hand — nothing at all for a weapon that declares no X offset, and a

@@ -155,20 +155,33 @@ class TrinityForgePackConversionIT {
             // so a regression confined to that path would previously have
             // gone unnoticed, and third person shares the very same
             // convertTranslationInRootFrame call (just a different fixed root
-            // rotation/position), so the same one-block-width ceiling applies
-            // there too. Measured on this pack today (worst axis per block,
-            // all from minecraft_golden_sword_26 except first-person main
-            // hand): firstperson_main_hand=5.98 (blaze_rod_400014),
-            // firstperson_off_hand=14.24, thirdperson_main_hand=15.5,
-            // thirdperson_off_hand=15.5 -- all inside the 16 limit, but the
-            // third-person pair has only 0.5 of headroom, i.e. it was almost
-            // entirely unguarded before this check existed.
+            // rotation/position), so the same ceiling applies there too.
+            //
+            // The ceiling is 20, not 16, and the history matters because this
+            // check twice reported the wrong side of a change. It was written
+            // when the first-person root was mirrored for the off hand; under
+            // that root the worst first-person off-hand axis measured 14.24
+            // and sat comfortably inside 16. In game, that same configuration
+            // rendered nothing at all in the first-person off hand — so the
+            // bound passed a build that was visibly broken, and then failed
+            // the build that fixed it (18.34, from resolving the offset in the
+            // now-unmirrored root frame). A guard that is anti-correlated with
+            // correctness on the very path it guards cannot be treated as an
+            // oracle: it stays as a runaway detector, sized so that the
+            // configuration confirmed good on a real client fits, and nothing
+            // stronger is claimed for it.
+            //
+            // Measured on this pack under the shared root (worst axis per
+            // block, all from minecraft_golden_sword_26 except first-person
+            // main hand): firstperson_main_hand=5.98 (blaze_rod_400014),
+            // firstperson_off_hand=18.34, thirdperson_main_hand=15.5,
+            // thirdperson_off_hand=15.5.
             for (String block : HAND_BLOCKS) {
                 float[] pos = handPosition(anim, block);
                 for (float v : pos) {
                     assertThat(Math.abs(v))
                         .as("hand offset axis for " + key + " (" + block + ")")
-                        .isLessThanOrEqualTo(16f);
+                        .isLessThanOrEqualTo(20f);
                 }
             }
             // ...and it must not be zeroed either: the item-specific offset is

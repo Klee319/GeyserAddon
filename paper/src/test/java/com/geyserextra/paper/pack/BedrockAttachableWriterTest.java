@@ -536,13 +536,19 @@ class BedrockAttachableWriterTest {
      * against the same real-world transform values.
      */
     @Test
-    @DisplayName("off hand emits the declared *_lefthand rotation as authored")
+    @DisplayName("off hand applies Java's left-hand rule to the declared *_lefthand slot")
     void offHandUsesLeftHandTransform() {
         // Dagger-class: the left-hand slot states rotation.z = -90 against a
-        // right hand of +90. That declared -90 is what gets emitted. Vanilla
-        // would negate it back to +90 (ItemTransform#apply), but that negation
-        // compensates Java's mirrored left arm and Bedrock does not need it —
-        // see BedrockAttachableWriter's "Off hand" javadoc.
+        // right hand of +90. Vanilla ItemTransform#apply negates Y and Z for
+        // the left hand, so the author's -90 is a request to render at +90 —
+        // the same orientation as the right hand. The declared value is
+        // pre-compensation, not the pose wanted on screen.
+        //
+        // Emitting the literal -90 instead (which this test briefly pinned)
+        // turned every off-hand item 90 degrees in THIRD person, where no root
+        // mirror has ever been applied and so nothing else could have caused
+        // it. That is the clean discriminator between the two rules, and it
+        // says the negation is right.
         JavaModelDisplay display = new JavaModelDisplay(
             new JavaModelDisplay.Transform(
                 new float[]{55f, 0f, 90f}, new float[]{1.13f, 3.2f, -2.12f},
@@ -575,15 +581,15 @@ class BedrockAttachableWriterTest {
         // unmirrored put it 15 units out on the main-hand side.
         assertThat(thirdMain).contains("\"position\":[6.5,4.0,0.5]");
         assertThat(thirdOff).contains("\"position\":[7.5,4.0,0.5]");
-        // Rotation is NOT negated, so the hands come out opposite: the author's
-        // -90 stays -90. Forcing them equal (by also applying vanilla's
-        // rotation negation) is what put every off-hand item 180 degrees round.
+        // Z comes out at +90 in BOTH hands: the author's -90 is
+        // pre-compensation for Java's negation, and the visible mirroring is
+        // Bedrock's off-hand attachment's job, not this writer's.
         assertThat(thirdMain).contains("\"geyserextra_z\":{\"rotation\":[0.0,0.0,90.0]}");
-        assertThat(thirdOff).contains("\"geyserextra_z\":{\"rotation\":[0.0,0.0,-90.0]}");
+        assertThat(thirdOff).contains("\"geyserextra_z\":{\"rotation\":[0.0,0.0,90.0]}");
     }
 
     @Test
-    @DisplayName("off hand falls back to the right-hand slot, unnegated, when no *_lefthand exists")
+    @DisplayName("off hand still gets Java's left-hand negation when no *_lefthand slot exists")
     void offHandFallsBackToMirroredRightHand() {
         JavaModelDisplay display = new JavaModelDisplay(
             null,
@@ -601,17 +607,15 @@ class BedrockAttachableWriterTest {
         String anim = artifacts.get(BedrockAttachableWriter.animationEntryPath("test_plain"));
 
         // ItemTransforms.Deserializer substitutes the right-hand transform for
-        // the missing slot, so that is what the off hand renders — unnegated,
-        // which leaves its rotation identical to the main hand's. Note this is
-        // the exact inverse of the declared-slot case above, where the two
-        // hands come out opposite: a model that pre-mirrors its lefthand slot
-        // gets mirrored hands, one that omits it gets matching hands. The
-        // rotation therefore cannot be decided from which hand it is, only
-        // from which slot supplied it.
+        // the missing slot, and apply(leftHand=true) still negates it — the
+        // rule is unconditional, not a fallback. Java therefore renders this
+        // model lopsided, which is the look that makes authors add an explicit
+        // *_lefthand slot; reproducing Java means reproducing that. The
+        // emitted values are the exact opposite of the declared-slot case
+        // above, so the sign cannot be decided from which hand it is — only
+        // from what the slot said.
         String off = extractAnimation(anim, "thirdperson_off_hand").replaceAll("\\s+", "");
-        assertThat(off).contains("\"geyserextra_z\":{\"rotation\":[0.0,0.0,90.0]}");
-        // Translation X still mirrors, so the item sits on the off-hand side
-        // even though the rotation matched.
+        assertThat(off).contains("\"geyserextra_z\":{\"rotation\":[0.0,0.0,-90.0]}");
         assertThat(off).contains("\"position\":[-6.5,4.0,0.5]");
         assertThat(extractAnimation(anim, "thirdperson_main_hand").replaceAll("\\s+", ""))
             .contains("\"position\":[6.5,4.0,0.5]");
@@ -753,7 +757,7 @@ class BedrockAttachableWriterTest {
     }
 
     @Test
-    @DisplayName("first-person off hand mirrors the base pose, third person leaves it alone")
+    @DisplayName("both hands share one root base pose, in first person as well as third")
     void firstPersonOffHandMirrorsBasePose() {
         JavaModelDisplay display = greatAxeDisplay();
         AttachableGenerationConfig config =
@@ -767,13 +771,20 @@ class BedrockAttachableWriterTest {
         String fpMain = extractAnimation(anim, "firstperson_main_hand").replaceAll("\\s+", "");
         String fpOff = extractAnimation(anim, "firstperson_off_hand").replaceAll("\\s+", "");
         // Flat items ride FLAT_FIRST_PERSON_POSE: [90, 60, -40] / [0, 15, 4].
+        // The off hand gets the SAME root, exactly as java2bedrock emits it.
+        //
+        // This root was mirrored ([90, -60, 40] / [-x, …]) for a while, and
+        // that is what broke first-person off hand: handedness is already
+        // applied twice over by then — once by Bedrock's own off-hand
+        // attachment and once by Java's left-hand rule on the transform — so a
+        // third application swung the item out of the viewport. The tell was
+        // that the fault was first-person ONLY; third person, which never had
+        // a mirror, rendered the same models correctly throughout.
         assertThat(fpMain).contains("\"geyserextra\":{\"rotation\":[90.0,60.0,-40.0]");
-        // The off hand gets its mirror image, or the right-arm mapping swings
-        // the item clean out of the first-person viewport.
-        assertThat(fpOff).contains("\"geyserextra\":{\"rotation\":[90.0,-60.0,40.0]");
+        assertThat(fpOff).contains("\"geyserextra\":{\"rotation\":[90.0,60.0,-40.0]");
 
-        // Third person's base pose is already mirror-invariant, so both hands
-        // must keep it byte-identical.
+        // Third person keeps its pose byte-identical between the hands too —
+        // the property that always held, now stated for both persons.
         String tpMain = extractAnimation(anim, "thirdperson_main_hand").replaceAll("\\s+", "");
         String tpOff = extractAnimation(anim, "thirdperson_off_hand").replaceAll("\\s+", "");
         assertThat(tpMain).contains("\"geyserextra\":{\"rotation\":[90.0,0.0,0.0],\"position\":[0.0,13.0,-3.0]}");
