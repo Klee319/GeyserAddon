@@ -1,5 +1,6 @@
 package com.geyserextra.paper.command;
 
+import com.geyserextra.paper.util.BedrockFormSender;
 import com.geyserextra.paper.util.BedrockPlayerUtil;
 import com.geyserextra.paper.util.TranslationUtil;
 
@@ -16,7 +17,6 @@ import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.Plugin;
 import org.geysermc.cumulus.form.SimpleForm;
-import org.geysermc.floodgate.api.FloodgateApi;
 
 import java.util.ArrayList;
 import java.util.Collection;
@@ -115,7 +115,7 @@ public final class AdvancementCommand implements CommandExecutor {
             })
             .build();
 
-        FloodgateApi.getInstance().sendForm(player.getUniqueId(), form);
+        BedrockFormSender.send(plugin, player, form, "advancement categories");
     }
 
     /**
@@ -188,7 +188,7 @@ public final class AdvancementCommand implements CommandExecutor {
             })
             .build();
 
-        FloodgateApi.getInstance().sendForm(player.getUniqueId(), form);
+        BedrockFormSender.send(plugin, player, form, "advancement list");
     }
 
     /**

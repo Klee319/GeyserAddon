@@ -607,7 +607,7 @@ public final class GeyserExtraPaper extends JavaPlugin {
         Objects.requireNonNull(getCommand("offhand")).setExecutor(new OffhandCommand());
 
         // Tooltip command — one-shot SimpleForm item detail display
-        Objects.requireNonNull(getCommand("tooltip")).setExecutor(new TooltipCommand());
+        Objects.requireNonNull(getCommand("tooltip")).setExecutor(new TooltipCommand(this));
 
         // Menu command — central Floodgate form menu for all Bedrock commands.
         // /geyserextra (alias /gxa) shares the same executor so admins and Bedrock

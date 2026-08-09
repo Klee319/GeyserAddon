@@ -14,6 +14,7 @@ import org.bukkit.event.inventory.InventoryAction;
 import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.InventoryType;
 import org.bukkit.event.player.PlayerDropItemEvent;
+import org.bukkit.event.player.PlayerItemHeldEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.PlayerInventory;
@@ -130,6 +131,38 @@ public final class OffhandSwapListener implements Listener {
      * silently void it, which is why {@link #completeSneakDropSwap} re-reads
      * the entity's contents instead of trusting the snapshot taken here.</p>
      */
+    /**
+     * Records hotbar selection changes, so the next sneak-drop trace can be
+     * read against them.
+     *
+     * <p>Pure diagnostics — it changes nothing. It exists to settle one
+     * question the sneak-drop traces raised and could not answer: every one of
+     * them reported {@code heldSlot=0} while the dropped item was plainly a
+     * different stack each time, which is why the gesture only ever worked
+     * from the first hotbar slot. Either this client's selection changes never
+     * reach the server at all (no lines here), or they do and
+     * {@code getHeldItemSlot()} is merely stale at drop time (lines here, with
+     * a slot the drop trace disagrees with). Those two want opposite fixes —
+     * cache the value seen here, versus stop keying on the held slot entirely
+     * — so guessing between them risks moving items to the wrong slot, which
+     * is the duplication/loss class this listener exists to avoid.</p>
+     */
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onHeldSlotChange(PlayerItemHeldEvent event) {
+        if (!DebugLog.isEnabled()) {
+            return;
+        }
+        Player player = event.getPlayer();
+        if (!BedrockPlayerUtil.isBedrockPlayer(player)) {
+            return;
+        }
+        DebugLog.log(plugin.getLogger(),
+            () -> "Held-slot change for " + player.getName()
+                + ": " + event.getPreviousSlot() + " -> " + event.getNewSlot()
+                + " (inventory reports "
+                + player.getInventory().getHeldItemSlot() + ")");
+    }
+
     @EventHandler(priority = EventPriority.HIGHEST)
     public void onPlayerDropItem(PlayerDropItemEvent event) {
         Player player = event.getPlayer();
@@ -173,7 +206,15 @@ public final class OffhandSwapListener implements Listener {
             () -> "Sneak-drop candidate from " + player.getName()
                 + ": sneakingAtDrop=" + sneakingAtDrop
                 + ", heldSlot=" + heldSlot
-                + ", dropped=" + describeStack(droppedSnapshot));
+                + ", dropped=" + describeStack(droppedSnapshot)
+                // The whole hotbar, because heldSlot alone cannot be trusted:
+                // every trace so far reported slot 0 while the dropped item
+                // plainly came from elsewhere. Printing the row says whether
+                // the source slot is even recoverable from inventory state
+                // (exactly one slot short of the drop => yes; several equally
+                // plausible slots => the gesture needs a different anchor).
+                + ", hotbar=" + describeHotbar(inv)
+                + ", offhand=" + describeStack(inv.getItemInOffHand()));
         schedule(player, () -> completeSneakDropSwap(
             player, heldSlot, droppedSnapshot, heldAmountAtDrop, entity, sneakingAtDrop));
     }
@@ -652,6 +693,21 @@ public final class OffhandSwapListener implements Listener {
             return "empty";
         }
         return stack.getType().name() + "x" + stack.getAmount();
+    }
+
+    /**
+     * Renders hotbar slots 0-8 as {@code [0=STONEx3, 1=empty, …]}, for the
+     * sneak-drop trace. Diagnostics only.
+     */
+    private static String describeHotbar(PlayerInventory inv) {
+        StringBuilder out = new StringBuilder("[");
+        for (int slot = 0; slot <= 8; slot++) {
+            if (slot > 0) {
+                out.append(", ");
+            }
+            out.append(slot).append('=').append(describeStack(inv.getItem(slot)));
+        }
+        return out.append(']').toString();
     }
 
     /**

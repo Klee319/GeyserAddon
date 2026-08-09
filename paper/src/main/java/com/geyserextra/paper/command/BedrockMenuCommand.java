@@ -3,6 +3,7 @@ package com.geyserextra.paper.command;
 import com.geyserextra.paper.settings.PlayerSettings;
 import com.geyserextra.paper.settings.PlayerSettings.EnvironmentDisplayMode;
 import com.geyserextra.paper.settings.PlayerSettingsManager;
+import com.geyserextra.paper.util.BedrockFormSender;
 import com.geyserextra.paper.util.BedrockPlayerUtil;
 import com.geyserextra.paper.util.TranslationUtil;
 
@@ -17,7 +18,6 @@ import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.Plugin;
 import org.geysermc.cumulus.form.SimpleForm;
-import org.geysermc.floodgate.api.FloodgateApi;
 
 /**
  * Opens a Floodgate SimpleForm menu with buttons for all Bedrock commands.
@@ -107,7 +107,7 @@ public final class BedrockMenuCommand implements CommandExecutor {
             })
             .build();
 
-        FloodgateApi.getInstance().sendForm(player.getUniqueId(), form);
+        BedrockFormSender.send(plugin, player, form, "main menu");
     }
 
     /**

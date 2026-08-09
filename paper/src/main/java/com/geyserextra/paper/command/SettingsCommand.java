@@ -4,6 +4,7 @@ import com.geyserextra.paper.settings.PlayerSettings;
 import com.geyserextra.paper.settings.PlayerSettings.EnvironmentDisplayMode;
 import com.geyserextra.paper.settings.PlayerSettings.EntityDisplayMode;
 import com.geyserextra.paper.settings.PlayerSettingsManager;
+import com.geyserextra.paper.util.BedrockFormSender;
 import com.geyserextra.paper.util.BedrockPlayerUtil;
 
 import net.kyori.adventure.text.Component;
@@ -19,7 +20,6 @@ import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.Plugin;
 import org.geysermc.cumulus.form.CustomForm;
-import org.geysermc.floodgate.api.FloodgateApi;
 
 /**
  * Opens a Floodgate CustomForm for toggling per-player display settings.
@@ -122,7 +122,7 @@ public final class SettingsCommand implements CommandExecutor {
             })
             .build();
 
-        FloodgateApi.getInstance().sendForm(player.getUniqueId(), form);
+        BedrockFormSender.send(plugin, player, form, "display settings");
     }
 
     // ── Index conversion helpers ────────────────────────────────────────

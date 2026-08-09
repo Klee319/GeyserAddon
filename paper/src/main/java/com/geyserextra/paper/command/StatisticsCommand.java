@@ -1,5 +1,6 @@
 package com.geyserextra.paper.command;
 
+import com.geyserextra.paper.util.BedrockFormSender;
 import com.geyserextra.paper.util.BedrockPlayerUtil;
 import com.geyserextra.paper.util.TranslationUtil;
 
@@ -16,7 +17,6 @@ import org.bukkit.entity.EntityType;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.Plugin;
 import org.geysermc.cumulus.form.SimpleForm;
-import org.geysermc.floodgate.api.FloodgateApi;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -116,11 +116,7 @@ public final class StatisticsCommand implements CommandExecutor {
             })
             .build();
 
-        try {
-            FloodgateApi.getInstance().sendForm(player.getUniqueId(), form);
-        } catch (Exception e) {
-            player.sendMessage(Component.text("フォームの表示に失敗しました。", NamedTextColor.RED));
-        }
+        BedrockFormSender.send(plugin, player, form, "statistics categories");
     }
 
     /**
@@ -295,11 +291,7 @@ public final class StatisticsCommand implements CommandExecutor {
             })
             .build();
 
-        try {
-            FloodgateApi.getInstance().sendForm(player.getUniqueId(), form);
-        } catch (Exception e) {
-            player.sendMessage(Component.text("フォームの表示に失敗しました。", NamedTextColor.RED));
-        }
+        BedrockFormSender.send(plugin, player, form, "statistics list");
     }
 
     // ================== Visual Formatting Helpers ==================

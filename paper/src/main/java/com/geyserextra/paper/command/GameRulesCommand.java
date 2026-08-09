@@ -1,11 +1,11 @@
 package com.geyserextra.paper.command;
 
+import com.geyserextra.paper.util.BedrockFormSender;
 import com.geyserextra.paper.util.BedrockPlayerUtil;
 
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 
-import org.bukkit.Bukkit;
 import org.bukkit.GameRule;
 import org.bukkit.World;
 import org.bukkit.command.Command;
@@ -14,7 +14,6 @@ import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.Plugin;
 import org.geysermc.cumulus.form.SimpleForm;
-import org.geysermc.floodgate.api.FloodgateApi;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -119,6 +118,6 @@ public final class GameRulesCommand implements CommandExecutor {
             .button("閉じる")
             .build();
 
-        FloodgateApi.getInstance().sendForm(player.getUniqueId(), form);
+        BedrockFormSender.send(plugin, player, form, "game rules");
     }
 }

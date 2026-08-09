@@ -1,5 +1,6 @@
 package com.geyserextra.paper.command;
 
+import com.geyserextra.paper.util.BedrockFormSender;
 import com.geyserextra.paper.util.BedrockPlayerUtil;
 import com.geyserextra.paper.util.TranslationUtil;
 
@@ -18,8 +19,8 @@ import org.bukkit.entity.Player;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.Damageable;
 import org.bukkit.inventory.meta.ItemMeta;
+import org.bukkit.plugin.Plugin;
 import org.geysermc.cumulus.form.SimpleForm;
-import org.geysermc.floodgate.api.FloodgateApi;
 
 import java.util.Map;
 
@@ -31,6 +32,15 @@ import java.util.Map;
  * touch-friendly way to inspect item details without persistent UI clutter.
  */
 public final class TooltipCommand implements CommandExecutor {
+
+    private final Plugin plugin;
+
+    /**
+     * @param plugin the owning plugin, used to report form delivery failures
+     */
+    public TooltipCommand(Plugin plugin) {
+        this.plugin = plugin;
+    }
 
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
@@ -73,11 +83,7 @@ public final class TooltipCommand implements CommandExecutor {
             .button("閉じる")
             .build();
 
-        try {
-            FloodgateApi.getInstance().sendForm(player.getUniqueId(), form);
-        } catch (Exception e) {
-            player.sendMessage(Component.text("フォームの表示に失敗しました。", NamedTextColor.RED));
-        }
+        BedrockFormSender.send(plugin, player, form, "item tooltip");
     }
 
     /**
