@@ -40,6 +40,12 @@ public class CustomSkullsHandler {
     private final List<SkullEntry> skullEntries;
 
     /**
+     * True once skulls.json has been read and parsed without error, so an
+     * empty registry can be told apart from an unreadable one.
+     */
+    private boolean registryLoaded;
+
+    /**
      * Creates a new CustomSkullsHandler.
      *
      * @param extension the parent extension instance
@@ -90,6 +96,7 @@ public class CustomSkullsHandler {
 
             JsonObject root = JsonParser.parseString(content).getAsJsonObject();
             parseSkullEntries(root);
+            registryLoaded = true;
             extension.logger().debug("Successfully loaded " + skullEntries.size() + " custom skull entries.");
         } catch (IOException e) {
             extension.logger().error("Failed to read skulls.json: " + e.getMessage());
@@ -193,11 +200,23 @@ public class CustomSkullsHandler {
         }
 
         extension.logger().debug("=== Skull Registration Complete: " + registeredCount + " skull(s) ===");
-        if (registeredCount == 0) {
-            extension.logger().warning("No skulls registered! Make sure:");
-            extension.logger().warning("  1. Paper plugin has scanned skulls and saved to skulls.json");
-            extension.logger().warning("  2. The skulls.json file exists in the shared folder");
-            extension.logger().warning("  3. Server was restarted after Paper scanned skulls");
+        if (registeredCount > 0) {
+            return;
+        }
+        // A server with no custom-textured heads is a perfectly healthy state,
+        // and this branch used to shout four WARN lines at it on every boot —
+        // two of which ("the file exists", "restart after the scan") are
+        // provably false when we just read and parsed the file ourselves. The
+        // genuinely broken cases already log their own recovery steps in
+        // loadSkullRegistry(), so repeating them here only trains operators
+        // to ignore the warning that matters.
+        if (registryLoaded) {
+            extension.logger().debug(
+                "No custom skulls to register: skulls.json parsed cleanly and lists none.");
+        } else {
+            extension.logger().warning(
+                "No skulls registered because skulls.json could not be read;"
+                    + " see the earlier recovery steps in this log.");
         }
     }
 
