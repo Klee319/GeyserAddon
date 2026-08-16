@@ -96,6 +96,12 @@ public class CustomItemsHandler {
     private final java.util.Set<String> vanillaTextureBases;
     /** Generated icon keys backed by authored PNGs in the current auto pack. */
     private final java.util.Set<String> customIconKeys;
+
+    /**
+     * Attachable basenames present in the active auto pack — the mappings that
+     * genuinely carry a custom 3D model. See {@link #collectCustomModelKeys}.
+     */
+    private final java.util.Set<String> customModelKeys;
     /**
      * Icon keys this process actually handed to Geyser.
      *
@@ -118,6 +124,7 @@ public class CustomItemsHandler {
         this.blockIconBases = new HashMap<>();
         this.vanillaTextureBases = new java.util.HashSet<>();
         this.customIconKeys = new java.util.HashSet<>();
+        this.customModelKeys = new java.util.HashSet<>();
         loadItemMappings();
         loadBlockIconBases();
     }
@@ -187,6 +194,7 @@ public class CustomItemsHandler {
         blockIconBases.clear();
         vanillaTextureBases.clear();
         customIconKeys.clear();
+        customModelKeys.clear();
         // Bundled generated data is the source of truth for safe flat vanilla
         // aliases. The runtime sidecar only adds this boot's authored icons.
         loadBlockIconBasesFromClasspath();
@@ -270,10 +278,46 @@ public class CustomItemsHandler {
                     }
                 }
             }
+            collectCustomModelKeys(zip);
         } catch (Exception e) {
             extension.logger().warning("Failed to inspect active auto pack icons: "
                 + e.getMessage());
         }
+    }
+
+    /**
+     * Records which mappings ship their own Bedrock attachable, i.e. which
+     * ones actually have a custom 3D model rather than only a flat icon.
+     *
+     * <p>The distinction decides how loud a same-base collision deserves to
+     * be. Two items that both carry a custom model really do render as one
+     * another in the hand; two that only carry an icon share the vanilla base
+     * model regardless, so the collision costs an inventory icon and nothing
+     * in the world.</p>
+     */
+    private void collectCustomModelKeys(ZipFile zip) {
+        var entries = zip.entries();
+        while (entries.hasMoreElements()) {
+            String path = entries.nextElement().getName();
+            if (!path.startsWith("attachables/") || !path.endsWith(".json")) {
+                continue;
+            }
+            int slash = path.lastIndexOf('/');
+            String base = path.substring(slash + 1, path.length() - ".json".length());
+            customModelKeys.add(base.toLowerCase(Locale.ROOT));
+        }
+    }
+
+    /**
+     * The pack sanitises {@code namespace:name} to {@code namespace_name} for
+     * both icon keys and attachable filenames, so mapping names have to be
+     * put through the same transform before they can be looked up.
+     */
+    private static String packKey(String mappingName) {
+        if (mappingName == null) {
+            return "";
+        }
+        return mappingName.toLowerCase(Locale.ROOT).replace(':', '_');
     }
 
     /**
@@ -714,6 +758,7 @@ public class CustomItemsHandler {
 
     private void warnAboutPdcSameBaseCollisions(Set<String> redundantPdc) {
         Map<String, List<String>> pdcByBase = new java.util.LinkedHashMap<>();
+        Map<String, List<String>> pdcIconOnlyByBase = new java.util.LinkedHashMap<>();
         for (ItemMapping mapping : itemMappings) {
             if (mapping.isNonVanilla() || mapping.baseItem() == null) {
                 continue;
@@ -731,22 +776,19 @@ public class CustomItemsHandler {
                 // collision that no longer happens.
                 continue;
             }
-            pdcByBase
+            // Only mappings that ship their own attachable can actually
+            // render as one another in the hand. The rest have no custom 3D
+            // model at all: they already draw as the vanilla base item on
+            // both editions, so a same-base collision changes nothing a
+            // player sees in the world.
+            boolean hasModel = customModelKeys.contains(packKey(mapping.name()));
+            (hasModel ? pdcByBase : pdcIconOnlyByBase)
                 .computeIfAbsent(mapping.baseItem(), k -> new ArrayList<>())
                 .add(mapping.name() + " (pdc=" + mapping.pdcIdentifier() + ")");
         }
-        List<String> collidingBases = new ArrayList<>();
-        for (Map.Entry<String, List<String>> entry : pdcByBase.entrySet()) {
-            List<String> names = entry.getValue();
-            if (names.size() <= 1) {
-                continue;
-            }
-            collidingBases.add(entry.getKey() + " (" + names.size() + ")");
-            // Full per-item detail stays available at debug level.
-            extension.logger().debug(
-                "[CustomItems] PDC collision on " + entry.getKey() + ": "
-                    + String.join(", ", names));
-        }
+        List<String> collidingBases = collectCollidingBases(pdcByBase, "PDC model collision");
+        List<String> iconOnlyBases = collectCollidingBases(pdcIconOnlyByBase, "PDC icon collision");
+
         if (!collidingBases.isEmpty()) {
             // One compact line per boot instead of one paragraph per base:
             // the limitation is static (Geyser v2 has no PDC-value predicate)
@@ -754,9 +796,39 @@ public class CustomItemsHandler {
             extension.logger().warning(
                 "[CustomItems] PDC collisions on " + collidingBases.size()
                     + " base material(s): " + String.join(", ", collidingBases)
-                    + " — multiple PDC items share a base, Bedrock renders the first "
-                    + "registered one (Geyser API limitation; details at debug level)");
+                    + " — multiple PDC items with custom 3D models share a base,"
+                    + " Bedrock renders the first registered one"
+                    + " (Geyser API limitation; details at debug level)");
         }
+        if (!iconOnlyBases.isEmpty()) {
+            // Deliberately not a warning. These carry no attachable, so they
+            // render as the plain vanilla base item either way; only the
+            // inventory icon is shared. Warning about them every boot buried
+            // the model collisions above, which are the ones worth acting on.
+            extension.logger().debug(
+                "[CustomItems] Icon-only PDC overlap on " + iconOnlyBases.size()
+                    + " base material(s): " + String.join(", ", iconOnlyBases)
+                    + " — these have no custom 3D model, so in-world rendering"
+                    + " is the vanilla base item regardless.");
+        }
+    }
+
+    /**
+     * Reduces a base -> mappings map to the bases carrying more than one
+     * mapping, logging the full membership of each at debug level.
+     */
+    private List<String> collectCollidingBases(Map<String, List<String>> byBase, String label) {
+        List<String> out = new ArrayList<>();
+        for (Map.Entry<String, List<String>> entry : byBase.entrySet()) {
+            List<String> names = entry.getValue();
+            if (names.size() <= 1) {
+                continue;
+            }
+            out.add(entry.getKey() + " (" + names.size() + ")");
+            extension.logger().debug("[CustomItems] " + label + " on " + entry.getKey()
+                + ": " + String.join(", ", names));
+        }
+        return out;
     }
 
     /**
