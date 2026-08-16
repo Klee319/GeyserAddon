@@ -510,7 +510,15 @@ public class CustomItemsHandler {
         // correct because Geyser transfers it from the Java NBT).
         // Without this scan the silent collapse is invisible to operators;
         // logging it once per base material gives them a clear trail.
-        warnAboutPdcSameBaseCollisions();
+        Set<String> redundantPdc = redundantPdcKeys();
+        if (!redundantPdc.isEmpty()) {
+            extension.logger().info("[CustomItems] Skipping " + redundantPdc.size()
+                + " PDC mapping(s) that restate an item already selected by"
+                + " custom_model_data or item_model; the precise selector wins"
+                + " and the PDC twin would only act as a catch-all on its base.");
+        }
+
+        warnAboutPdcSameBaseCollisions(redundantPdc);
 
         int registered = 0;
         int skippedDuplicate = 0;
@@ -518,6 +526,16 @@ public class CustomItemsHandler {
 
         for (ItemMapping mapping : itemMappings) {
             try {
+                if (!mapping.isNonVanilla && mapping.baseItem != null
+                    && redundantPdc.contains(mapping.baseItem + "|" + mapping.name)) {
+                    extension.logger().debug("Skipping redundant PDC mapping "
+                        + mapping.name() + " (base=" + mapping.baseItem()
+                        + "): already selected precisely by "
+                        + bareName(mapping.name()));
+                    skippedDuplicate++;
+                    continue;
+                }
+
                 if (mapping.isNonVanilla) {
                     if (registerNonVanillaItem(event, mapping)) {
                         registered++;
@@ -633,13 +651,84 @@ public class CustomItemsHandler {
      * registration time so the operator can investigate without having to
      * cross-reference logs by hand.
      */
-    private void warnAboutPdcSameBaseCollisions() {
+    /**
+     * Keys of PDC-only mappings that merely restate a mapping already
+     * registered with a precise selector, in {@code base|barename} form.
+     *
+     * <p>The operator's PDC hint catalogue and the Java pack scan describe the
+     * same items from two directions. {@code minecraft:blaze_rod} carries both
+     * {@code abyss_cane} (custom_model_data 400013, read from the pack) and
+     * {@code trinityforge:abyss_cane} (PDC only, read from the hint file) —
+     * one physical item, two mappings. The pack entry is the one that decides
+     * rendering, because custom_model_data is what the Java client itself
+     * dispatches on; the PDC twin adds nothing.</p>
+     *
+     * <p>It is not merely redundant, though. Its predicate is
+     * {@code hasComponent("minecraft:custom_data")}, which matches <em>every</em>
+     * custom_data-bearing item on that base material. So it acts as a
+     * catch-all: any item whose own custom_model_data was not registered gets
+     * drawn as this one instead of falling back to the vanilla base — a
+     * visibly wrong model where vanilla would have been right.</p>
+     */
+    private Set<String> redundantPdcKeys() {
+        Set<String> preciselySelected = new HashSet<>();
+        for (ItemMapping mapping : itemMappings) {
+            if (mapping.isNonVanilla() || mapping.baseItem() == null) {
+                continue;
+            }
+            if (mapping.customModelData() > 0 || mapping.hasItemModelId()) {
+                // Keyed on the bare name on both sides: pack-derived entries
+                // are unnamespaced (abyss_cane) while hint-derived ones are
+                // not (trinityforge:abyss_cane), and an item_model mapping can
+                // legitimately carry a namespace itself.
+                preciselySelected.add(mapping.baseItem() + "|" + bareName(mapping.name()));
+            }
+        }
+        Set<String> redundant = new HashSet<>();
+        for (ItemMapping mapping : itemMappings) {
+            if (mapping.isNonVanilla() || mapping.baseItem() == null) {
+                continue;
+            }
+            if (mapping.customModelData() > 0 || mapping.hasItemModelId()) {
+                continue;
+            }
+            if (!mapping.hasPdcIdentifier()) {
+                continue;
+            }
+            String key = mapping.baseItem() + "|" + bareName(mapping.name());
+            if (preciselySelected.contains(key)) {
+                redundant.add(mapping.baseItem() + "|" + mapping.name());
+            }
+        }
+        return redundant;
+    }
+
+    /** Strips a {@code namespace:} prefix, leaving the bare item name. */
+    private static String bareName(String name) {
+        if (name == null) {
+            return null;
+        }
+        int colon = name.indexOf(':');
+        return colon < 0 ? name : name.substring(colon + 1);
+    }
+
+    private void warnAboutPdcSameBaseCollisions(Set<String> redundantPdc) {
         Map<String, List<String>> pdcByBase = new java.util.LinkedHashMap<>();
         for (ItemMapping mapping : itemMappings) {
             if (mapping.isNonVanilla() || mapping.baseItem() == null) {
                 continue;
             }
             if (!mapping.hasPdcIdentifier()) {
+                continue;
+            }
+            if (mapping.customModelData() > 0 || mapping.hasItemModelId()) {
+                // Registers with its own precise predicate, so it never joins
+                // the hasComponent(custom_data) pile-up.
+                continue;
+            }
+            if (redundantPdc.contains(mapping.baseItem() + "|" + mapping.name())) {
+                // Dropped before registration; counting it here would report a
+                // collision that no longer happens.
                 continue;
             }
             pdcByBase
