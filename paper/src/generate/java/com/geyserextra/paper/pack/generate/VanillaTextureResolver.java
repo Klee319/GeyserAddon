@@ -64,6 +64,9 @@ final class VanillaTextureResolver {
         addAll(out, boatPaths(name));
         addAll(out, nautilusArmorPaths(name));
         addAll(out, bookPaths(name));
+        addAll(out, dyePaths(name));
+        addAll(out, suffixFamilyPaths(name));
+        addAll(out, musicDiscPaths(name));
         out.add(BLOCKS + name + "_carried");
         return new ArrayList<>(out);
     }
@@ -100,6 +103,30 @@ final class VanillaTextureResolver {
             case "tropical_fish" -> "fish_clownfish_raw";
             case "pufferfish" -> "fish_pufferfish_raw";
             case "bow" -> "bow_standby";
+            // Bedrock keys the resting crossbow the same way it keys the bow,
+            // but only the bow case existed here. Every crossbow-based custom
+            // item on the server therefore resolved to nothing and had its
+            // item_texture entry skipped entirely.
+            case "crossbow" -> "crossbow_standby";
+            case "compass" -> "compass_item";
+            case "clock" -> "clock_item";
+            case "slime_ball" -> "slimeball";
+            case "nether_brick" -> "netherbrick";
+            case "baked_potato" -> "potato_baked";
+            case "poisonous_potato" -> "potato_poisonous";
+            case "fermented_spider_eye" -> "spider_eye_fermented";
+            case "turtle_scute" -> "turtle_shell_piece";
+            case "wheat_seeds" -> "seeds_wheat";
+            case "pumpkin_seeds" -> "seeds_pumpkin";
+            case "melon_seeds" -> "seeds_melon";
+            case "beetroot_seeds" -> "seeds_beetroot";
+            // Bedrock ships no separate enchanted apple art; it draws the
+            // ordinary golden apple with a glint on top.
+            case "enchanted_golden_apple" -> "apple_golden";
+            case "glass_bottle" -> "potion_bottle_empty";
+            case "potion" -> "potion_bottle_drinkable";
+            case "splash_potion" -> "potion_bottle_splash";
+            case "lingering_potion" -> "potion_bottle_lingering";
             case "bucket" -> "bucket_empty";
             case "water_bucket" -> "bucket_water";
             case "lava_bucket" -> "bucket_lava";
@@ -189,6 +216,65 @@ final class VanillaTextureResolver {
             case "knowledge_book" -> List.of(ITEMS + "book_portfolio");
             default -> List.of();
         };
+    }
+
+    /**
+     * Bedrock still stores every dye as {@code dye_powder_*}, from the days
+     * when dyes were damage values on one item.
+     *
+     * <p>The {@code _new} suffix is the trap here: {@code dye_powder_black}
+     * is the ink sac and {@code dye_powder_black_new} is black dye. Four
+     * colours carry that split because those four dyes were once the mob or
+     * plant drop itself.</p>
+     */
+    private static List<String> dyePaths(String name) {
+        String legacy = switch (name) {
+            case "ink_sac" -> "black";
+            case "glow_ink_sac" -> "glow";
+            case "lapis_lazuli" -> "blue";
+            case "cocoa_beans" -> "brown";
+            case "bone_meal" -> "white";
+            default -> null;
+        };
+        if (legacy != null) {
+            return List.of(ITEMS + "dye_powder_" + legacy);
+        }
+        if (!name.endsWith("_dye")) {
+            return List.of();
+        }
+        String colour = name.substring(0, name.length() - "_dye".length());
+        if ("light_gray".equals(colour)) {
+            return List.of(ITEMS + "dye_powder_silver");
+        }
+        List<String> out = new ArrayList<>();
+        // The _new variant first: for the four split colours it is the dye,
+        // and for the rest it simply does not exist and falls through.
+        out.add(ITEMS + "dye_powder_" + colour + "_new");
+        out.add(ITEMS + "dye_powder_" + colour);
+        return out;
+    }
+
+    /**
+     * Families Bedrock names {@code <family>_<variant>} where Java names them
+     * {@code <variant>_<family>}.
+     */
+    private static List<String> suffixFamilyPaths(String name) {
+        if (name.endsWith("_bundle")) {
+            String colour = name.substring(0, name.length() - "_bundle".length());
+            return List.of(ITEMS + "bundle_" + colour);
+        }
+        if (name.endsWith("_harness")) {
+            String colour = name.substring(0, name.length() - "_harness".length());
+            return List.of(ITEMS + "harness/harness_" + colour);
+        }
+        return List.of();
+    }
+
+    private static List<String> musicDiscPaths(String name) {
+        if (!name.startsWith("music_disc_")) {
+            return List.of();
+        }
+        return List.of(ITEMS + "record_" + name.substring("music_disc_".length()));
     }
 
     private static String swapGoldenWood(String name) {

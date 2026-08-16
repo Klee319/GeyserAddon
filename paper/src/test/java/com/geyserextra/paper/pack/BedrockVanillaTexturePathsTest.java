@@ -134,4 +134,104 @@ class BedrockVanillaTexturePathsTest {
         assertThat(BedrockVanillaTexturePaths.resolve("minecraft:copper_nautilus_armor"))
             .isEqualTo("textures/items/nautilus_armor/copper_nautilus_armor");
     }
+
+    @Test
+    @DisplayName("crossbow resolves to its standby art like the bow does")
+    void crossbowResolvesLikeBow() {
+        // The bow rename was here from the start and the crossbow one was not,
+        // so every crossbow-based custom item on a live server logged
+        // "no Bedrock vanilla fallback" and shipped no item_texture entry.
+        assertThat(BedrockVanillaTexturePaths.resolve("minecraft:bow"))
+            .isEqualTo("textures/items/bow_standby");
+        assertThat(BedrockVanillaTexturePaths.resolve("minecraft:crossbow"))
+            .isEqualTo("textures/items/crossbow_standby");
+    }
+
+    @Test
+    @DisplayName("items Bedrock still suffixes with _item")
+    void suffixedItemNames() {
+        assertThat(BedrockVanillaTexturePaths.resolve("minecraft:compass"))
+            .isEqualTo("textures/items/compass_item");
+        assertThat(BedrockVanillaTexturePaths.resolve("minecraft:clock"))
+            .isEqualTo("textures/items/clock_item");
+    }
+
+    @Test
+    @DisplayName("dyes take the _new art; the drops they descend from keep the old art")
+    void dyesSplitFromTheirSourceDrops() {
+        // Bedrock kept one texture family from the damage-value era. For the
+        // four colours that were once a drop, the plain name is the drop and
+        // the _new name is the dye — swapping them silently draws the wrong
+        // icon rather than failing, so both halves are pinned here.
+        assertThat(BedrockVanillaTexturePaths.resolve("minecraft:black_dye"))
+            .isEqualTo("textures/items/dye_powder_black_new");
+        assertThat(BedrockVanillaTexturePaths.resolve("minecraft:ink_sac"))
+            .isEqualTo("textures/items/dye_powder_black");
+        assertThat(BedrockVanillaTexturePaths.resolve("minecraft:blue_dye"))
+            .isEqualTo("textures/items/dye_powder_blue_new");
+        assertThat(BedrockVanillaTexturePaths.resolve("minecraft:lapis_lazuli"))
+            .isEqualTo("textures/items/dye_powder_blue");
+        assertThat(BedrockVanillaTexturePaths.resolve("minecraft:white_dye"))
+            .isEqualTo("textures/items/dye_powder_white_new");
+        assertThat(BedrockVanillaTexturePaths.resolve("minecraft:bone_meal"))
+            .isEqualTo("textures/items/dye_powder_white");
+        assertThat(BedrockVanillaTexturePaths.resolve("minecraft:cocoa_beans"))
+            .isEqualTo("textures/items/dye_powder_brown");
+        // Colours with no drop ancestor have no _new variant at all.
+        assertThat(BedrockVanillaTexturePaths.resolve("minecraft:cyan_dye"))
+            .isEqualTo("textures/items/dye_powder_cyan");
+        // Java's "light gray" is Bedrock's "silver".
+        assertThat(BedrockVanillaTexturePaths.resolve("minecraft:light_gray_dye"))
+            .isEqualTo("textures/items/dye_powder_silver");
+    }
+
+    @Test
+    @DisplayName("families Bedrock names prefix-first rather than suffix-first")
+    void prefixNamedFamilies() {
+        assertThat(BedrockVanillaTexturePaths.resolve("minecraft:red_bundle"))
+            .isEqualTo("textures/items/bundle_red");
+        assertThat(BedrockVanillaTexturePaths.resolve("minecraft:blue_harness"))
+            .isEqualTo("textures/items/harness/harness_blue");
+        assertThat(BedrockVanillaTexturePaths.resolve("minecraft:music_disc_pigstep"))
+            .isEqualTo("textures/items/record_pigstep");
+    }
+
+    @Test
+    @DisplayName("legacy singular names Bedrock never renamed")
+    void legacySingularNames() {
+        assertThat(BedrockVanillaTexturePaths.resolve("minecraft:slime_ball"))
+            .isEqualTo("textures/items/slimeball");
+        assertThat(BedrockVanillaTexturePaths.resolve("minecraft:nether_brick"))
+            .isEqualTo("textures/items/netherbrick");
+        assertThat(BedrockVanillaTexturePaths.resolve("minecraft:baked_potato"))
+            .isEqualTo("textures/items/potato_baked");
+        assertThat(BedrockVanillaTexturePaths.resolve("minecraft:fermented_spider_eye"))
+            .isEqualTo("textures/items/spider_eye_fermented");
+        assertThat(BedrockVanillaTexturePaths.resolve("minecraft:wheat_seeds"))
+            .isEqualTo("textures/items/seeds_wheat");
+        assertThat(BedrockVanillaTexturePaths.resolve("minecraft:turtle_scute"))
+            .isEqualTo("textures/items/turtle_shell_piece");
+    }
+
+    @Test
+    @DisplayName("potion bottles map to their potion_bottle_* variants")
+    void potionBottles() {
+        assertThat(BedrockVanillaTexturePaths.resolve("minecraft:glass_bottle"))
+            .isEqualTo("textures/items/potion_bottle_empty");
+        assertThat(BedrockVanillaTexturePaths.resolve("minecraft:potion"))
+            .isEqualTo("textures/items/potion_bottle_drinkable");
+        assertThat(BedrockVanillaTexturePaths.resolve("minecraft:splash_potion"))
+            .isEqualTo("textures/items/potion_bottle_splash");
+        assertThat(BedrockVanillaTexturePaths.resolve("minecraft:lingering_potion"))
+            .isEqualTo("textures/items/potion_bottle_lingering");
+    }
+
+    @Test
+    @DisplayName("enchanted golden apple reuses the plain golden apple art")
+    void enchantedGoldenAppleReusesGoldenApple() {
+        // Bedrock ships no separate enchanted apple PNG; the glint is drawn
+        // over the ordinary one.
+        assertThat(BedrockVanillaTexturePaths.resolve("minecraft:enchanted_golden_apple"))
+            .isEqualTo("textures/items/apple_golden");
+    }
 }
