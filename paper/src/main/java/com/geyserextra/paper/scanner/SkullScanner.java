@@ -4,9 +4,6 @@ import com.geyserextra.core.api.SkullData;
 import com.geyserextra.core.registry.SkullRegistry;
 import com.geyserextra.paper.GeyserExtraPaper;
 
-import com.destroystokyo.paper.profile.PlayerProfile;
-import com.destroystokyo.paper.profile.ProfileProperty;
-
 import org.bukkit.Chunk;
 import org.bukkit.Material;
 import org.bukkit.block.Block;
@@ -14,15 +11,13 @@ import org.bukkit.block.BlockState;
 import org.bukkit.block.Skull;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.SkullMeta;
+import org.bukkit.profile.PlayerProfile;
+import org.bukkit.profile.PlayerTextures;
 
-import java.nio.charset.StandardCharsets;
-import java.util.Base64;
+import java.net.URL;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
-import java.util.logging.Level;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 /**
  * Scanner for detecting and registering custom skull textures.
@@ -30,14 +25,25 @@ import java.util.regex.Pattern;
  * This scanner extracts texture data from player head items and skull blocks
  * to enable Bedrock players to see custom skull textures via Geyser.
  *
- * <p><b>{@code @SuppressWarnings("deprecation")}</b>: Paper has been
- * shuffling skull-owner accessors across releases — {@code getPlayerProfile()}
- * was deprecated in favour of {@code getOwnerProfile()}, which was then
- * itself deprecated, and {@code org.bukkit.profile.PlayerProfile} is also
- * marked deprecated even though it is the only documented replacement. Until
- * the API surface stabilises we keep the current call sites and silence the
- * noise at class level. None of the calls are {@code [removal]}-tagged, and
- * the same Paper bridge has worked across every 1.21.x release.</p>
+ * <p><b>Why the Bukkit profile API and not Paper's:</b> this scanner used to
+ * cast the returned {@code org.bukkit.profile.PlayerProfile} to Paper's
+ * {@code com.destroystokyo.paper.profile.PlayerProfile} to reach
+ * {@code getProperties()}. On Paper 1.21.11 that cast still succeeds — Craft's
+ * profile implements both interfaces — but {@code getProperties()} now throws
+ * {@code UnsupportedOperationException("Do not cast to
+ * com.destroystokyo.paper.profile.PlayerProfile")}. The old code predicted this
+ * would show up as a {@code null} from the {@code instanceof} check; it did
+ * not, so every inventory open threw instead.</p>
+ *
+ * <p>{@link PlayerTextures#getSkin()} hands back the skin URL directly, which
+ * is what this class wanted from the properties blob in the first place. It
+ * removes the base64 decode and the regex over the decoded JSON along with the
+ * Paper-specific cast.</p>
+ *
+ * <p><b>{@code @SuppressWarnings("deprecation")}</b>: {@code getOwnerProfile()}
+ * and {@code org.bukkit.profile.PlayerProfile} both carry deprecation tags even
+ * though they are the documented replacements for the accessors they replaced.
+ * Neither is {@code [removal]}-tagged.</p>
  */
 @SuppressWarnings("deprecation")
 public final class SkullScanner {
@@ -61,19 +67,6 @@ public final class SkullScanner {
         Material.PIGLIN_HEAD,
         Material.PIGLIN_WALL_HEAD
     );
-
-    /**
-     * Pattern to extract texture URL from base64 decoded profile data.
-     * Matches alphanumeric characters, underscores, and hyphens in the hash.
-     */
-    private static final Pattern TEXTURE_URL_PATTERN = Pattern.compile(
-        "\"url\"\\s*:\\s*\"(https?://textures\\.minecraft\\.net/texture/[a-zA-Z0-9_-]+)\""
-    );
-
-    /**
-     * The property name for textures in player profiles.
-     */
-    private static final String TEXTURES_PROPERTY = "textures";
 
     private final SkullRegistry registry;
     private final GeyserExtraPaper plugin;
@@ -130,12 +123,7 @@ public final class SkullScanner {
             return Optional.empty();
         }
 
-        PlayerProfile profile = asPaperProfile(skull.getOwnerProfile());
-        if (profile == null) {
-            return Optional.empty();
-        }
-
-        return extractTextureFromProfile(profile);
+        return extractTextureFromProfile(skull.getOwnerProfile());
     }
 
     /**
@@ -163,12 +151,7 @@ public final class SkullScanner {
                 continue;
             }
 
-            PlayerProfile profile = asPaperProfile(skull.getOwnerProfile());
-            if (profile == null) {
-                continue;
-            }
-
-            Optional<SkullData> skullData = extractTextureFromProfile(profile);
+            Optional<SkullData> skullData = extractTextureFromProfile(skull.getOwnerProfile());
             if (skullData.isPresent()) {
                 discovered++;
             }
@@ -194,80 +177,52 @@ public final class SkullScanner {
      * @return Optional containing the skull data if texture found
      */
     private Optional<SkullData> extractTextureFromMeta(SkullMeta skullMeta) {
-        PlayerProfile profile = asPaperProfile(skullMeta.getOwnerProfile());
-        if (profile == null) {
-            if (plugin.getGeyserExtraConfig().general().debugMode()) {
-                plugin.getLogger().fine("[SkullDebug] PlayerProfile is null");
-            }
-            return Optional.empty();
-        }
-
-        if (plugin.getGeyserExtraConfig().general().debugMode()) {
-            plugin.getLogger().fine("[SkullDebug] Found profile: " + profile.getName()
-                + ", properties: " + profile.getProperties().size());
-        }
-
-        return extractTextureFromProfile(profile);
+        return extractTextureFromProfile(skullMeta.getOwnerProfile());
     }
 
     /**
-     * Bridges Bukkit's {@link org.bukkit.profile.PlayerProfile} (returned by
-     * the modern {@code getOwnerProfile()} accessors) to the Paper-specific
-     * {@link PlayerProfile} this scanner needs for {@code getProperties()}.
+     * Extracts texture data from a profile.
      *
-     * <p>Why the cast works: every Paper implementation of
-     * {@code org.bukkit.profile.PlayerProfile} also implements
-     * {@code com.destroystokyo.paper.profile.PlayerProfile}. A future Paper
-     * release that breaks this contract would surface as a {@code null}
-     * return here, which the callers already treat as "no profile" — no
-     * extra failure mode is introduced.</p>
-     */
-    private static PlayerProfile asPaperProfile(org.bukkit.profile.PlayerProfile profile) {
-        if (profile instanceof PlayerProfile paperProfile) {
-            return paperProfile;
-        }
-        return null;
-    }
-
-    /**
-     * Extracts texture data from a PlayerProfile.
-     *
-     * @param profile The player profile to extract from
+     * @param profile The player profile to extract from (can be null)
      * @return Optional containing the skull data if texture found
      */
     private Optional<SkullData> extractTextureFromProfile(PlayerProfile profile) {
-        // Find the textures property
-        Optional<ProfileProperty> texturesProperty = profile.getProperties().stream()
-            .filter(prop -> TEXTURES_PROPERTY.equals(prop.getName()))
-            .findFirst();
+        if (profile == null) {
+            return Optional.empty();
+        }
 
-        if (texturesProperty.isEmpty()) {
-            if (plugin.getGeyserExtraConfig().general().debugMode()) {
-                plugin.getLogger().fine("[SkullDebug] No 'textures' property found. Available properties: "
-                    + profile.getProperties().stream()
-                        .map(ProfileProperty::getName)
-                        .toList());
+        URL skin = skinUrlOf(profile);
+        if (skin != null) {
+            return createAndRegisterSkullData(skin.toString());
+        }
+        // A head placed by name alone carries no texture yet; Geyser can
+        // resolve those itself at runtime from the username.
+        return registerByUsername(profile.getName());
+    }
+
+    /**
+     * The skin URL a profile carries, or null when it carries none.
+     *
+     * <p>Defensive because the textures view is populated from whatever the
+     * head's NBT happened to hold: a malformed or partially-resolved profile
+     * throws out of {@code getTextures()} rather than returning empty, and one
+     * bad head in a chest must not abort the scan of the rest.</p>
+     */
+    private URL skinUrlOf(PlayerProfile profile) {
+        try {
+            PlayerTextures textures = profile.getTextures();
+            if (textures == null || textures.isEmpty()) {
+                return null;
             }
-            // Try to register by username if profile name exists
-            return registerByUsername(profile);
-        }
-
-        String base64Value = texturesProperty.get().getValue();
-        if (base64Value == null || base64Value.isBlank()) {
+            return textures.getSkin();
+        } catch (RuntimeException e) {
             if (plugin.getGeyserExtraConfig().general().debugMode()) {
-                plugin.getLogger().fine("[SkullDebug] Base64 value is null or blank");
+                plugin.getLogger().warning("[SkullDebug] Could not read textures for profile "
+                    + profile.getName() + ": " + e.getClass().getSimpleName()
+                    + ": " + e.getMessage());
             }
-            // Try to register by username if profile name exists
-            return registerByUsername(profile);
+            return null;
         }
-
-        if (plugin.getGeyserExtraConfig().general().debugMode()) {
-            plugin.getLogger().fine("[SkullDebug] Base64 value length: " + base64Value.length());
-        }
-
-        // Decode base64 to extract texture URL
-        return extractTextureUrl(base64Value)
-            .flatMap(this::createAndRegisterSkullData);
     }
 
     /**
@@ -277,11 +232,10 @@ public final class SkullScanner {
      * don't have texture data immediately. Geyser can resolve textures
      * by username at runtime.
      *
-     * @param profile The player profile with a name but no textures
+     * @param username The profile name, or null when the profile has none
      * @return Optional containing the skull data if registered
      */
-    private Optional<SkullData> registerByUsername(PlayerProfile profile) {
-        String username = profile.getName();
+    private Optional<SkullData> registerByUsername(String username) {
         if (username == null || username.isBlank()) {
             if (plugin.getGeyserExtraConfig().general().debugMode()) {
                 plugin.getLogger().fine("[SkullDebug] Cannot register by username - name is null or blank");
@@ -311,44 +265,6 @@ public final class SkullScanner {
         }
 
         return Optional.of(skullData);
-    }
-
-    /**
-     * Decodes base64 profile data and extracts texture URL.
-     *
-     * @param base64Value The base64 encoded profile data
-     * @return Optional containing the texture URL if found
-     */
-    private Optional<String> extractTextureUrl(String base64Value) {
-        try {
-            byte[] decodedBytes = Base64.getDecoder().decode(base64Value);
-            String decodedJson = new String(decodedBytes, StandardCharsets.UTF_8);
-
-            if (plugin.getGeyserExtraConfig().general().debugMode()) {
-                plugin.getLogger().fine("[SkullDebug] Decoded JSON: " + decodedJson);
-            }
-
-            Matcher matcher = TEXTURE_URL_PATTERN.matcher(decodedJson);
-            if (matcher.find()) {
-                String url = matcher.group(1);
-                if (plugin.getGeyserExtraConfig().general().debugMode()) {
-                    plugin.getLogger().fine("[SkullDebug] Extracted URL: " + url);
-                }
-                return Optional.of(url);
-            }
-
-            if (plugin.getGeyserExtraConfig().general().debugMode()) {
-                plugin.getLogger().fine("[SkullDebug] URL pattern did not match");
-            }
-            return Optional.empty();
-        } catch (IllegalArgumentException e) {
-            plugin.getLogger().log(
-                Level.WARNING,
-                "[SkullDebug] Failed to decode base64 texture data: " + e.getMessage(),
-                e
-            );
-            return Optional.empty();
-        }
     }
 
     /**

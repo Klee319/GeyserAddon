@@ -159,6 +159,35 @@ class OffhandSwapListenerTest {
         }
 
         @Test
+        @DisplayName("the vacated slot is used only when this tick's move explains the held slot")
+        void vacatedSlotIsUsedOnlyWhenFullyCorroborated() {
+            // The observed Geyser behaviour: on the drop tick it moves the
+            // selection from the real slot (4) to slot 0, then forwards the
+            // drop. Slot 4 still holds the dropped stack, so it is the source.
+            assertThat(OffhandSwapListener.shouldUseVacatedSlot(100, 100, 0, 0, 4, true))
+                .isTrue();
+
+            // An earlier tick's change is the player scrolling. Reaching back
+            // to it would swap a stack they deliberately left behind.
+            assertThat(OffhandSwapListener.shouldUseVacatedSlot(99, 100, 0, 0, 4, true))
+                .isFalse();
+
+            // The recorded move does not explain where we are now, so it says
+            // nothing about this drop.
+            assertThat(OffhandSwapListener.shouldUseVacatedSlot(100, 100, 3, 0, 4, true))
+                .isFalse();
+
+            // Nothing actually moved.
+            assertThat(OffhandSwapListener.shouldUseVacatedSlot(100, 100, 4, 4, 4, true))
+                .isFalse();
+
+            // Timing lines up but the slot does not hold the dropped item.
+            // Writing to it anyway is exactly how a swap loses items.
+            assertThat(OffhandSwapListener.shouldUseVacatedSlot(100, 100, 0, 0, 4, false))
+                .isFalse();
+        }
+
+        @Test
         @DisplayName("only one branch ever destroys the item entity")
         void exactlyOneBranchConsumesTheEntity() {
             // Every other outcome must leave the entity on the ground, which is

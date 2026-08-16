@@ -79,6 +79,21 @@ public final class OffhandSwapListener implements Listener {
      */
     private final Set<UUID> pendingOffhandOps = ConcurrentHashMap.newKeySet();
 
+    /**
+     * The hotbar slot each Bedrock player was on immediately before Geyser
+     * moved them, and the tick it moved them on.
+     *
+     * @param vacatedSlot the slot the player left
+     * @param arrivedSlot the slot Geyser selected
+     * @param tick        server tick the change was observed on
+     */
+    private record HeldSlotChange(int vacatedSlot, int arrivedSlot, int tick) {}
+
+    /**
+     * Last observed hotbar selection change per player. Cleared on quit.
+     */
+    private final Map<UUID, HeldSlotChange> lastHeldSlotChange = new ConcurrentHashMap<>();
+
     public OffhandSwapListener(Plugin plugin) {
         this.plugin = Objects.requireNonNull(plugin, "plugin must not be null");
     }
@@ -132,35 +147,103 @@ public final class OffhandSwapListener implements Listener {
      * the entity's contents instead of trusting the snapshot taken here.</p>
      */
     /**
-     * Records hotbar selection changes, so the next sneak-drop trace can be
-     * read against them.
+     * Records hotbar selection changes so the drop handler can recover which
+     * slot the player actually dropped from.
      *
-     * <p>Pure diagnostics — it changes nothing. It exists to settle one
-     * question the sneak-drop traces raised and could not answer: every one of
-     * them reported {@code heldSlot=0} while the dropped item was plainly a
-     * different stack each time, which is why the gesture only ever worked
-     * from the first hotbar slot. Either this client's selection changes never
-     * reach the server at all (no lines here), or they do and
-     * {@code getHeldItemSlot()} is merely stale at drop time (lines here, with
-     * a slot the drop trace disagrees with). Those two want opposite fixes —
-     * cache the value seen here, versus stop keying on the held slot entirely
-     * — so guessing between them risks moving items to the wrong slot, which
-     * is the duplication/loss class this listener exists to avoid.</p>
+     * <p>This started as pure diagnostics, and the traces it produced settled
+     * the question: <b>Geyser selects hotbar slot 0 immediately before it
+     * forwards the drop.</b> Every sneak-drop trace was preceded by a
+     * {@code X -> 0} change on the same tick, which is why
+     * {@code getHeldItemSlot()} always read 0 and why the gesture only ever
+     * worked when the player was already on the first slot.</p>
+     *
+     * <p>The slot the player vacated is therefore the real source slot, and
+     * it is only available here — by drop time the inventory has already
+     * moved on.</p>
      */
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onHeldSlotChange(PlayerItemHeldEvent event) {
-        if (!DebugLog.isEnabled()) {
-            return;
-        }
         Player player = event.getPlayer();
         if (!BedrockPlayerUtil.isBedrockPlayer(player)) {
             return;
         }
+        lastHeldSlotChange.put(player.getUniqueId(), new HeldSlotChange(
+            event.getPreviousSlot(), event.getNewSlot(), Bukkit.getCurrentTick()));
         DebugLog.log(plugin.getLogger(),
             () -> "Held-slot change for " + player.getName()
                 + ": " + event.getPreviousSlot() + " -> " + event.getNewSlot()
                 + " (inventory reports "
                 + player.getInventory().getHeldItemSlot() + ")");
+    }
+
+    /**
+     * The hotbar slot a drop actually came from.
+     *
+     * <p>Returns the slot the player vacated when, and only when, all of these
+     * hold: Geyser moved them on this very tick, it moved them to the slot the
+     * inventory now reports, and the slot they left still holds a stack
+     * matching what was dropped. Any of those failing means we cannot prove
+     * where the drop came from, and the answer falls back to the reported held
+     * slot — the pre-existing behaviour.</p>
+     *
+     * <p>The item check is the part that matters. Writing to a slot picked by
+     * timing alone is how a swap duplicates or destroys items, so the slot has
+     * to corroborate itself with its own contents before anything is written
+     * to it.</p>
+     */
+    private int resolveDropSourceSlot(Player player, PlayerInventory inv, ItemStack dropped) {
+        int reported = inv.getHeldItemSlot();
+        HeldSlotChange change = lastHeldSlotChange.get(player.getUniqueId());
+        if (change == null) {
+            return reported;
+        }
+        ItemStack vacated = inv.getItem(change.vacatedSlot());
+        boolean vacatedHoldsDrop = !isEmpty(vacated) && vacated.isSimilar(dropped);
+        if (!shouldUseVacatedSlot(change.tick(), Bukkit.getCurrentTick(),
+            change.arrivedSlot(), reported, change.vacatedSlot(), vacatedHoldsDrop)) {
+            return reported;
+        }
+        DebugLog.log(plugin.getLogger(),
+            () -> "Drop source slot resolved for " + player.getName()
+                + ": inventory reports " + reported
+                + " but Geyser moved off slot " + change.vacatedSlot()
+                + " this tick and that slot holds " + describeStack(vacated));
+        return change.vacatedSlot();
+    }
+
+    /**
+     * Whether the slot Geyser moved off may be treated as the drop's source.
+     *
+     * <p>Package-private and free of Bukkit types so the guard can be pinned
+     * by tests, like {@link #decide} and {@link #heldSlotAbsorbedTheDrop}.</p>
+     *
+     * @param changeTick        tick the selection change was observed on
+     * @param currentTick       tick the drop is being handled on
+     * @param arrivedSlot       slot the selection change moved to
+     * @param reportedSlot      slot the inventory reports right now
+     * @param vacatedSlot       slot the selection change moved away from
+     * @param vacatedHoldsDrop  whether that slot still holds a stack matching
+     *                          what was dropped
+     */
+    static boolean shouldUseVacatedSlot(
+        int changeTick,
+        int currentTick,
+        int arrivedSlot,
+        int reportedSlot,
+        int vacatedSlot,
+        boolean vacatedHoldsDrop
+    ) {
+        // Same tick only. A selection change from an earlier tick is the
+        // player scrolling, not Geyser's pre-drop reset, and reaching back to
+        // it would move a stack the player deliberately left behind.
+        if (changeTick != currentTick) {
+            return false;
+        }
+        // The change has to explain the slot we are actually sitting on.
+        if (arrivedSlot != reportedSlot || vacatedSlot == reportedSlot) {
+            return false;
+        }
+        return vacatedHoldsDrop;
     }
 
     @EventHandler(priority = EventPriority.HIGHEST)
@@ -181,7 +264,7 @@ public final class OffhandSwapListener implements Listener {
         PlayerInventory inv = player.getInventory();
         Item entity = event.getItemDrop();
         ItemStack droppedSnapshot = entity.getItemStack().clone();
-        int heldSlot = inv.getHeldItemSlot();
+        int heldSlot = resolveDropSourceSlot(player, inv, droppedSnapshot);
         boolean sneakingAtDrop = player.isSneaking();
 
         // Post-drop count of the held slot, but only when it still holds the
@@ -717,6 +800,7 @@ public final class OffhandSwapListener implements Listener {
     @EventHandler(priority = EventPriority.MONITOR)
     public void onPlayerQuit(PlayerQuitEvent event) {
         pendingOffhandOps.remove(event.getPlayer().getUniqueId());
+        lastHeldSlotChange.remove(event.getPlayer().getUniqueId());
     }
 
     /**
