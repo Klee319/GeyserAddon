@@ -521,7 +521,8 @@ public final class AutoBedrockPackBuilder {
                     continue;
                 }
                 try {
-                    armorTextureBytes.put(iconKey, Files.readAllBytes(source));
+                    armorTextureBytes.put(iconKey, AnimatedTextureStrip.firstFrame(
+                        source, Files.readAllBytes(source), logger));
                 } catch (IOException ex) {
                     if (logger != null) {
                         logger.warning("[AutoPack] failed to read armor texture "
@@ -544,7 +545,8 @@ public final class AutoBedrockPackBuilder {
                 continue;
             }
             try {
-                entityTextureBytes.put(zipPath, Files.readAllBytes(source));
+                entityTextureBytes.put(zipPath, AnimatedTextureStrip.firstFrame(
+                    source, Files.readAllBytes(source), logger));
             } catch (IOException ex) {
                 if (logger != null) {
                     logger.warning("[AutoPack] failed to read entity texture "
@@ -724,7 +726,13 @@ public final class AutoBedrockPackBuilder {
                 // stretch-fit caused pixel artifacts. Gui bake matches Java's
                 // inventory algorithm (scale/translation/Z-rot); scale>1 may
                 // clip at canvas edges the same way Java slots do.
-                byte[] raw = Files.readAllBytes(task.source());
+                // Animated Java textures are filmstrips: N frames stacked in
+                // one PNG, described by a sibling .mcmeta. Bedrock's item
+                // atlas has no flipbook equivalent and would draw the whole
+                // strip squashed into the slot, so crop to the frame Java
+                // shows first. Non-animated PNGs come back byte-identical.
+                byte[] raw = AnimatedTextureStrip.firstFrame(
+                    task.source(), Files.readAllBytes(task.source()), logger);
                 itemTextureBytes.put(task.zipEntry(), raw);
                 // A model built from `elements` samples regions of an atlas,
                 // so the raw PNG is a UV sheet rather than a picture of the
@@ -1405,8 +1413,13 @@ public final class AutoBedrockPackBuilder {
             Map<String, java.awt.image.BufferedImage> perFace = new LinkedHashMap<>();
             for (Map.Entry<String, Path> e : task.textureFiles().entrySet()) {
                 try {
+                    // Same filmstrip crop as the primary layer: a side texture
+                    // left at full strip height would make the faces that
+                    // sample it disagree with the ones sampling the primary.
                     java.awt.image.BufferedImage img =
-                        javax.imageio.ImageIO.read(e.getValue().toFile());
+                        javax.imageio.ImageIO.read(new java.io.ByteArrayInputStream(
+                            AnimatedTextureStrip.firstFrame(
+                                e.getValue(), Files.readAllBytes(e.getValue()), logger)));
                     if (img != null) {
                         perFace.put(e.getKey(), img);
                     }
@@ -1495,7 +1508,11 @@ public final class AutoBedrockPackBuilder {
             if (width <= 0 || height <= 0) {
                 return new int[]{16, 16};
             }
-            return new int[]{width, height};
+            // An animated filmstrip is cropped to one frame before it reaches
+            // the zip, so the geometry has to declare the frame's size. Using
+            // the strip's would scale every UV by 1/frameCount vertically and
+            // paint the model with a sliver of the artwork.
+            return AnimatedTextureStrip.frameDimensions(source, width, height, logger);
         } catch (IOException ex) {
             if (logger != null) {
                 logger.fine("[AutoPack] failed to probe PNG dimensions for "

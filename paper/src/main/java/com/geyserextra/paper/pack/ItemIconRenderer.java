@@ -730,15 +730,15 @@ public final class ItemIconRenderer {
     /**
      * Height of the sampled region — the whole image.
      *
-     * <p>An earlier version guessed at animated sprite strips here (treating
-     * any image whose height is an exact multiple of its width as an N-frame
-     * filmstrip and sampling only the first frame). That guess was dropped:
-     * it keys off dimensions alone with no {@code .mcmeta} to confirm, so it
-     * would silently crop a legitimately tall non-animated atlas in half, and
-     * it disagreed with {@link BedrockGeometryConverter}, which scales UVs by
-     * the full PNG height. Animated item textures are a known limitation of
-     * both, and having them wrong the same way in both places is better than
-     * having the icon and the 3D model sample differently.</p>
+     * <p>Deliberately not filmstrip-aware. An earlier version guessed at
+     * animated sprite strips here — treating any image whose height is an
+     * exact multiple of its width as an N-frame filmstrip — which silently
+     * cropped legitimately tall non-animated atlases in half and disagreed
+     * with {@link BedrockGeometryConverter}, which scales UVs by the full PNG
+     * height. Filmstrips are now handled where the bytes enter the pipeline
+     * ({@link AnimatedTextureStrip}, driven by the {@code .mcmeta} rather than
+     * by a dimension guess), so by the time an image reaches this renderer it
+     * is already a single frame and its full height is the right answer.</p>
      */
     private static int spriteHeight(BufferedImage texture) {
         return texture.getHeight();
