@@ -264,6 +264,7 @@ public class CustomItemsHandler {
             return;
         }
         try (ZipFile zip = new ZipFile(pack.toFile())) {
+            Set<String> packTextures = collectPackTexturePaths(zip);
             var entry = zip.getEntry("textures/item_texture.json");
             if (entry == null) {
                 return;
@@ -274,7 +275,16 @@ public class CustomItemsHandler {
                 JsonObject textureData = root.getAsJsonObject("texture_data");
                 if (textureData != null) {
                     for (String key : textureData.keySet()) {
-                        customIconKeys.add(key.toLowerCase(Locale.ROOT));
+                        // item_texture.json names every definition the pack
+                        // builder emitted, including the ones it pointed at a
+                        // stock Bedrock path because the Java pack authored no
+                        // artwork for them. Taking every key made this set
+                        // claim authorship of textures the pack does not ship,
+                        // which silently disabled the vanilla-fallback gate
+                        // below for every such mapping.
+                        if (referencesPackTexture(textureData.get(key), packTextures)) {
+                            customIconKeys.add(key.toLowerCase(Locale.ROOT));
+                        }
                     }
                 }
             }
@@ -295,6 +305,53 @@ public class CustomItemsHandler {
      * model regardless, so the collision costs an inventory icon and nothing
      * in the world.</p>
      */
+    /**
+     * Every PNG the pack ships, keyed the way {@code item_texture.json}
+     * references it — path without the {@code .png} extension.
+     */
+    private static Set<String> collectPackTexturePaths(ZipFile zip) {
+        Set<String> paths = new HashSet<>();
+        var entries = zip.entries();
+        while (entries.hasMoreElements()) {
+            String path = entries.nextElement().getName();
+            if (path.startsWith("textures/") && path.endsWith(".png")) {
+                paths.add(path.substring(0, path.length() - ".png".length())
+                    .toLowerCase(Locale.ROOT));
+            }
+        }
+        return paths;
+    }
+
+    /**
+     * Whether an {@code item_texture.json} entry points at artwork this pack
+     * actually ships, as opposed to a stock Bedrock texture path such as
+     * {@code textures/items/diamond_sword}.
+     *
+     * <p>The distinction is the whole basis for deciding whether a definition
+     * is worth registering: one pointed at a stock path renders exactly like
+     * the vanilla item it shadows.</p>
+     */
+    static boolean referencesPackTexture(JsonElement value, Set<String> packTextures) {
+        if (value == null || !value.isJsonObject()) {
+            return false;
+        }
+        JsonElement textures = value.getAsJsonObject().get("textures");
+        if (textures == null) {
+            return false;
+        }
+        if (textures.isJsonArray()) {
+            for (JsonElement element : textures.getAsJsonArray()) {
+                if (element.isJsonPrimitive()
+                    && packTextures.contains(element.getAsString().toLowerCase(Locale.ROOT))) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        return textures.isJsonPrimitive()
+            && packTextures.contains(textures.getAsString().toLowerCase(Locale.ROOT));
+    }
+
     private void collectCustomModelKeys(ZipFile zip) {
         var entries = zip.entries();
         while (entries.hasMoreElements()) {
@@ -566,6 +623,7 @@ public class CustomItemsHandler {
 
         int registered = 0;
         int skippedDuplicate = 0;
+        int skippedVanillaLookAlike = 0;
         int failed = 0;
 
         for (ItemMapping mapping : itemMappings) {
@@ -606,6 +664,16 @@ public class CustomItemsHandler {
                         + " (base=" + mapping.baseItem + ", CMD=" + mapping.customModelData
                         + "): would override the vanilla item itself without a predicate");
                     skippedDuplicate++;
+                    continue;
+                }
+
+                if (isVanillaLookAlike(mapping)) {
+                    extension.logger().debug("Not registering " + mapping.name()
+                        + " (base=" + mapping.baseItem() + ", pdc="
+                        + mapping.pdcIdentifier() + "): the pack ships no icon and"
+                        + " no attachable for it, so the definition would be an exact"
+                        + " copy of the vanilla item that breaks its Bedrock recipes");
+                    skippedVanillaLookAlike++;
                     continue;
                 }
 
@@ -665,8 +733,92 @@ public class CustomItemsHandler {
             }
         }
 
+        if (skippedVanillaLookAlike > 0) {
+            // INFO, not debug: this is the difference between a Bedrock player
+            // being able to use their gear in a smithing table or not, so an
+            // operator comparing editions needs to see the count without
+            // turning anything on.
+            extension.logger().info("[CustomItems] Left " + skippedVanillaLookAlike
+                + " PDC-only mapping(s) as plain vanilla items: the pack ships"
+                + " neither an icon nor an attachable for them, so a custom"
+                + " definition would look identical while breaking Bedrock"
+                + " recipes that require the vanilla item id.");
+        }
+
         extension.logger().debug("=== Registration Complete: " + registered + " registered, "
-            + skippedDuplicate + " duplicate-skipped, " + failed + " failed ===");
+            + skippedDuplicate + " duplicate-skipped, "
+            + skippedVanillaLookAlike + " vanilla-look-alike-skipped, "
+            + failed + " failed ===");
+    }
+
+    /**
+     * Whether registering this mapping would only produce a Bedrock item
+     * indistinguishable from the vanilla one it shadows.
+     *
+     * <p>PDC-only mappings register with
+     * {@code hasComponent("minecraft:custom_data")} because Geyser's v2 API has
+     * no predicate for a specific PDC key. That predicate matches <em>any</em>
+     * item carrying <em>any</em> persistent data — including ordinary gear that
+     * a server plugin merely tagged (a {@code tradeable} or {@code soulbound}
+     * flag, say). Such an item is then sent to Bedrock as
+     * {@code geyser_custom:...} rather than {@code minecraft:diamond_sword}.</p>
+     *
+     * <p>When the pack ships no icon and no attachable for the mapping, the
+     * definition renders with the stock Bedrock texture, so the swap buys
+     * nothing visually — and costs the player every Bedrock interaction that
+     * matches on the vanilla id. The smithing table is the loud one: it refuses
+     * custom ingredients outright, so a tagged diamond sword can never be
+     * upgraded to netherite (GeyserMC/Geyser#4706). Leaving the definition
+     * unregistered lets Geyser translate the stack through its normal vanilla
+     * mapping, which is both correct and identical on screen.</p>
+     *
+     * <p>Mappings selected by custom_model_data or item_model are exempt: their
+     * predicates only fire on items that really do carry that marker, so they
+     * never capture a plain vanilla item.</p>
+     */
+    private boolean isVanillaLookAlike(ItemMapping mapping) {
+        String key = packKey(mapping.name());
+        return isVanillaLookAlike(
+            mapping.customModelData() > 0 || mapping.hasItemModelId(),
+            mapping.hasPdcIdentifier(),
+            mapping.icon(),
+            customIconKeys.contains(key),
+            customModelKeys.contains(key));
+    }
+
+    /**
+     * The decision table behind {@link #isVanillaLookAlike(ItemMapping)}, kept
+     * free of {@link ItemMapping} and of pack state so it can be pinned by
+     * tests without a Geyser runtime.
+     *
+     * @param preciselySelected   the mapping registers on custom_model_data or
+     *                            item_model, so its predicate cannot capture a
+     *                            plain vanilla item
+     * @param hasPdcIdentifier    the mapping registers on the catch-all
+     *                            {@code hasComponent(custom_data)} predicate
+     * @param explicitIcon        an icon the operator named by hand, if any
+     * @param packShipsIcon       the active pack contains artwork for this key
+     * @param packShipsAttachable the active pack contains an attachable for it
+     */
+    static boolean isVanillaLookAlike(
+        boolean preciselySelected,
+        boolean hasPdcIdentifier,
+        String explicitIcon,
+        boolean packShipsIcon,
+        boolean packShipsAttachable
+    ) {
+        if (preciselySelected) {
+            return false;
+        }
+        if (!hasPdcIdentifier) {
+            return false;
+        }
+        if (explicitIcon != null && !explicitIcon.isBlank()) {
+            // The operator named an icon explicitly; honour it even when the
+            // active pack cannot be inspected.
+            return false;
+        }
+        return !packShipsIcon && !packShipsAttachable;
     }
 
     /**
@@ -677,8 +829,10 @@ public class CustomItemsHandler {
         if (mapping.icon() != null && !mapping.icon().isBlank()) {
             return false;
         }
-        String generatedIcon = mapping.name().toLowerCase(Locale.ROOT);
-        if (customIconKeys.contains(generatedIcon)) {
+        // packKey, not a bare lowercase: the pack sanitises "ns:name" to
+        // "ns_name" for icon keys, so comparing the raw name meant every
+        // namespaced mapping missed its own authored icon.
+        if (customIconKeys.contains(packKey(mapping.name()))) {
             return false;
         }
         String base = bareBaseItemName(mapping.baseItem());

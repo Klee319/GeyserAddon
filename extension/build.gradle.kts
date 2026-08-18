@@ -10,6 +10,18 @@ dependencies {
     compileOnly("org.geysermc.geyser:api:2.10.0-SNAPSHOT")
     // Gson is provided by Geyser runtime, but needed for compilation
     compileOnly("com.google.code.gson:gson:2.10.1")
+
+    // Unit-test dependencies (JUnit 5 + AssertJ), matching the paper module.
+    // Gson and the Geyser API are compileOnly above, so the test runtime has
+    // to pull them in itself.
+    testImplementation("org.junit.jupiter:junit-jupiter:5.10.2")
+    testImplementation("org.assertj:assertj-core:3.25.3")
+    testImplementation("com.google.code.gson:gson:2.10.1")
+    testImplementation("org.geysermc.geyser:api:2.10.0-SNAPSHOT")
+}
+
+tasks.test {
+    useJUnitPlatform()
 }
 
 // Surface every deprecated / marked-for-removal API call at build time so
