@@ -94,6 +94,8 @@ public final class GeyserExtraPaper extends JavaPlugin {
     // fallback stay out of the way entirely.
     private com.geyserextra.paper.skin.BedrockSkinService bedrockSkinService;
     private com.geyserextra.paper.listener.BedrockSkinApplier bedrockSkinApplier;
+    /** Set from general.skinFixOnlyMode; read by onDisable to skip the full teardown. */
+    private boolean skinFixOnlyMode;
 
     // Per-player display settings persistence and display orchestration
     private PlayerSettingsManager playerSettingsManager;
@@ -124,6 +126,15 @@ public final class GeyserExtraPaper extends JavaPlugin {
 
         if (!config.general().enabled()) {
             getLogger().fine("GeyserExtra is disabled in configuration.");
+            return;
+        }
+
+        // A backend that exists only to repair Bedrock skins stops here. See
+        // GeneralConfig.skinFixOnlyMode for why config flags alone cannot
+        // achieve this.
+        if (config.general().skinFixOnlyMode()) {
+            skinFixOnlyMode = true;
+            enableSkinFixOnly();
             return;
         }
 
@@ -180,8 +191,61 @@ public final class GeyserExtraPaper extends JavaPlugin {
         getLogger().fine("GeyserExtra Paper plugin enabled successfully.");
     }
 
+    /**
+     * Enables nothing but the Bedrock skin repair.
+     *
+     * <p>Deliberately does not touch the registries, the scanners or the
+     * extension data folder's pack output: this backend is a guest in a shared
+     * folder that another backend owns, and writing into it is how two
+     * generators end up overwriting each other's resource pack.</p>
+     */
+    private void enableSkinFixOnly() {
+        if (!config.general().bedrockSkinFixEnabled()) {
+            getLogger().warning("GeyserExtra: general.skinFixOnlyMode is on but"
+                + " general.bedrockSkinFixEnabled is off — this plugin will do nothing."
+                + " Enable one or remove the jar.");
+            return;
+        }
+
+        bedrockSkinService = new com.geyserextra.paper.skin.BedrockSkinService(this);
+        bedrockSkinApplier =
+            new com.geyserextra.paper.listener.BedrockSkinApplier(this, bedrockSkinService);
+        getServer().getPluginManager().registerEvents(bedrockSkinApplier, this);
+
+        // The Discord avatar hook is the same defect seen from Discord's side,
+        // and it only reads the profile this listener repairs. Leaving it out
+        // would fix the in-game skin while Discord kept showing Steve.
+        discordSRVSkinHook = new com.geyserextra.paper.listener.DiscordSRVSkinHook(this);
+        discordSRVSkinHook.tryRegister();
+
+        getServer().getScheduler().runTask(this, () -> {
+            int missing = bedrockSkinApplier.repairOnlinePlayers();
+            if (missing > 0) {
+                getLogger().info("[BedrockSkin] " + missing
+                    + " Bedrock player(s) already online are missing their skin;"
+                    + " repairing from the GeyserMC API.");
+            }
+        });
+
+        getLogger().info("GeyserExtra: skin-fix-only mode."
+            + " Bedrock skin repair and the DiscordSRV avatar hook are active;"
+            + " scanners, pack generation, recipe handlers, displays and commands are not.");
+    }
+
     @Override
     public void onDisable() {
+        // Skin-fix-only mode never built the registries, the scanners or any of
+        // the ProtocolLib handlers, so the full teardown below would only find
+        // nulls — and saveRegistriesToSharedFolder would write into a folder
+        // this backend does not own.
+        if (skinFixOnlyMode) {
+            if (discordSRVSkinHook != null) {
+                discordSRVSkinHook.unregister();
+            }
+            getLogger().fine("GeyserExtra Paper plugin disabled (skin-fix-only mode).");
+            return;
+        }
+
         // Cleanup ProtocolLib listeners to prevent handler accumulation on reload
         if (bedrockAnvilSimulator != null) {
             bedrockAnvilSimulator.cleanup();

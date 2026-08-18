@@ -208,6 +208,13 @@ public final class GeyserExtraConfig {
          * "not configured, use the default".
          */
         private final Boolean bedrockSkinFixEnabled;
+        /**
+         * Primitive, unlike its neighbour above, because its default is
+         * {@code false} — which is exactly what Gson leaves an absent field at.
+         * An existing config.json therefore keeps the full plugin, which is the
+         * behaviour it already had.
+         */
+        private final boolean skinFixOnlyMode;
 
         public GeneralConfig() {
             this.enabled = true;
@@ -216,6 +223,7 @@ public final class GeyserExtraConfig {
             this.tooltipDefaultEnabled = false;
             this.sneakDropOffhandSwapEnabled = true;
             this.bedrockSkinFixEnabled = true;
+            this.skinFixOnlyMode = false;
         }
 
         public GeneralConfig(boolean enabled, boolean debugMode,
@@ -227,19 +235,21 @@ public final class GeyserExtraConfig {
                              int workerThreads, boolean tooltipDefaultEnabled,
                              boolean sneakDropOffhandSwapEnabled) {
             this(enabled, debugMode, workerThreads, tooltipDefaultEnabled,
-                sneakDropOffhandSwapEnabled, true);
+                sneakDropOffhandSwapEnabled, true, false);
         }
 
         public GeneralConfig(boolean enabled, boolean debugMode,
                              int workerThreads, boolean tooltipDefaultEnabled,
                              boolean sneakDropOffhandSwapEnabled,
-                             boolean bedrockSkinFixEnabled) {
+                             boolean bedrockSkinFixEnabled,
+                             boolean skinFixOnlyMode) {
             this.enabled = enabled;
             this.debugMode = debugMode;
             this.workerThreads = workerThreads > 0 ? workerThreads : 2;
             this.tooltipDefaultEnabled = tooltipDefaultEnabled;
             this.sneakDropOffhandSwapEnabled = sneakDropOffhandSwapEnabled;
             this.bedrockSkinFixEnabled = bedrockSkinFixEnabled;
+            this.skinFixOnlyMode = skinFixOnlyMode;
         }
 
         public boolean enabled() {
@@ -295,6 +305,26 @@ public final class GeyserExtraConfig {
          */
         public boolean bedrockSkinFixEnabled() {
             return bedrockSkinFixEnabled == null || bedrockSkinFixEnabled;
+        }
+
+        /**
+         * Whether this backend runs nothing but the Bedrock skin repair.
+         *
+         * <p>Default: false. Exists because the skin repair has to live on
+         * every backend a Bedrock player can reach — it writes to that
+         * backend's own GameProfile — while the rest of the plugin is
+         * deliberately installed on one backend only. Turning the other
+         * features off in this config is not enough: the off-hand, elytra,
+         * cooldown and display listeners register unconditionally, and the
+         * elytra one swaps chestplates, which is not something to switch on for
+         * a server just to give it skins.</p>
+         *
+         * <p>With this set, {@code onEnable} registers the skin applier and the
+         * DiscordSRV avatar hook and stops. No scanners, no pack generation, no
+         * recipe handlers, no displays, no commands, no scheduled tasks.</p>
+         */
+        public boolean skinFixOnlyMode() {
+            return skinFixOnlyMode;
         }
     }
 

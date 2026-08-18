@@ -55,6 +55,32 @@ class GeneralConfigBedrockSkinFixTest {
     }
 
     @Test
+    @DisplayName("skinFixOnlyMode stays off for a config that never heard of it")
+    void skinFixOnlyModeDefaultsOff() {
+        // The opposite polarity to the flag above, and deliberately so: an
+        // existing backend must keep the whole plugin. Gson leaving an absent
+        // primitive at false is the correct default here, not a hazard.
+        String legacy = "{\"general\":{\"enabled\":true}}";
+
+        assertThat(JsonUtil.fromJson(legacy, GeyserExtraConfig.class)
+            .general().skinFixOnlyMode()).isFalse();
+        assertThat(new GeyserExtraConfig().general().skinFixOnlyMode()).isFalse();
+    }
+
+    @Test
+    @DisplayName("skinFixOnlyMode is honoured when set")
+    void skinFixOnlyModeIsHonoured() {
+        String json = "{\"general\":{\"enabled\":true,\"skinFixOnlyMode\":true}}";
+
+        GeyserExtraConfig config = JsonUtil.fromJson(json, GeyserExtraConfig.class);
+
+        assertThat(config.general().skinFixOnlyMode()).isTrue();
+        // The two flags are independent: skin-only mode still needs the repair
+        // itself switched on, and it is, by default.
+        assertThat(config.general().bedrockSkinFixEnabled()).isTrue();
+    }
+
+    @Test
     @DisplayName("the constructed default is enabled and survives a save/load round trip")
     void defaultRoundTripsThroughJson() {
         // The written config must state the value explicitly, otherwise the
