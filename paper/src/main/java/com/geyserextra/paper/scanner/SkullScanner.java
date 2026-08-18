@@ -3,6 +3,7 @@ package com.geyserextra.paper.scanner;
 import com.geyserextra.core.api.SkullData;
 import com.geyserextra.core.registry.SkullRegistry;
 import com.geyserextra.paper.GeyserExtraPaper;
+import com.geyserextra.paper.skin.BedrockSkinService;
 
 import org.bukkit.Chunk;
 import org.bukkit.Material;
@@ -18,6 +19,7 @@ import java.net.URL;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 
 /**
  * Scanner for detecting and registering custom skull textures.
@@ -70,6 +72,8 @@ public final class SkullScanner {
 
     private final SkullRegistry registry;
     private final GeyserExtraPaper plugin;
+    /** Bedrock skin lookup, or null when the skin repair is switched off. */
+    private final BedrockSkinService bedrockSkins;
 
     /**
      * Creates a new SkullScanner.
@@ -79,8 +83,22 @@ public final class SkullScanner {
      * @throws NullPointerException if registry or plugin is null
      */
     public SkullScanner(SkullRegistry registry, GeyserExtraPaper plugin) {
+        this(registry, plugin, null);
+    }
+
+    /**
+     * Creates a new SkullScanner that can resolve Bedrock players' heads.
+     *
+     * @param registry     The skull registry to store discovered skulls
+     * @param plugin       The plugin instance for logging and configuration
+     * @param bedrockSkins Bedrock skin lookup, or null to disable that fallback
+     * @throws NullPointerException if registry or plugin is null
+     */
+    public SkullScanner(SkullRegistry registry, GeyserExtraPaper plugin,
+                        BedrockSkinService bedrockSkins) {
         this.registry = Objects.requireNonNull(registry, "registry must not be null");
         this.plugin = Objects.requireNonNull(plugin, "plugin must not be null");
+        this.bedrockSkins = bedrockSkins;
     }
 
     /**
@@ -195,9 +213,48 @@ public final class SkullScanner {
         if (skin != null) {
             return createAndRegisterSkullData(skin.toString());
         }
+
+        Optional<SkullData> bedrock = registerBedrockOwner(profile);
+        if (bedrock.isPresent()) {
+            return bedrock;
+        }
+
         // A head placed by name alone carries no texture yet; Geyser can
         // resolve those itself at runtime from the username.
         return registerByUsername(profile.getName());
+    }
+
+    /**
+     * Resolves a head owned by a Bedrock player from the cached GeyserMC skin.
+     *
+     * <p>Why this is needed even after the join-time profile repair: a head
+     * stores a snapshot of its owner's profile in NBT. Heads minted while the
+     * owner's profile was still textureless — every one taken before that
+     * repair existed, and any taken while the owner is offline — carry no
+     * texture, so {@link #skinUrlOf} finds nothing. The username fallback
+     * cannot rescue them either, because Geyser resolves usernames against
+     * Mojang and a Bedrock player has no Mojang account; the head would stay
+     * Steve on Bedrock forever.</p>
+     *
+     * <p>Cache only, never a network call: this runs inside inventory opens and
+     * chunk loads. A miss warms the cache in the background and the same head
+     * resolves on the next scan.</p>
+     */
+    private Optional<SkullData> registerBedrockOwner(PlayerProfile profile) {
+        if (bedrockSkins == null) {
+            return Optional.empty();
+        }
+        UUID ownerId = profile.getUniqueId();
+        if (BedrockSkinService.xuidOf(ownerId) == 0L) {
+            return Optional.empty();
+        }
+
+        Optional<BedrockSkinService.BedrockSkin> skin = bedrockSkins.cached(ownerId);
+        if (skin.isEmpty()) {
+            bedrockSkins.warm(ownerId);
+            return Optional.empty();
+        }
+        return createAndRegisterSkullData(skin.get().textureId());
     }
 
     /**

@@ -198,6 +198,16 @@ public final class GeyserExtraConfig {
         private final int workerThreads;
         private final boolean tooltipDefaultEnabled;
         private final boolean sneakDropOffhandSwapEnabled;
+        /**
+         * Boxed on purpose. This class is deserialized by plain Gson, which
+         * bypasses the constructors and leaves a field absent from the JSON at
+         * its zero value — {@code false} for a primitive boolean. Every
+         * config.json written before this option existed would therefore have
+         * switched the skin repair off. A {@code Boolean} comes back
+         * {@code null} instead, which {@link #bedrockSkinFixEnabled()} reads as
+         * "not configured, use the default".
+         */
+        private final Boolean bedrockSkinFixEnabled;
 
         public GeneralConfig() {
             this.enabled = true;
@@ -205,6 +215,7 @@ public final class GeyserExtraConfig {
             this.workerThreads = 2;
             this.tooltipDefaultEnabled = false;
             this.sneakDropOffhandSwapEnabled = true;
+            this.bedrockSkinFixEnabled = true;
         }
 
         public GeneralConfig(boolean enabled, boolean debugMode,
@@ -215,11 +226,20 @@ public final class GeyserExtraConfig {
         public GeneralConfig(boolean enabled, boolean debugMode,
                              int workerThreads, boolean tooltipDefaultEnabled,
                              boolean sneakDropOffhandSwapEnabled) {
+            this(enabled, debugMode, workerThreads, tooltipDefaultEnabled,
+                sneakDropOffhandSwapEnabled, true);
+        }
+
+        public GeneralConfig(boolean enabled, boolean debugMode,
+                             int workerThreads, boolean tooltipDefaultEnabled,
+                             boolean sneakDropOffhandSwapEnabled,
+                             boolean bedrockSkinFixEnabled) {
             this.enabled = enabled;
             this.debugMode = debugMode;
             this.workerThreads = workerThreads > 0 ? workerThreads : 2;
             this.tooltipDefaultEnabled = tooltipDefaultEnabled;
             this.sneakDropOffhandSwapEnabled = sneakDropOffhandSwapEnabled;
+            this.bedrockSkinFixEnabled = bedrockSkinFixEnabled;
         }
 
         public boolean enabled() {
@@ -261,6 +281,20 @@ public final class GeyserExtraConfig {
          */
         public boolean sneakDropOffhandSwapEnabled() {
             return sneakDropOffhandSwapEnabled;
+        }
+
+        /**
+         * Whether to repair a Bedrock player's missing skin from the public
+         * GeyserMC skin API on join.
+         *
+         * <p>Default: true, including for a config.json that predates the
+         * option. It only ever writes a {@code textures} property that is
+         * absent, so on a network where Floodgate delivers skins correctly it
+         * costs one profile check per Bedrock join and changes nothing. Set it
+         * to false to hand skin handling back to Floodgate unconditionally.</p>
+         */
+        public boolean bedrockSkinFixEnabled() {
+            return bedrockSkinFixEnabled == null || bedrockSkinFixEnabled;
         }
     }
 

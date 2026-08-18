@@ -89,6 +89,12 @@ public final class GeyserExtraPaper extends JavaPlugin {
     // DiscordSRV avatar hook for Bedrock players (optional — no-op if DiscordSRV absent)
     private com.geyserextra.paper.listener.DiscordSRVSkinHook discordSRVSkinHook;
 
+    // Bedrock skin lookup. Null when general.bedrockSkinFixEnabled is false, in
+    // which case both the join-time profile repair and the Bedrock-owned skull
+    // fallback stay out of the way entirely.
+    private com.geyserextra.paper.skin.BedrockSkinService bedrockSkinService;
+    private com.geyserextra.paper.listener.BedrockSkinApplier bedrockSkinApplier;
+
     // Per-player display settings persistence and display orchestration
     private PlayerSettingsManager playerSettingsManager;
     private DisplayManager displayManager;
@@ -133,6 +139,12 @@ public final class GeyserExtraPaper extends JavaPlugin {
 
         // Initialize registries
         initializeRegistries();
+
+        // Bedrock skin lookup. Created before the scanners because SkullScanner
+        // takes it, and before registerListeners because BedrockSkinApplier does.
+        if (config.general().bedrockSkinFixEnabled()) {
+            bedrockSkinService = new com.geyserextra.paper.skin.BedrockSkinService(this);
+        }
 
         // Initialize scanners. The synchronous immediate scan may replace the
         // pack only during a full startup before Geyser is enabled. A plugin
@@ -472,7 +484,7 @@ public final class GeyserExtraPaper extends JavaPlugin {
     private void initializeScanners() {
         customItemScanner = new CustomItemScanner(itemMappingRegistry, this);
         recipeScanner = new RecipeScanner(customItemScanner, this);
-        skullScanner = new SkullScanner(skullRegistry, this);
+        skullScanner = new SkullScanner(skullRegistry, this, bedrockSkinService);
         worldSkullScanner = new WorldSkullScanner(skullScanner, this);
 
         // Schedule startup scans AFTER all plugins have loaded
@@ -704,6 +716,19 @@ public final class GeyserExtraPaper extends JavaPlugin {
         // Why: EntityToggleGlideEvent may not fire when plugins call setGliding() directly
         elytraFlightListener.startMonitorTask(this);
 
+        // Put the missing textures property back on Bedrock players' profiles.
+        // Registered before the DiscordSRV hook on purpose: that hook reads the
+        // profile 3 seconds after join to cache an avatar URL, and it can only
+        // find a skin there if this listener has already put one back.
+        if (bedrockSkinService != null) {
+            bedrockSkinApplier =
+                new com.geyserextra.paper.listener.BedrockSkinApplier(this, bedrockSkinService);
+            getServer().getPluginManager().registerEvents(bedrockSkinApplier, this);
+        } else {
+            getLogger().fine("BedrockSkinApplier disabled by config"
+                + " (general.bedrockSkinFixEnabled=false)");
+        }
+
         // DiscordSRV integration — fix Bedrock player avatars in Discord messages
         // Gracefully no-ops if DiscordSRV is not installed
         discordSRVSkinHook = new com.geyserextra.paper.listener.DiscordSRVSkinHook(this);
@@ -781,6 +806,17 @@ public final class GeyserExtraPaper extends JavaPlugin {
     private void performInitialScan() {
         getServer().getScheduler().runTask(this, () -> {
             customItemScanner.scanAllPlayers();
+
+            // Covers a plugin reload: players already connected never fire
+            // PlayerJoinEvent again, so the join-time repair would miss them.
+            if (bedrockSkinApplier != null) {
+                int missing = bedrockSkinApplier.repairOnlinePlayers();
+                if (missing > 0) {
+                    getLogger().info("[BedrockSkin] " + missing
+                        + " Bedrock player(s) already online are missing their skin;"
+                        + " repairing from the GeyserMC API.");
+                }
+            }
 
             if (config.general().debugMode()) {
                 getLogger().fine(() -> String.format(
