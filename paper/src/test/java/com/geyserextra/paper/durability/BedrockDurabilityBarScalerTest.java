@@ -55,6 +55,28 @@ class BedrockDurabilityBarScalerTest {
         }
 
         @Test
+        @DisplayName("a reduced maximum makes the scaled damage exceed the override")
+        void reducedMaximumProducesDamagePastTheOverride() {
+            // The invariant that broke production. The scaled value is expressed
+            // against the VANILLA maximum, so whenever the override is smaller
+            // than vanilla it legitimately lands far above the override. Writing
+            // it onto a meta that still carries that override throws
+            // "Damage cannot exceed max damage" from CraftMetaItem#setDamage,
+            // which killed the whole packet listener — repeatedly, in a tick
+            // loop. rescaled() must therefore clear the override BEFORE writing
+            // the damage. If this assertion ever flips to "within the override",
+            // that ordering has stopped being load-bearing.
+            // Worn almost through: the reported damage then approaches the
+            // vanilla maximum, which is above the override by construction.
+            for (int realMax : new int[] {50, 100, 500, 1000, 1500}) {
+                int scaled = BedrockDurabilityBarScaler.scaledDamage(
+                    realMax - 1, realMax, DIAMOND_SWORD);
+                assertThat(scaled).as("realMax %d", realMax).isGreaterThan(realMax);
+                assertThat(scaled).as("realMax %d", realMax).isLessThan(DIAMOND_SWORD);
+            }
+        }
+
+        @Test
         @DisplayName("the reported ratio matches the real ratio within a percent")
         void ratioIsPreserved() {
             for (int damage : new int[] {1, 300, 900, 1500, 2400, 2999}) {

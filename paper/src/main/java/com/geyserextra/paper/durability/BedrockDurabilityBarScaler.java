@@ -196,7 +196,19 @@ public final class BedrockDurabilityBarScaler {
         }
 
         ItemStack copy = item.clone();
-        copy.editMeta(Damageable.class, m -> m.setDamage(scaled));
+        copy.editMeta(Damageable.class, m -> {
+            // The override has to go before the damage does. The scaled value is
+            // expressed against the *vanilla* maximum, so on an item whose
+            // override is SMALLER than vanilla — a custom sword capped at 50
+            // where the material allows 1561 — writing it against the surviving
+            // override throws "Damage cannot exceed max damage" and the whole
+            // packet listener aborts. Clearing it first also keeps the packet
+            // self-consistent: what leaves here is a plain vanilla-durability
+            // item carrying a proportionally scaled damage, which is exactly
+            // what Bedrock draws its bar from.
+            m.setMaxDamage(null);
+            m.setDamage(scaled);
+        });
         return copy;
     }
 
