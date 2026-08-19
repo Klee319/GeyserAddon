@@ -9,6 +9,12 @@ build/
 .vscode/
 *.swp
 
+# Eclipse / Buildship
+.classpath
+.project
+.settings/
+bin/
+
 # OS
 .DS_Store
 Thumbs.db
