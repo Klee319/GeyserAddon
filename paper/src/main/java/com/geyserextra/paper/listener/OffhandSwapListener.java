@@ -198,9 +198,11 @@ public final class OffhandSwapListener implements Listener {
             return reported;
         }
         ItemStack vacated = inv.getItem(change.vacatedSlot());
-        boolean vacatedHoldsDrop = !isEmpty(vacated) && vacated.isSimilar(dropped);
+        boolean vacatedIsEmpty = isEmpty(vacated);
+        boolean vacatedHoldsDrop = !vacatedIsEmpty && vacated.isSimilar(dropped);
         if (!shouldUseVacatedSlot(change.tick(), Bukkit.getCurrentTick(),
-            change.arrivedSlot(), reported, change.vacatedSlot(), vacatedHoldsDrop)) {
+            change.arrivedSlot(), reported, change.vacatedSlot(),
+            vacatedHoldsDrop, vacatedIsEmpty)) {
             return reported;
         }
         DebugLog.log(plugin.getLogger(),
@@ -223,7 +225,9 @@ public final class OffhandSwapListener implements Listener {
      * @param reportedSlot      slot the inventory reports right now
      * @param vacatedSlot       slot the selection change moved away from
      * @param vacatedHoldsDrop  whether that slot still holds a stack matching
-     *                          what was dropped
+     *                          what was dropped — a partial drop
+     * @param vacatedIsEmpty    whether that slot is now empty — a whole-stack
+     *                          drop, which is what the gesture normally is
      */
     static boolean shouldUseVacatedSlot(
         int changeTick,
@@ -231,7 +235,8 @@ public final class OffhandSwapListener implements Listener {
         int arrivedSlot,
         int reportedSlot,
         int vacatedSlot,
-        boolean vacatedHoldsDrop
+        boolean vacatedHoldsDrop,
+        boolean vacatedIsEmpty
     ) {
         // Same tick only. A selection change from an earlier tick is the
         // player scrolling, not Geyser's pre-drop reset, and reaching back to
@@ -243,7 +248,24 @@ public final class OffhandSwapListener implements Listener {
         if (arrivedSlot != reportedSlot || vacatedSlot == reportedSlot) {
             return false;
         }
-        return vacatedHoldsDrop;
+        // An emptied slot is the signature of the gesture, not a reason to
+        // distrust it. Requiring the slot to still hold the dropped stack made
+        // the whole feature dead for its main use: dropping the single item you
+        // are holding — a sword — empties the slot, so the corroboration could
+        // never succeed and the source slot silently fell back to whatever
+        // Geyser had just selected. The live trace is unambiguous:
+        //
+        //   Held-slot change: 2 -> 0     (Geyser's pre-drop reset)
+        //   drop WOODEN_SWORDx1, slot 2 now empty
+        //   aborted: held slot 0 holds BIRCH_PLANKS
+        //
+        // Empty is safe to accept here because the player cannot drop from a
+        // slot that was already empty: Geyser moved off slot 2 precisely
+        // because that was the selected slot when the drop was made. And even
+        // if this ever did pick the wrong slot, the commit path is a pure
+        // exchange — the entity's items go to the off-hand and the off-hand's
+        // go to the slot — so no count can change either way.
+        return vacatedHoldsDrop || vacatedIsEmpty;
     }
 
     @EventHandler(priority = EventPriority.HIGHEST)

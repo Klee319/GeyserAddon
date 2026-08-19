@@ -164,26 +164,56 @@ class OffhandSwapListenerTest {
             // The observed Geyser behaviour: on the drop tick it moves the
             // selection from the real slot (4) to slot 0, then forwards the
             // drop. Slot 4 still holds the dropped stack, so it is the source.
-            assertThat(OffhandSwapListener.shouldUseVacatedSlot(100, 100, 0, 0, 4, true))
+            assertThat(OffhandSwapListener.shouldUseVacatedSlot(100, 100, 0, 0, 4, true, false))
                 .isTrue();
 
             // An earlier tick's change is the player scrolling. Reaching back
             // to it would swap a stack they deliberately left behind.
-            assertThat(OffhandSwapListener.shouldUseVacatedSlot(99, 100, 0, 0, 4, true))
+            assertThat(OffhandSwapListener.shouldUseVacatedSlot(99, 100, 0, 0, 4, true, false))
                 .isFalse();
 
             // The recorded move does not explain where we are now, so it says
             // nothing about this drop.
-            assertThat(OffhandSwapListener.shouldUseVacatedSlot(100, 100, 3, 0, 4, true))
+            assertThat(OffhandSwapListener.shouldUseVacatedSlot(100, 100, 3, 0, 4, true, false))
                 .isFalse();
 
             // Nothing actually moved.
-            assertThat(OffhandSwapListener.shouldUseVacatedSlot(100, 100, 4, 4, 4, true))
+            assertThat(OffhandSwapListener.shouldUseVacatedSlot(100, 100, 4, 4, 4, true, false))
                 .isFalse();
 
-            // Timing lines up but the slot does not hold the dropped item.
-            // Writing to it anyway is exactly how a swap loses items.
-            assertThat(OffhandSwapListener.shouldUseVacatedSlot(100, 100, 0, 0, 4, false))
+            // Timing lines up but the slot holds something unrelated. Writing
+            // to it anyway is exactly how a swap loses items.
+            assertThat(OffhandSwapListener.shouldUseVacatedSlot(100, 100, 0, 0, 4, false, false))
+                .isFalse();
+        }
+
+        @Test
+        @DisplayName("a slot emptied by the drop is still the source slot")
+        void emptiedVacatedSlotIsStillTheSource() {
+            // The case that made the whole gesture dead in practice. Dropping
+            // the one item you are holding — the normal way to ask for an
+            // off-hand swap — leaves the slot EMPTY, so demanding that it still
+            // hold the dropped stack could never be satisfied. Recorded live:
+            //
+            //   Held-slot change for .Klee3192821: 2 -> 0
+            //   candidate: heldSlot=0, dropped=WOODEN_SWORDx1, hotbar[2]=empty
+            //   aborted: held slot 0 holds BIRCH_PLANKSx1
+            assertThat(OffhandSwapListener.shouldUseVacatedSlot(100, 100, 0, 0, 2, false, true))
+                .isTrue();
+        }
+
+        @Test
+        @DisplayName("an emptied slot still has to pass every timing check")
+        void emptiedSlotDoesNotBypassTheOtherGuards() {
+            // Accepting "empty" must widen only the corroboration, never the
+            // window. An empty hotbar slot is otherwise the most common state
+            // there is, so without these the guard would fire on unrelated
+            // drops constantly.
+            assertThat(OffhandSwapListener.shouldUseVacatedSlot(99, 100, 0, 0, 2, false, true))
+                .isFalse();
+            assertThat(OffhandSwapListener.shouldUseVacatedSlot(100, 100, 3, 0, 2, false, true))
+                .isFalse();
+            assertThat(OffhandSwapListener.shouldUseVacatedSlot(100, 100, 2, 2, 2, false, true))
                 .isFalse();
         }
 
