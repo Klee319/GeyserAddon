@@ -224,11 +224,11 @@ public final class GeyserExtraPaper extends JavaPlugin {
         discordSRVSkinHook.tryRegister();
 
         getServer().getScheduler().runTask(this, () -> {
-            int missing = bedrockSkinApplier.repairOnlinePlayers();
-            if (missing > 0) {
-                getLogger().info("[BedrockSkin] " + missing
-                    + " Bedrock player(s) already online are missing their skin;"
-                    + " repairing from the GeyserMC API.");
+            int online = bedrockSkinApplier.repairOnlinePlayers();
+            if (online > 0) {
+                getLogger().info("[BedrockSkin] " + online
+                    + " Bedrock player(s) already online; verifying their skins"
+                    + " against the GeyserMC API.");
             }
         });
 
@@ -909,11 +909,11 @@ public final class GeyserExtraPaper extends JavaPlugin {
             // Covers a plugin reload: players already connected never fire
             // PlayerJoinEvent again, so the join-time repair would miss them.
             if (bedrockSkinApplier != null) {
-                int missing = bedrockSkinApplier.repairOnlinePlayers();
-                if (missing > 0) {
-                    getLogger().info("[BedrockSkin] " + missing
-                        + " Bedrock player(s) already online are missing their skin;"
-                        + " repairing from the GeyserMC API.");
+                int online = bedrockSkinApplier.repairOnlinePlayers();
+                if (online > 0) {
+                    getLogger().info("[BedrockSkin] " + online
+                        + " Bedrock player(s) already online; verifying their skins"
+                        + " against the GeyserMC API.");
                 }
             }
 

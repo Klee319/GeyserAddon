@@ -35,11 +35,22 @@ import java.util.Objects;
  * property Floodgate would have written. Nothing is faked or approximated: the
  * value and signature are Mojang's own, byte for byte.</p>
  *
- * <p><b>Never fights Floodgate.</b> The property is only written when the
- * profile genuinely lacks one, re-checked on the main thread immediately before
- * the write. If Floodgate starts working again — a fixed build, a Velocity
- * downgrade — this listener silently stops doing anything, and the log line it
- * emits per repair is the signal that it is still needed.</p>
+ * <p><b>Presence is not correctness.</b> An earlier version stood down the
+ * moment the profile carried any {@code textures} property at all. On this
+ * network that made it a no-op: {@code floodgate-spigot} is installed on the
+ * backend as well and does put <em>a</em> property there, so the repair never
+ * ran while every Bedrock player still rendered as Steve — and because the
+ * stand-down was logged at FINE, it left no trace either. The check is now
+ * against the authoritative skin rather than against mere presence: the
+ * property is replaced when it names a different texture, or when it carries no
+ * signature. An identical, signed property is left exactly as it is, so a
+ * working Floodgate still makes this listener do nothing.</p>
+ *
+ * <p><b>What it will not do.</b> The comparison target is the player's own
+ * Bedrock skin from the GeyserMC API, so "different" means "not what this player
+ * actually looks like". A cosmetics or nick plugin that deliberately reskins a
+ * Bedrock player would be overridden — there is no such plugin on this network,
+ * and the alternative is the silent no-op this replaced.</p>
  */
 public final class BedrockSkinApplier implements Listener {
 
@@ -65,19 +76,11 @@ public final class BedrockSkinApplier implements Listener {
             return;
         }
 
-        if (hasTextures(player.getPlayerProfile())) {
-            plugin.getLogger().fine(() -> "[BedrockSkin] " + player.getName()
-                + " already carries a textures property — nothing to repair.");
-            // Still cache it: player heads of this player need the hash too.
-            skins.warm(player.getUniqueId());
-            return;
-        }
-
-        // No delay before the fetch. Waiting on the off-chance Floodgate lands
-        // it late would only leave the player as Steve for that whole window;
-        // the re-check below covers the race for free, because the fetch itself
-        // takes long enough for a late delivery to have happened.
-        skins.resolve(player.getUniqueId(), skin -> applyIfStillMissing(player, skin));
+        // Always fetch, even when a property is already there: only the
+        // authoritative skin can say whether the one on the profile is the right
+        // one. The lookup is cached per player and costs one request per join at
+        // worst. The decision itself happens on the main thread in reconcile().
+        skins.resolve(player.getUniqueId(), skin -> reconcile(player, skin));
     }
 
     @EventHandler
@@ -96,46 +99,63 @@ public final class BedrockSkinApplier implements Listener {
      * @return how many Bedrock players were found to be missing a skin
      */
     public int repairOnlinePlayers() {
-        int missing = 0;
+        int bedrock = 0;
         for (Player player : plugin.getServer().getOnlinePlayers()) {
             if (!BedrockPlayerUtil.isBedrockPlayer(player)) {
                 continue;
             }
-            if (hasTextures(player.getPlayerProfile())) {
-                skins.warm(player.getUniqueId());
-                continue;
-            }
-            missing++;
-            skins.resolve(player.getUniqueId(), skin -> applyIfStillMissing(player, skin));
+            bedrock++;
+            skins.resolve(player.getUniqueId(), skin -> reconcile(player, skin));
         }
-        return missing;
+        return bedrock;
     }
 
     /**
-     * Writes the property, on the main thread, unless something supplied one
-     * while the lookup was in flight.
+     * Compares what the profile carries against the authoritative skin and
+     * writes only when they disagree. Runs on the main thread.
      */
-    private void applyIfStillMissing(Player player, BedrockSkinService.BedrockSkin skin) {
+    private void reconcile(Player player, BedrockSkinService.BedrockSkin skin) {
         if (!player.isOnline()) {
             return;
         }
 
         PlayerProfile profile = player.getPlayerProfile();
-        if (hasTextures(profile)) {
-            plugin.getLogger().fine(() -> "[BedrockSkin] " + player.getName()
-                + " gained a textures property while the lookup ran — leaving it alone.");
+        ProfileProperty current = texturesOf(profile.getProperties());
+
+        if (current == null) {
+            write(player, profile, skin, "Floodgate delivered no textures property");
             return;
         }
 
+        String currentId = BedrockSkinService.textureIdFromValue(current.getValue());
+        boolean signed = current.getSignature() != null && !current.getSignature().isEmpty();
+        if (skin.textureId().equals(currentId) && signed) {
+            plugin.getLogger().fine(() -> "[BedrockSkin] " + player.getName()
+                + " already carries the correct signed skin — nothing to repair.");
+            return;
+        }
+
+        // Two distinct failures, one repair. A different texture means the
+        // delivered skin is not this player's; an unsigned one means the client
+        // has no way to trust it. Both are worth replacing with Mojang's own
+        // signed copy, and naming which it was is what makes the log usable.
+        write(player, profile, skin, skin.textureId().equals(currentId)
+            ? "the delivered property carried no signature"
+            : "the delivered property named a different texture ("
+                + shortHash(currentId == null ? "(undecodable)" : currentId) + ")");
+    }
+
+    private void write(Player player, PlayerProfile profile,
+                       BedrockSkinService.BedrockSkin skin, String reason) {
         try {
             profile.setProperty(new ProfileProperty(TEXTURES, skin.value(), skin.signature()));
             // setPlayerProfile is what makes the change visible: Paper re-sends
             // the player-info and respawn packets so every other client redraws
             // the skin, rather than only changing it for future viewers.
             player.setPlayerProfile(profile);
-            plugin.getLogger().info("[BedrockSkin] Applied the missing skin for "
+            plugin.getLogger().info("[BedrockSkin] Applied the skin for "
                 + player.getName() + " (texture " + shortHash(skin.textureId())
-                + "). Floodgate did not deliver it.");
+                + ") — " + reason + ".");
         } catch (RuntimeException e) {
             plugin.getLogger().warning("[BedrockSkin] Could not apply the skin for "
                 + player.getName() + " (" + e.getClass().getSimpleName()
@@ -143,34 +163,31 @@ public final class BedrockSkinApplier implements Listener {
         }
     }
 
-    private static boolean hasTextures(PlayerProfile profile) {
-        return profile != null && hasTextures(profile.getProperties());
-    }
-
     /**
-     * Whether a set of profile properties already carries a usable skin.
+     * The {@code textures} property in a profile, or null when there is none
+     * that could carry a skin.
      *
      * <p>An empty value counts as absent: Floodgate's own applier treats a
      * blank {@code textures} value as "no skin", and so must this, or a
-     * placeholder property would permanently suppress the repair.</p>
+     * placeholder property would be compared against instead of replaced.</p>
      *
      * <p>Takes the property set rather than the profile so it can be tested
      * without a live server — {@code PlayerProfile} is an interface that only
      * CraftBukkit implements.</p>
      */
-    static boolean hasTextures(Collection<ProfileProperty> properties) {
+    static ProfileProperty texturesOf(Collection<ProfileProperty> properties) {
         if (properties == null) {
-            return false;
+            return null;
         }
         for (ProfileProperty property : properties) {
             if (property != null
                 && TEXTURES.equals(property.getName())
                 && property.getValue() != null
                 && !property.getValue().isEmpty()) {
-                return true;
+                return property;
             }
         }
-        return false;
+        return null;
     }
 
     private static String shortHash(String hash) {

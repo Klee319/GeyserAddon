@@ -289,7 +289,7 @@ public final class BedrockSkinService {
     }
 
     /** The texture hash carried by the signed profile JSON, or null. */
-    static String textureIdFromValue(String base64Value) {
+    public static String textureIdFromValue(String base64Value) {
         try {
             String decoded = new String(
                 Base64.getDecoder().decode(base64Value), StandardCharsets.UTF_8);
