@@ -97,6 +97,10 @@ public final class GeyserExtraPaper extends JavaPlugin {
     /** Set from general.skinFixOnlyMode; read by onDisable to skip the full teardown. */
     private boolean skinFixOnlyMode;
 
+    // Rescales the damage in outbound item packets so Bedrock draws the right
+    // durability bar for items with an overridden max_damage. Null when off.
+    private com.geyserextra.paper.durability.BedrockDurabilityBarScaler durabilityBarScaler;
+
     // Per-player display settings persistence and display orchestration
     private PlayerSettingsManager playerSettingsManager;
     private DisplayManager displayManager;
@@ -252,6 +256,9 @@ public final class GeyserExtraPaper extends JavaPlugin {
         }
         if (bedrockEnchantmentHandler != null) {
             bedrockEnchantmentHandler.cleanup();
+        }
+        if (durabilityBarScaler != null) {
+            durabilityBarScaler.cleanup();
         }
         // TooltipCommand is now stateless — no cleanup needed
 
@@ -772,6 +779,18 @@ public final class GeyserExtraPaper extends JavaPlugin {
             );
         } else if (config.general().debugMode()) {
             getLogger().fine("OffhandSwapListener disabled by config (general.sneakDropOffhandSwapEnabled=false)");
+        }
+
+        // Rescale durability for Bedrock so items with a custom max_damage draw
+        // the right bar. Requires ProtocolLib, which checkDependencies already
+        // made mandatory.
+        if (config.general().bedrockDurabilityBarFixEnabled()) {
+            durabilityBarScaler =
+                new com.geyserextra.paper.durability.BedrockDurabilityBarScaler(this);
+            durabilityBarScaler.register();
+        } else {
+            getLogger().fine("BedrockDurabilityBarScaler disabled by config"
+                + " (general.bedrockDurabilityBarFixEnabled=false)");
         }
 
         // Register elytra flight workaround for Bedrock gliding without elytra

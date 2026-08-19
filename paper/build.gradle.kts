@@ -53,6 +53,12 @@ dependencies {
     // add a Bukkit harness, so tests still must not boot a server or touch
     // registry-backed types like ItemStack.
     testImplementation("io.papermc.paper:paper-api:1.21.11-R0.1-SNAPSHOT")
+    // Same reason as paper-api above, for the same reason it is easy to miss:
+    // a class that merely *names* a ProtocolLib type in a field or signature
+    // fails to load with NoClassDefFoundError the moment a test touches it,
+    // even when the method under test is pure arithmetic. Without this, the
+    // durability rescale could not be tested at all.
+    testImplementation("net.dmulloy2:ProtocolLib:5.4.0")
 }
 
 tasks.test {

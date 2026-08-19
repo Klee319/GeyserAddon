@@ -215,6 +215,8 @@ public final class GeyserExtraConfig {
          * behaviour it already had.
          */
         private final boolean skinFixOnlyMode;
+        /** Boxed for the same reason as {@link #bedrockSkinFixEnabled}: absent must mean on. */
+        private final Boolean bedrockDurabilityBarFixEnabled;
 
         public GeneralConfig() {
             this.enabled = true;
@@ -224,6 +226,7 @@ public final class GeyserExtraConfig {
             this.sneakDropOffhandSwapEnabled = true;
             this.bedrockSkinFixEnabled = true;
             this.skinFixOnlyMode = false;
+            this.bedrockDurabilityBarFixEnabled = true;
         }
 
         public GeneralConfig(boolean enabled, boolean debugMode,
@@ -235,7 +238,7 @@ public final class GeyserExtraConfig {
                              int workerThreads, boolean tooltipDefaultEnabled,
                              boolean sneakDropOffhandSwapEnabled) {
             this(enabled, debugMode, workerThreads, tooltipDefaultEnabled,
-                sneakDropOffhandSwapEnabled, true, false);
+                sneakDropOffhandSwapEnabled, true, false, true);
         }
 
         public GeneralConfig(boolean enabled, boolean debugMode,
@@ -243,6 +246,16 @@ public final class GeyserExtraConfig {
                              boolean sneakDropOffhandSwapEnabled,
                              boolean bedrockSkinFixEnabled,
                              boolean skinFixOnlyMode) {
+            this(enabled, debugMode, workerThreads, tooltipDefaultEnabled,
+                sneakDropOffhandSwapEnabled, bedrockSkinFixEnabled, skinFixOnlyMode, true);
+        }
+
+        public GeneralConfig(boolean enabled, boolean debugMode,
+                             int workerThreads, boolean tooltipDefaultEnabled,
+                             boolean sneakDropOffhandSwapEnabled,
+                             boolean bedrockSkinFixEnabled,
+                             boolean skinFixOnlyMode,
+                             boolean bedrockDurabilityBarFixEnabled) {
             this.enabled = enabled;
             this.debugMode = debugMode;
             this.workerThreads = workerThreads > 0 ? workerThreads : 2;
@@ -250,6 +263,7 @@ public final class GeyserExtraConfig {
             this.sneakDropOffhandSwapEnabled = sneakDropOffhandSwapEnabled;
             this.bedrockSkinFixEnabled = bedrockSkinFixEnabled;
             this.skinFixOnlyMode = skinFixOnlyMode;
+            this.bedrockDurabilityBarFixEnabled = bedrockDurabilityBarFixEnabled;
         }
 
         public boolean enabled() {
@@ -325,6 +339,22 @@ public final class GeyserExtraConfig {
          */
         public boolean skinFixOnlyMode() {
             return skinFixOnlyMode;
+        }
+
+        /**
+         * Whether to rescale the damage value sent to Bedrock players so the
+         * durability bar of an item with an overridden {@code max_damage} draws
+         * at the right proportion.
+         *
+         * <p>Default: true. Bedrock has no per-stack maximum durability, so
+         * without this an item given 3000 durability drains its bar against the
+         * base item's vanilla maximum and turns red while most of the real
+         * durability remains. Only the outbound packet is rewritten; the stored
+         * item is untouched. Set to false on a server that never overrides
+         * {@code max_damage}, where the rescale can only ever be a no-op.</p>
+         */
+        public boolean bedrockDurabilityBarFixEnabled() {
+            return bedrockDurabilityBarFixEnabled == null || bedrockDurabilityBarFixEnabled;
         }
     }
 

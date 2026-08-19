@@ -81,6 +81,18 @@ class GeneralConfigBedrockSkinFixTest {
     }
 
     @Test
+    @DisplayName("the durability bar fix is on for a config that predates it")
+    void durabilityBarFixDefaultsOn() {
+        // Same hazard as the skin fix: a primitive here would have silently
+        // switched the rescale off on every existing install.
+        assertThat(JsonUtil.fromJson("{\"general\":{\"enabled\":true}}", GeyserExtraConfig.class)
+            .general().bedrockDurabilityBarFixEnabled()).isTrue();
+        assertThat(JsonUtil.fromJson(
+            "{\"general\":{\"bedrockDurabilityBarFixEnabled\":false}}", GeyserExtraConfig.class)
+            .general().bedrockDurabilityBarFixEnabled()).isFalse();
+    }
+
+    @Test
     @DisplayName("the constructed default is enabled and survives a save/load round trip")
     void defaultRoundTripsThroughJson() {
         // The written config must state the value explicitly, otherwise the
