@@ -11,6 +11,7 @@ import com.comphenix.protocol.events.PacketListener;
 import com.geyserextra.core.api.CustomItemMapping;
 import com.geyserextra.core.config.GeyserExtraConfig.EnchantmentConfig;
 import com.geyserextra.paper.GeyserExtraPaper;
+import com.geyserextra.paper.inventory.BedrockContainerCmdStripper;
 import com.geyserextra.paper.pack.JavaPackLangReader;
 
 import io.papermc.paper.datacomponent.DataComponentTypes;
@@ -89,7 +90,7 @@ public final class BedrockEnchantmentHandler implements Listener {
 
     private final GeyserExtraPaper plugin;
     private final FloodgateApi floodgateApi;
-    private final BedrockEnchantmentTablePacketStripper stripper;
+    private final BedrockContainerCmdStripper stripper;
     private final Map<String, AnvilRecipe> customRecipes;
     private final Map<UUID, CachedAnvilResult> bedrockAnvilCache;
     private final List<PacketListener> registeredListeners = new ArrayList<>();
@@ -107,7 +108,7 @@ public final class BedrockEnchantmentHandler implements Listener {
      */
     public BedrockEnchantmentHandler(
         GeyserExtraPaper plugin,
-        BedrockEnchantmentTablePacketStripper stripper
+        BedrockContainerCmdStripper stripper
     ) {
         this.plugin = Objects.requireNonNull(plugin, "plugin must not be null");
         this.stripper = Objects.requireNonNull(stripper, "stripper must not be null");

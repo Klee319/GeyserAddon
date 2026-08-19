@@ -11,7 +11,7 @@ import com.geyserextra.paper.listener.OffhandInteractionListener;
 import com.geyserextra.paper.listener.OffhandSwapListener;
 import com.geyserextra.paper.enchantment.BedrockAnvilSimulator;
 import com.geyserextra.paper.enchantment.BedrockEnchantmentHandler;
-import com.geyserextra.paper.enchantment.BedrockEnchantmentTablePacketStripper;
+import com.geyserextra.paper.inventory.BedrockContainerCmdStripper;
 import com.geyserextra.paper.recipe.CraftingRecipeHandler;
 import com.geyserextra.paper.recipe.SmithingRecipeHandler;
 import com.geyserextra.core.api.CustomItemMapping;
@@ -79,7 +79,7 @@ public final class GeyserExtraPaper extends JavaPlugin {
     // Recipe handlers and enchantment handler for Bedrock compatibility
     private BedrockEnchantmentHandler bedrockEnchantmentHandler;
     private BedrockAnvilSimulator bedrockAnvilSimulator;
-    private BedrockEnchantmentTablePacketStripper bedrockEnchantmentTableStripper;
+    private BedrockContainerCmdStripper bedrockContainerCmdStripper;
     private SmithingRecipeHandler smithingRecipeHandler;
     private CraftingRecipeHandler craftingRecipeHandler;
 
@@ -100,6 +100,7 @@ public final class GeyserExtraPaper extends JavaPlugin {
     // Rescales the damage in outbound item packets so Bedrock draws the right
     // durability bar for items with an overridden max_damage. Null when off.
     private com.geyserextra.paper.durability.BedrockDurabilityBarScaler durabilityBarScaler;
+    private com.geyserextra.paper.smithing.BedrockSmithingTableCmdStripper smithingCmdStripper;
 
     // Per-player display settings persistence and display orchestration
     private PlayerSettingsManager playerSettingsManager;
@@ -259,6 +260,9 @@ public final class GeyserExtraPaper extends JavaPlugin {
         }
         if (durabilityBarScaler != null) {
             durabilityBarScaler.cleanup();
+        }
+        if (smithingCmdStripper != null) {
+            smithingCmdStripper.cleanup();
         }
         // TooltipCommand is now stateless — no cleanup needed
 
@@ -655,8 +659,8 @@ public final class GeyserExtraPaper extends JavaPlugin {
     private void initializeRecipeHandlers() {
         // Why stripper first: BedrockEnchantmentHandler depends on the stripper
         // for thread-safe inventory state queries from packet listeners.
-        bedrockEnchantmentTableStripper = new BedrockEnchantmentTablePacketStripper(this);
-        bedrockEnchantmentHandler = new BedrockEnchantmentHandler(this, bedrockEnchantmentTableStripper);
+        bedrockContainerCmdStripper = new BedrockContainerCmdStripper(this);
+        bedrockEnchantmentHandler = new BedrockEnchantmentHandler(this, bedrockContainerCmdStripper);
         bedrockAnvilSimulator = new BedrockAnvilSimulator(this);
         smithingRecipeHandler = new SmithingRecipeHandler(this);
         craftingRecipeHandler = new CraftingRecipeHandler(this);
@@ -742,8 +746,8 @@ public final class GeyserExtraPaper extends JavaPlugin {
 
         // Register the stripper FIRST so its inventory state is populated
         // by InventoryOpenEvent before any handler queries it from packet threads.
-        if (bedrockEnchantmentTableStripper != null) {
-            getServer().getPluginManager().registerEvents(bedrockEnchantmentTableStripper, this);
+        if (bedrockContainerCmdStripper != null) {
+            getServer().getPluginManager().registerEvents(bedrockContainerCmdStripper, this);
         }
 
         // Register recipe handlers for Bedrock compatibility
@@ -791,6 +795,18 @@ public final class GeyserExtraPaper extends JavaPlugin {
         } else {
             getLogger().fine("BedrockDurabilityBarScaler disabled by config"
                 + " (general.bedrockDurabilityBarFixEnabled=false)");
+        }
+
+        // Let Bedrock players netherite-upgrade custom-model-data gear. Depends
+        // on the container stripper for the open-inventory state, so it must be
+        // constructed after it.
+        if (config.general().bedrockSmithingCmdStripEnabled() && bedrockContainerCmdStripper != null) {
+            smithingCmdStripper = new com.geyserextra.paper.smithing.BedrockSmithingTableCmdStripper(
+                this, bedrockContainerCmdStripper);
+            smithingCmdStripper.register();
+        } else if (config.general().debugMode()) {
+            getLogger().fine("BedrockSmithingTableCmdStripper disabled by config"
+                + " (general.bedrockSmithingCmdStripEnabled=false)");
         }
 
         // Register elytra flight workaround for Bedrock gliding without elytra

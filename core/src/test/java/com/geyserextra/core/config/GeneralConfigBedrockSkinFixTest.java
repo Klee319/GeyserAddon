@@ -93,6 +93,21 @@ class GeneralConfigBedrockSkinFixTest {
     }
 
     @Test
+    @DisplayName("the smithing CMD strip is on for a config that predates it")
+    void smithingCmdStripDefaultsOn() {
+        // Third flag with the same hazard. Left primitive, every server whose
+        // config.json predates the netherite-upgrade fix would have loaded it as
+        // false and kept the upgrade broken, with `= true` in the constructor
+        // sitting there to mislead whoever went looking.
+        assertThat(JsonUtil.fromJson("{\"general\":{\"enabled\":true}}", GeyserExtraConfig.class)
+            .general().bedrockSmithingCmdStripEnabled()).isTrue();
+        assertThat(JsonUtil.fromJson(
+            "{\"general\":{\"bedrockSmithingCmdStripEnabled\":false}}", GeyserExtraConfig.class)
+            .general().bedrockSmithingCmdStripEnabled()).isFalse();
+        assertThat(new GeyserExtraConfig().general().bedrockSmithingCmdStripEnabled()).isTrue();
+    }
+
+    @Test
     @DisplayName("the constructed default is enabled and survives a save/load round trip")
     void defaultRoundTripsThroughJson() {
         // The written config must state the value explicitly, otherwise the

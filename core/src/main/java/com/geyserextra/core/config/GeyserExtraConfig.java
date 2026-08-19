@@ -217,6 +217,8 @@ public final class GeyserExtraConfig {
         private final boolean skinFixOnlyMode;
         /** Boxed for the same reason as {@link #bedrockSkinFixEnabled}: absent must mean on. */
         private final Boolean bedrockDurabilityBarFixEnabled;
+        /** Boxed for the same reason as {@link #bedrockSkinFixEnabled}: absent must mean on. */
+        private final Boolean bedrockSmithingCmdStripEnabled;
 
         public GeneralConfig() {
             this.enabled = true;
@@ -227,6 +229,7 @@ public final class GeyserExtraConfig {
             this.bedrockSkinFixEnabled = true;
             this.skinFixOnlyMode = false;
             this.bedrockDurabilityBarFixEnabled = true;
+            this.bedrockSmithingCmdStripEnabled = true;
         }
 
         public GeneralConfig(boolean enabled, boolean debugMode,
@@ -256,6 +259,18 @@ public final class GeyserExtraConfig {
                              boolean bedrockSkinFixEnabled,
                              boolean skinFixOnlyMode,
                              boolean bedrockDurabilityBarFixEnabled) {
+            this(enabled, debugMode, workerThreads, tooltipDefaultEnabled,
+                sneakDropOffhandSwapEnabled, bedrockSkinFixEnabled, skinFixOnlyMode,
+                bedrockDurabilityBarFixEnabled, true);
+        }
+
+        public GeneralConfig(boolean enabled, boolean debugMode,
+                             int workerThreads, boolean tooltipDefaultEnabled,
+                             boolean sneakDropOffhandSwapEnabled,
+                             boolean bedrockSkinFixEnabled,
+                             boolean skinFixOnlyMode,
+                             boolean bedrockDurabilityBarFixEnabled,
+                             boolean bedrockSmithingCmdStripEnabled) {
             this.enabled = enabled;
             this.debugMode = debugMode;
             this.workerThreads = workerThreads > 0 ? workerThreads : 2;
@@ -264,6 +279,7 @@ public final class GeyserExtraConfig {
             this.bedrockSkinFixEnabled = bedrockSkinFixEnabled;
             this.skinFixOnlyMode = skinFixOnlyMode;
             this.bedrockDurabilityBarFixEnabled = bedrockDurabilityBarFixEnabled;
+            this.bedrockSmithingCmdStripEnabled = bedrockSmithingCmdStripEnabled;
         }
 
         public boolean enabled() {
@@ -355,6 +371,25 @@ public final class GeyserExtraConfig {
          */
         public boolean bedrockDurabilityBarFixEnabled() {
             return bedrockDurabilityBarFixEnabled == null || bedrockDurabilityBarFixEnabled;
+        }
+
+        /**
+         * Whether to present items as their vanilla base material to a Bedrock
+         * player who has a smithing table open.
+         *
+         * <p>Default: true. Bedrock's smithing table only accepts items named by
+         * a recipe the client holds, and every netherite-upgrade recipe names
+         * vanilla identifiers — so an item with {@code custom_model_data}, which
+         * Geyser registers under {@code geyser_custom:}, cannot be placed in the
+         * base slot at all and the upgrade that works fine on Java is simply
+         * unavailable. Stripping the component from the outbound packet restores
+         * it; the stored item and the resulting upgrade are unchanged. The cost
+         * is that custom artwork renders as its vanilla base for as long as the
+         * smithing GUI is open. Set to false on a server with no custom-model
+         * equipment, where the strip can only ever be a no-op.</p>
+         */
+        public boolean bedrockSmithingCmdStripEnabled() {
+            return bedrockSmithingCmdStripEnabled == null || bedrockSmithingCmdStripEnabled;
         }
     }
 

@@ -1,4 +1,4 @@
-package com.geyserextra.paper.enchantment;
+package com.geyserextra.paper.inventory;
 
 import com.comphenix.protocol.events.PacketContainer;
 import com.geyserextra.paper.GeyserExtraPaper;
@@ -26,7 +26,16 @@ import java.util.concurrent.atomic.AtomicBoolean;
 /**
  * Tracks each player's currently-open top inventory type and exposes thread-safe
  * packet-level helpers that strip the {@code CUSTOM_MODEL_DATA} component from
- * outbound items destined for an enchantment table.
+ * outbound items destined for a vanilla utility container.
+ *
+ * <p>Two containers need this, for the same underlying reason and with the same
+ * cure. Geyser registers CMD-bearing items as Bedrock-side custom items
+ * ({@code geyser_custom:*}) via the auto-generated pack, and Bedrock's
+ * client-side logic for these containers only understands vanilla identifiers:
+ * the enchantment table crashes computing a preview, and the smithing table
+ * refuses the item outright. Removing the CMD component from the outbound packet
+ * makes Geyser forward the item as its vanilla base material, which the client
+ * handles normally. Server-side state is never touched.</p>
  *
  * <p>Why a tracker instead of {@code player.getOpenInventory()} from the packet
  * thread: ProtocolLib packet listeners run on netty I/O threads, where the Bukkit
@@ -39,7 +48,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * the per-player state, and keeping them in one file avoids a tracker without a
  * client and a stripper without state.</p>
  */
-public final class BedrockEnchantmentTablePacketStripper implements Listener {
+public final class BedrockContainerCmdStripper implements Listener {
 
     /** Wire value of {@code containerId} for the cursor / off-window SET_SLOT updates. */
     public static final int CURSOR_CONTAINER_ID = -1;
@@ -57,7 +66,7 @@ public final class BedrockEnchantmentTablePacketStripper implements Listener {
     // otherwise produce thousands of identical warnings per minute.
     private final AtomicBoolean fieldReadWarningEmitted = new AtomicBoolean(false);
 
-    public BedrockEnchantmentTablePacketStripper(GeyserExtraPaper plugin) {
+    public BedrockContainerCmdStripper(GeyserExtraPaper plugin) {
         this.plugin = Objects.requireNonNull(plugin, "plugin must not be null");
     }
 
@@ -91,13 +100,39 @@ public final class BedrockEnchantmentTablePacketStripper implements Listener {
     // ========================================================================
 
     /**
+     * Returns whether the player's open top inventory is one of {@code types}.
+     *
+     * <p>Takes several types because Bukkit keeps more than one constant for a
+     * single vanilla menu — {@link InventoryType#SMITHING} and
+     * {@link InventoryType#SMITHING_NEW} both exist on 1.21 — and a caller that
+     * guessed the wrong one would silently do nothing.</p>
+     *
+     * <p>Safe to call from any thread.</p>
+     */
+    public boolean isAtInventory(UUID playerId, InventoryType... types) {
+        if (playerId == null) {
+            return false;
+        }
+        InventoryType open = openTopInventoryType.get(playerId);
+        if (open == null) {
+            return false;
+        }
+        for (InventoryType type : types) {
+            if (open == type) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * Returns whether the player is known to currently have an enchantment table
      * (or any other vanilla {@link InventoryType#ENCHANTING}) open.
      *
      * <p>Safe to call from any thread.</p>
      */
     public boolean isAtEnchantmentTable(UUID playerId) {
-        return playerId != null && openTopInventoryType.get(playerId) == InventoryType.ENCHANTING;
+        return isAtInventory(playerId, InventoryType.ENCHANTING);
     }
 
     /**
@@ -124,18 +159,35 @@ public final class BedrockEnchantmentTablePacketStripper implements Listener {
     }
 
     /**
-     * Returns whether the SET_SLOT packet targets the input slot of an
-     * enchantment table that the given player has open.
+     * Returns whether the packet addresses the open top window of a player who
+     * currently has one of {@code types} open.
+     *
+     * <p>Works for both SET_SLOT and WINDOW_ITEMS, because both carry the same
+     * {@code containerId} field and neither {@code 0} (the player inventory) nor
+     * {@code -1} (the cursor) is a real window.</p>
      */
-    public boolean isEnchantmentTableInputSlot(UUID playerId, PacketContainer packet) {
-        if (!isAtEnchantmentTable(playerId)) {
+    public boolean isTopWindow(UUID playerId, PacketContainer packet, InventoryType... types) {
+        if (!isAtInventory(playerId, types)) {
             return false;
         }
         try {
             int containerId = readContainerId(packet);
-            if (containerId == 0 || containerId == CURSOR_CONTAINER_ID) {
-                return false;
-            }
+            return containerId != 0 && containerId != CURSOR_CONTAINER_ID;
+        } catch (Exception ex) {
+            logFieldReadFailure("SET_SLOT/WINDOW_ITEMS", ex);
+            return false;
+        }
+    }
+
+    /**
+     * Returns whether the SET_SLOT packet targets the input slot of an
+     * enchantment table that the given player has open.
+     */
+    public boolean isEnchantmentTableInputSlot(UUID playerId, PacketContainer packet) {
+        if (!isTopWindow(playerId, packet, InventoryType.ENCHANTING)) {
+            return false;
+        }
+        try {
             return readSetSlotIndex(packet) == 0;
         } catch (Exception ex) {
             logFieldReadFailure("SET_SLOT", ex);
@@ -145,8 +197,8 @@ public final class BedrockEnchantmentTablePacketStripper implements Listener {
 
     /**
      * Returns whether the SET_SLOT packet targets the cursor (windowId == -1
-     * and slot == -1). Combined with {@link #isAtEnchantmentTable(UUID)} the
-     * caller can decide whether the cursor item should also be stripped.
+     * and slot == -1). Combined with {@link #isAtInventory(UUID, InventoryType...)}
+     * the caller can decide whether the cursor item should also be stripped.
      */
     public boolean isCursorSetSlot(PacketContainer packet) {
         try {
@@ -163,16 +215,7 @@ public final class BedrockEnchantmentTablePacketStripper implements Listener {
      * window currently open for the given player.
      */
     public boolean isEnchantmentTableWindow(UUID playerId, PacketContainer packet) {
-        if (!isAtEnchantmentTable(playerId)) {
-            return false;
-        }
-        try {
-            int containerId = readContainerId(packet);
-            return containerId != 0 && containerId != CURSOR_CONTAINER_ID;
-        } catch (Exception ex) {
-            logFieldReadFailure("WINDOW_ITEMS", ex);
-            return false;
-        }
+        return isTopWindow(playerId, packet, InventoryType.ENCHANTING);
     }
 
     // ========================================================================
@@ -227,7 +270,7 @@ public final class BedrockEnchantmentTablePacketStripper implements Listener {
             plugin.getLogger().warning(
                 "CMD-strip: " + packetName + " field read failed ("
                     + ex.getClass().getSimpleName() + "): " + ex.getMessage()
-                    + " — Bedrock enchant-table crash workaround inactive for"
+                    + " — Bedrock container CMD-strip workaround inactive for"
                     + " subsequent packets of this type. Update ProtocolLib or"
                     + " report a Paper/ProtocolLib mismatch.");
             return;
