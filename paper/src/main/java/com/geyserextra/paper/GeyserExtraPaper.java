@@ -213,11 +213,33 @@ public final class GeyserExtraPaper extends JavaPlugin {
      * apply to them. The display manager stays off, so {@code /settings} only
      * records the preference here; it takes visible effect on the backend that
      * runs the displays.</p>
+     *
+     * <p><b>The durability bar rescale runs here too (2026-08-20).</b> It has
+     * the same shape as the skin repair: a Bedrock player carries their pickaxe
+     * from one backend to the next, so a fix that only exists on one of them is
+     * a fix that breaks the moment they walk through a portal. Reported from
+     * the live server for the resource backend — a TrinityForge netherite
+     * pickaxe at {@code damage=3784 / max_damage=4263} was sent unrescaled, so
+     * Bedrock drew it against its own 2031 and showed an empty bar with 11% of
+     * the real durability left. Like the commands, this rewrites nothing but
+     * the outbound packet: it never touches the shared extension folder, the
+     * resource pack, or the server-side {@code ItemStack}, so the reason this
+     * mode exists does not apply to it.</p>
      */
     private void enableSkinFixOnly() {
+        // Registered before the skin guard below on purpose: this one is not
+        // part of the skin repair and must not be switched off with it.
+        // checkDependencies has already made ProtocolLib mandatory.
+        if (config.general().bedrockDurabilityBarFixEnabled()) {
+            durabilityBarScaler =
+                new com.geyserextra.paper.durability.BedrockDurabilityBarScaler(this);
+            durabilityBarScaler.register();
+        }
+
         if (!config.general().bedrockSkinFixEnabled()) {
             getLogger().warning("GeyserExtra: general.skinFixOnlyMode is on but"
-                + " general.bedrockSkinFixEnabled is off — this plugin will do nothing."
+                + " general.bedrockSkinFixEnabled is off — neither the skin repair"
+                + " nor the player commands will run on this backend."
                 + " Enable one or remove the jar.");
             return;
         }
@@ -251,19 +273,25 @@ public final class GeyserExtraPaper extends JavaPlugin {
         registerCommands();
 
         getLogger().info("GeyserExtra: skin-fix-only mode."
-            + " Bedrock skin repair, the DiscordSRV avatar hook and the player commands"
-            + " are active; scanners, pack generation, recipe handlers and displays are not.");
+            + " Bedrock skin repair, the DiscordSRV avatar hook, the player commands"
+            + " and the durability bar rescale are active; scanners, pack generation,"
+            + " recipe handlers and displays are not.");
     }
 
     @Override
     public void onDisable() {
-        // Skin-fix-only mode never built the registries, the scanners or any of
-        // the ProtocolLib handlers, so the full teardown below would only find
-        // nulls — and saveRegistriesToSharedFolder would write into a folder
-        // this backend does not own.
+        // Skin-fix-only mode never built the registries or the scanners, so the
+        // full teardown below would mostly find nulls — and
+        // saveRegistriesToSharedFolder would write into a folder this backend
+        // does not own. The durability scaler is the one ProtocolLib listener
+        // this mode does register, so it is the one that has to be torn down
+        // here; leaving it would stack a second listener on every reload.
         if (skinFixOnlyMode) {
             if (discordSRVSkinHook != null) {
                 discordSRVSkinHook.unregister();
+            }
+            if (durabilityBarScaler != null) {
+                durabilityBarScaler.cleanup();
             }
             getLogger().fine("GeyserExtra Paper plugin disabled (skin-fix-only mode).");
             return;
