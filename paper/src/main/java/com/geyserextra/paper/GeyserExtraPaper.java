@@ -197,12 +197,22 @@ public final class GeyserExtraPaper extends JavaPlugin {
     }
 
     /**
-     * Enables nothing but the Bedrock skin repair.
+     * Enables the Bedrock skin repair, plus the player-facing commands.
      *
      * <p>Deliberately does not touch the registries, the scanners or the
      * extension data folder's pack output: this backend is a guest in a shared
      * folder that another backend owns, and writing into it is how two
      * generators end up overwriting each other's resource pack.</p>
+     *
+     * <p><b>Commands are registered here as well (2026-08-20).</b> A Bedrock
+     * player who walks to a secondary backend loses {@code /bmenu} and
+     * everything it fronts ({@code /offhand}, {@code /tooltip},
+     * {@code /advancements}, {@code /stats}, {@code /settings}) — reported from
+     * the live server for the resource backend. None of those touch the shared
+     * folder or the resource pack, so the reason this mode exists does not
+     * apply to them. The display manager stays off, so {@code /settings} only
+     * records the preference here; it takes visible effect on the backend that
+     * runs the displays.</p>
      */
     private void enableSkinFixOnly() {
         if (!config.general().bedrockSkinFixEnabled()) {
@@ -232,9 +242,17 @@ public final class GeyserExtraPaper extends JavaPlugin {
             }
         });
 
+        // 日本語表示名のキャッシュ。書き先はこのバックエンド自身の extension データフォルダで、
+        // 内容は同じ入力から決まるので、共有フォルダを奪い合うパック生成とは性質が違う。
+        // これを飛ばすと /tooltip と /advancements の表示が英語のままになる。
+        JapaneseTranslationLoader.loadAsync(getExtensionDataFolder(), getLogger());
+        // BedrockMenuCommand と SettingsCommand が要求するので、コマンド登録より先に作る。
+        initializePlayerSettings();
+        registerCommands();
+
         getLogger().info("GeyserExtra: skin-fix-only mode."
-            + " Bedrock skin repair and the DiscordSRV avatar hook are active;"
-            + " scanners, pack generation, recipe handlers, displays and commands are not.");
+            + " Bedrock skin repair, the DiscordSRV avatar hook and the player commands"
+            + " are active; scanners, pack generation, recipe handlers and displays are not.");
     }
 
     @Override
@@ -707,9 +725,12 @@ public final class GeyserExtraPaper extends JavaPlugin {
         // Settings command — per-player display settings via Floodgate CustomForm
         // Why: The callback wires SettingsCommand to DisplayManager so that display
         // changes (e.g., turning off BossBar) take effect immediately, not after 0.5s.
+        // skin-fix-only モードでは displayManager を起動していない。設定の保存だけは
+        // させたい(別バックエンドへ移れば効く)ので、通知先が無いときは何もしない。
+        java.util.function.Consumer<org.bukkit.entity.Player> onSettingsChanged =
+            displayManager != null ? displayManager::onSettingsChanged : player -> { };
         Objects.requireNonNull(getCommand("settings"))
-            .setExecutor(new SettingsCommand(this, playerSettingsManager,
-                displayManager::onSettingsChanged));
+            .setExecutor(new SettingsCommand(this, playerSettingsManager, onSettingsChanged));
 
         // Advancement command — browse advancements via forms
         Objects.requireNonNull(getCommand("advancements"))
