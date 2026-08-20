@@ -11,6 +11,22 @@ dependencies {
     // Gson is provided by Geyser runtime, but needed for compilation
     compileOnly("com.google.code.gson:gson:2.10.1")
 
+    // Geyser internals, for BedrockRecipeInjector only.
+    //
+    // Why the public API is not enough: Bedrock decides crafting results client-side, and the
+    // recipe list Geyser hands the client drops every ingredient's custom identity. Correcting
+    // that means sending our own CraftingDataPacket right after Geyser sends its own — and the
+    // public API exposes no downstream packet event, no server-transfer event, and no way to
+    // touch a session's recipe list. Hooking the internal packet translator is the only
+    // placement that survives the server re-sending recipes (every Bukkit.addRecipe and every
+    // backend switch make Geyser resend with cleanRecipes=true, wiping anything added earlier).
+    //
+    // Pin note: the deployed proxy runs Geyser 2.11.1-b1223. This is a moving snapshot, so a
+    // newer build can rename what we call. BedrockRecipeInjector therefore guards every entry
+    // point and disables itself on the first Throwable — a renamed internal costs Bedrock
+    // crafting hints, never the extension.
+    compileOnly("org.geysermc.geyser:core:2.11.1-SNAPSHOT")
+
     // Unit-test dependencies (JUnit 5 + AssertJ), matching the paper module.
     // Gson and the Geyser API are compileOnly above, so the test runtime has
     // to pull them in itself.
@@ -18,6 +34,9 @@ dependencies {
     testImplementation("org.assertj:assertj-core:3.25.3")
     testImplementation("com.google.code.gson:gson:2.10.1")
     testImplementation("org.geysermc.geyser:api:2.10.0-SNAPSHOT")
+    // BedrockRecipeTable is deliberately free of Geyser types so it can be tested on its own;
+    // BedrockRecipeInjector (which is not) has no unit tests for that reason.
+    testImplementation("org.junit.jupiter:junit-jupiter-params:5.10.2")
 }
 
 tasks.test {

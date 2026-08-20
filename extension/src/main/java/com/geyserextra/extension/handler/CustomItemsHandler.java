@@ -112,6 +112,17 @@ public class CustomItemsHandler {
     private final java.util.Set<String> registeredIconKeys = new java.util.HashSet<>();
 
     /**
+     * {@code <java base item>#<CMD>} to the Bedrock identifier actually registered for it.
+     *
+     * <p>Only definitions this handler really registered land here. An item that was skipped —
+     * a look-alike with no icon and no attachable, a duplicate another plugin already owns —
+     * has <b>no distinct Bedrock item</b>, so nothing on the client can address it. The recipe
+     * injector needs that distinction: writing a recipe against an unregistered item would
+     * silently produce one that can never match.</p>
+     */
+    private final Map<String, String> registeredBedrockIdentifiers = new HashMap<>();
+
+    /**
      * Creates a new CustomItemsHandler.
      *
      * @param extension    the parent extension instance
@@ -1087,7 +1098,21 @@ public class CustomItemsHandler {
         // aggregate count; per-item visibility is now only via the WARN
         // / ERROR paths for genuine failures.
         event.register(baseId, builder.build());
+        if (mapping.customModelData > 0 && mapping.baseItem != null) {
+            registeredBedrockIdentifiers.put(
+                mapping.baseItem + "#" + mapping.customModelData, bedrockId.toString());
+        }
         return true;
+    }
+
+    /**
+     * The Bedrock identifiers this handler registered, keyed by {@code <base item>#<CMD>}.
+     *
+     * <p>Used by the recipe injector to point a corrected recipe at the real custom item.
+     * Empty until {@code GeyserDefineCustomItemsEvent} has run.</p>
+     */
+    public Map<String, String> registeredBedrockIdentifiers() {
+        return Map.copyOf(registeredBedrockIdentifiers);
     }
 
     /**

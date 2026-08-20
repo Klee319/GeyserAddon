@@ -5,6 +5,7 @@
 package com.geyserextra.extension;
 
 import com.geyserextra.core.config.GeyserExtraConfig;
+import com.geyserextra.extension.bedrock.BedrockRecipeInjector;
 import com.geyserextra.extension.handler.CustomItemsHandler;
 import com.geyserextra.extension.handler.CustomSkullsHandler;
 import org.geysermc.event.subscribe.Subscribe;
@@ -50,6 +51,7 @@ public class GeyserExtraExtension implements Extension {
 
     private GeyserExtraConfig config;
     private CustomItemsHandler customItemsHandler;
+    private BedrockRecipeInjector bedrockRecipeInjector;
     private CustomSkullsHandler customSkullsHandler;
 
 
@@ -175,6 +177,37 @@ public class GeyserExtraExtension implements Extension {
     public void onPostInitialize(GeyserPostInitializeEvent event) {
         logger().debug("GeyserExtra fully initialized!");
         logger().debug("Data folder: " + dataFolder().toAbsolutePath());
+        startBedrockRecipeInjector();
+    }
+
+    /**
+     * Starts sending Bedrock clients recipes whose ingredients carry the real custom item.
+     *
+     * <p>Without this, every recipe with a custom ingredient is unmatched on Bedrock: the client
+     * computes crafting results itself and Geyser can only tell it the ingredient's vanilla base,
+     * so the player sees no result at all. The corrected tables come from the backend plugins via
+     * {@code <dataFolder>/bedrock-recipes/}.
+     *
+     * <p>Installed here because it needs the custom item registrations, which happen during
+     * {@code GeyserDefineCustomItemsEvent}. Any failure only costs Bedrock crafting hints, so it
+     * never propagates.
+     */
+    private void startBedrockRecipeInjector() {
+        if (customItemsHandler == null) {
+            logger().debug("[bedrock-recipes] custom items are off; nothing to correct");
+            return;
+        }
+        try {
+            bedrockRecipeInjector = new BedrockRecipeInjector(
+                customItemsHandler::registeredBedrockIdentifiers,
+                logger()::info, logger()::warning, logger()::debug);
+            bedrockRecipeInjector.reload(dataFolder());
+            bedrockRecipeInjector.install();
+        } catch (Throwable t) {
+            logger().warning("[bedrock-recipes] could not start the recipe injector ("
+                + t.getClass().getSimpleName() + ": " + t.getMessage()
+                + "); Bedrock crafting with custom ingredients stays broken");
+        }
     }
 
     /**
