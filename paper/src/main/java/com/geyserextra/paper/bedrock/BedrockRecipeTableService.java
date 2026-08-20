@@ -43,14 +43,22 @@ public final class BedrockRecipeTableService {
     private final Path extensionDataFolder;
     private final String backendId;
 
+    /**
+     * Kept in step with the shipped table so the smithing CMD stripper stops fighting the
+     * injected recipes. See {@link SmithingBaseExemptions} for why the two cancel out.
+     */
+    private final SmithingBaseExemptions smithingBaseExemptions;
+
     private BukkitTask task;
     private List<String> lastFingerprint = List.of();
 
-    public BedrockRecipeTableService(JavaPlugin plugin, Path extensionDataFolder, String backendId) {
+    public BedrockRecipeTableService(JavaPlugin plugin, Path extensionDataFolder, String backendId,
+                                     SmithingBaseExemptions smithingBaseExemptions) {
         this.plugin = plugin;
         this.pluginsFolder = plugin.getDataFolder().getParentFile().toPath();
         this.extensionDataFolder = extensionDataFolder;
         this.backendId = backendId;
+        this.smithingBaseExemptions = smithingBaseExemptions;
     }
 
     public void start() {
@@ -83,6 +91,11 @@ public final class BedrockRecipeTableService {
                 plugin.getLogger().fine("[bedrock-recipes] no source tables under "
                     + pluginsFolder.toAbsolutePath());
                 return;
+            }
+            if (smithingBaseExemptions != null) {
+                // Only after a successful collect: on a failure path the previous set stays, which
+                // matches the file the proxy is still serving.
+                smithingBaseExemptions.update(result.smithingBases());
             }
             plugin.getLogger().info("[bedrock-recipes] " + backendId + ": " + result.describe());
             if (!result.rejected().isEmpty()) {

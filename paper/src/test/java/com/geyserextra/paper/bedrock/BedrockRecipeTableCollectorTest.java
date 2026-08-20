@@ -70,7 +70,7 @@ class BedrockRecipeTableCollectorTest {
 
         JsonObject output = readOutput(extension, "main");
         assertThat(output.get("version").getAsInt())
-            .isEqualTo(BedrockRecipeTableCollector.SUPPORTED_FORMAT_VERSION);
+            .isEqualTo(BedrockRecipeTableCollector.OUTPUT_FORMAT_VERSION);
         assertThat(output.get("backend").getAsString()).isEqualTo("main");
         assertThat(output.getAsJsonArray("recipes")).hasSize(3);
     }
@@ -83,15 +83,35 @@ class BedrockRecipeTableCollectorTest {
     void rejectsAnUnknownFormatVersionInsteadOfGuessing(@TempDir Path root) throws IOException {
         Path plugins = root.resolve("plugins");
         Path extension = root.resolve("extension");
-        write(plugins, "TrinityForge", table(2, "TrinityForge", "trinityforge:a"));
+        write(plugins, "TrinityForge", table(99, "TrinityForge", "trinityforge:a"));
         write(plugins, "ArsPaper", table(1, "ArsPaper", "arspaper:c"));
 
         var result = BedrockRecipeTableCollector.collect(plugins, extension, "main");
 
         assertThat(result.recipes()).isEqualTo(1);
         assertThat(result.rejected()).singleElement().asString()
-            .contains("TrinityForge").contains("format version 2");
+            .contains("TrinityForge").contains("format version 99");
         assertThat(readOutput(extension, "main").getAsJsonArray("recipes")).hasSize(1);
+    }
+
+    /**
+     * A v1 writer and a v2 writer must merge together. The backends live in other repositories
+     * deployed by other scripts, so "one side is a release behind" is the normal state during a
+     * rollout — rejecting the older half would silently un-fix its recipes.
+     */
+    @Test
+    void mergesBothSupportedFormatVersions(@TempDir Path root) throws IOException {
+        Path plugins = root.resolve("plugins");
+        Path extension = root.resolve("extension");
+        write(plugins, "TrinityForge", table(2, "TrinityForge", "trinityforge:a"));
+        write(plugins, "ArsPaper", table(1, "ArsPaper", "arspaper:c"));
+
+        var result = BedrockRecipeTableCollector.collect(plugins, extension, "main");
+
+        assertThat(result.rejected()).isEmpty();
+        assertThat(result.recipes()).isEqualTo(2);
+        assertThat(readOutput(extension, "main").get("version").getAsInt())
+            .isEqualTo(BedrockRecipeTableCollector.OUTPUT_FORMAT_VERSION);
     }
 
     @Test

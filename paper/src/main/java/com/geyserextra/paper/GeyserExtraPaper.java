@@ -96,6 +96,14 @@ public final class GeyserExtraPaper extends JavaPlugin {
     private com.geyserextra.paper.listener.BedrockSkinApplier bedrockSkinApplier;
     /** Set from general.skinFixOnlyMode; read by onDisable to skip the full teardown. */
     private com.geyserextra.paper.bedrock.BedrockRecipeTableService bedrockRecipeTableService;
+
+    /**
+     * Shared between the recipe-table shipper (writer) and the smithing CMD stripper (reader).
+     * Created eagerly so neither wiring order nor a failed service start can leave it null —
+     * an empty set simply means "strip everything", which is the pre-existing behaviour.
+     */
+    private final com.geyserextra.paper.bedrock.SmithingBaseExemptions smithingBaseExemptions =
+        new com.geyserextra.paper.bedrock.SmithingBaseExemptions();
     private boolean skinFixOnlyMode;
 
     // Rescales the damage in outbound item packets so Bedrock draws the right
@@ -300,7 +308,7 @@ public final class GeyserExtraPaper extends JavaPlugin {
             String backendId = com.geyserextra.paper.bedrock.BedrockRecipeTableCollector
                 .backendId(java.nio.file.Path.of(""), getServer().getPort());
             bedrockRecipeTableService = new com.geyserextra.paper.bedrock.BedrockRecipeTableService(
-                this, getExtensionDataFolder(), backendId);
+                this, getExtensionDataFolder(), backendId, smithingBaseExemptions);
             bedrockRecipeTableService.start();
         } catch (RuntimeException e) {
             // Only Bedrock crafting hints depend on this; never fail enable over it.
@@ -885,7 +893,7 @@ public final class GeyserExtraPaper extends JavaPlugin {
         // constructed after it.
         if (config.general().bedrockSmithingCmdStripEnabled() && bedrockContainerCmdStripper != null) {
             smithingCmdStripper = new com.geyserextra.paper.smithing.BedrockSmithingTableCmdStripper(
-                this, bedrockContainerCmdStripper);
+                this, bedrockContainerCmdStripper, smithingBaseExemptions);
             smithingCmdStripper.register();
         } else if (config.general().debugMode()) {
             getLogger().fine("BedrockSmithingTableCmdStripper disabled by config"

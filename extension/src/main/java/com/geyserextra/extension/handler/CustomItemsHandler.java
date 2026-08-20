@@ -34,6 +34,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
@@ -82,6 +83,36 @@ public class CustomItemsHandler {
     /** Bedrock-side namespace for items registered by this extension. */
     private static final String BEDROCK_NAMESPACE = "geyserextra";
 
+    /**
+     * Vanilla Bedrock item tag that decides what the smithing table accepts in its <b>base</b>
+     * slot.
+     *
+     * <p>Bedrock validates that slot client-side against this tag — not against the recipes the
+     * server sends — so a custom item without it simply cannot be placed, and every
+     * netherite-upgrade recipe pointing at it is unreachable no matter what
+     * {@code BedrockRecipeInjector} ships. The two vanilla items on the other slots
+     * (netherite upgrade template, netherite ingot) already carry {@code transform_templates} and
+     * {@code transform_materials}, so the base slot is the only gap.
+     *
+     * <p><b>Applied to every registered custom item, deliberately.</b> Narrowing it to the items
+     * that are actually a smithing base would need the shipped recipe table, and that table
+     * arrives from the backends <em>after</em> {@code GeyserDefineCustomItemsEvent} has already
+     * fired — on a cold start the tag would be missing and the feature would only start working
+     * after a second restart, which is exactly the kind of silent, intermittent gap that costs
+     * days to diagnose.
+     *
+     * <p><b>The cost is not purely cosmetic</b> (an earlier wording here said it was). On Java the
+     * base slot is restricted by {@code RecipePropertySet(SMITHING_BASE)}, so an item that no
+     * smithing recipe accepts <b>cannot be placed there at all</b>. Tagging every custom item lets
+     * the Bedrock client accept the placement, Geyser forwards the click, the Java server rejects
+     * it and the container re-syncs — the player sees the item flick into the slot and bounce
+     * back. That is the same "it looks duplicated for a moment, then returns" symptom recorded for
+     * the smithing table before any of this existed, now reachable with any custom item instead of
+     * only the upgradable ones. It is still the better trade than a feature that only works from
+     * the second boot. What the player receives is decided entirely by the Java server either way.
+     */
+    private static final String BEDROCK_SMITHING_BASE_TAG = "minecraft:transformable_items";
+
     private final Extension extension;
     private final Path sharedFolder;
     private final List<ItemMapping> itemMappings;
@@ -120,7 +151,20 @@ public class CustomItemsHandler {
      * injector needs that distinction: writing a recipe against an unregistered item would
      * silently produce one that can never match.</p>
      */
-    private final Map<String, String> registeredBedrockIdentifiers = new HashMap<>();
+    private final Map<String, String> registeredBedrockIdentifiers = new ConcurrentHashMap<>();
+
+    /**
+     * Read-only view of {@link #registeredBedrockIdentifiers}, built once.
+     *
+     * <p>This used to be a fresh {@code Map.copyOf} per call, and the recipe injector calls the
+     * accessor <b>once per ingredient, per combination, per recipe</b> on the Netty event loop.
+     * With ~1200 registered items that is a five-figure number of full map copies for a single
+     * session's recipe packet, repeated for every player each time a backend calls
+     * {@code Bukkit.addRecipe} (Paper re-sends recipes unconditionally). A concurrent map plus a
+     * fixed unmodifiable view keeps the same "callers cannot mutate it" contract at O(1).
+     */
+    private final Map<String, String> registeredBedrockIdentifiersView =
+        java.util.Collections.unmodifiableMap(registeredBedrockIdentifiers);
 
     /**
      * Creates a new CustomItemsHandler.
@@ -1034,7 +1078,12 @@ public class CustomItemsHandler {
             // the flat item pose, which is what surfaced as "vanilla tools are
             // held like items". Items that ship their own attachable are
             // unaffected: the attachable drives their pose either way.
-            .displayHandheld(isHandheldBaseItem(mapping.baseItem));
+            .displayHandheld(isHandheldBaseItem(mapping.baseItem))
+            // Without this the Bedrock client refuses the item in the smithing table's base slot.
+            // See BEDROCK_SMITHING_BASE_TAG for why every item gets it.
+            // Identifier.of() is resolved here rather than in a static field: building one at
+            // class-load time drags in Geyser's runtime, which is absent in unit tests.
+            .tag(Identifier.of(BEDROCK_SMITHING_BASE_TAG));
 
         // Geyser's public v2 API intentionally marks BLOCK_PLACER as a
         // non-vanilla-only component. These definitions extend vanilla Java
@@ -1112,7 +1161,7 @@ public class CustomItemsHandler {
      * Empty until {@code GeyserDefineCustomItemsEvent} has run.</p>
      */
     public Map<String, String> registeredBedrockIdentifiers() {
-        return Map.copyOf(registeredBedrockIdentifiers);
+        return registeredBedrockIdentifiersView;
     }
 
     /**

@@ -1,5 +1,6 @@
 package com.geyserextra.paper.smithing;
 
+import com.geyserextra.paper.bedrock.SmithingBaseExemptions;
 import com.geyserextra.paper.inventory.BedrockContainerCmdStripper;
 import com.geyserextra.paper.util.BedrockPlayerUtil;
 
@@ -57,6 +58,14 @@ import java.util.logging.Level;
  * to. The cost is that custom artwork renders as its vanilla base while the
  * smithing GUI is open, and returns the moment it closes.</p>
  *
+ * <p><b>Items the proxy ships a smithing recipe for are exempt</b> from all of this
+ * ({@link com.geyserextra.paper.bedrock.SmithingBaseExemptions}). Stripping and recipe injection
+ * are two cures for the same disease and <b>cancel each other out on any single item</b>: the
+ * injected recipe names the item by its {@code geyser_custom:*} identifier, which stops existing
+ * the moment the CMD is stripped. Stripping only helps where a <em>vanilla</em> netherite recipe
+ * covers the base material — the diamond tools — so it stays in charge of exactly those items the
+ * injected table does not name, and hands over the rest.</p>
+ *
  * <p><b>Creative is excluded</b> for the same reason as
  * {@code BedrockDurabilityBarScaler}: Bedrock's creative inventory is
  * client-authoritative and can echo a stripped stack back through
@@ -67,11 +76,27 @@ public final class BedrockSmithingTableCmdStripper {
 
     private final Plugin plugin;
     private final BedrockContainerCmdStripper stripper;
+    private final SmithingBaseExemptions exemptions;
     private final List<PacketListener> registeredListeners = new ArrayList<>();
 
-    public BedrockSmithingTableCmdStripper(Plugin plugin, BedrockContainerCmdStripper stripper) {
+    public BedrockSmithingTableCmdStripper(Plugin plugin, BedrockContainerCmdStripper stripper,
+                                           SmithingBaseExemptions exemptions) {
         this.plugin = Objects.requireNonNull(plugin, "plugin must not be null");
         this.stripper = Objects.requireNonNull(stripper, "stripper must not be null");
+        this.exemptions = Objects.requireNonNull(exemptions, "exemptions must not be null");
+    }
+
+    /**
+     * Strips this stack unless the proxy is shipping a smithing recipe that names it.
+     *
+     * <p>Returns {@code null} when nothing changed, matching
+     * {@link BedrockContainerCmdStripper#stripCustomModelData} so callers stay lazy-copy.
+     */
+    private ItemStack stripUnlessExempt(ItemStack item) {
+        if (exemptions.isExempt(item)) {
+            return null;
+        }
+        return stripper.stripCustomModelData(item);
     }
 
     /** Registers the outbound listener. Call once, from onEnable. */
@@ -139,7 +164,7 @@ public final class BedrockSmithingTableCmdStripper {
 
         PacketContainer packet = event.getPacket();
         if (event.getPacketType() == PacketType.Play.Server.SET_SLOT) {
-            ItemStack stripped = stripper.stripCustomModelData(packet.getItemModifier().read(0));
+            ItemStack stripped = stripUnlessExempt(packet.getItemModifier().read(0));
             if (stripped != null) {
                 packet.getItemModifier().write(0, stripped);
             }
@@ -152,7 +177,7 @@ public final class BedrockSmithingTableCmdStripper {
             // byte-identical rather than churn a list on every inventory open.
             List<ItemStack> modified = null;
             for (int i = 0; i < items.size(); i++) {
-                ItemStack stripped = stripper.stripCustomModelData(items.get(i));
+                ItemStack stripped = stripUnlessExempt(items.get(i));
                 if (stripped == null) {
                     continue;
                 }
@@ -171,7 +196,7 @@ public final class BedrockSmithingTableCmdStripper {
         // failure here is tolerated rather than fatal — the same treatment the
         // enchantment-table path gives it.
         try {
-            ItemStack carried = stripper.stripCustomModelData(packet.getItemModifier().read(0));
+            ItemStack carried = stripUnlessExempt(packet.getItemModifier().read(0));
             if (carried != null) {
                 packet.getItemModifier().write(0, carried);
             }

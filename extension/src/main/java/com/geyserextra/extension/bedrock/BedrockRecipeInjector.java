@@ -5,6 +5,7 @@ import org.cloudburstmc.protocol.bedrock.data.inventory.ItemData;
 import org.cloudburstmc.protocol.bedrock.data.inventory.crafting.RecipeUnlockingRequirement;
 import org.cloudburstmc.protocol.bedrock.data.inventory.crafting.recipe.ShapedRecipeData;
 import org.cloudburstmc.protocol.bedrock.data.inventory.crafting.recipe.ShapelessRecipeData;
+import org.cloudburstmc.protocol.bedrock.data.inventory.crafting.recipe.SmithingTransformRecipeData;
 import org.cloudburstmc.protocol.bedrock.data.inventory.descriptor.ItemDescriptorWithCount;
 import org.cloudburstmc.protocol.bedrock.packet.CraftingDataPacket;
 import org.geysermc.geyser.network.GameProtocol;
@@ -46,6 +47,17 @@ import java.util.function.Supplier;
  * only placement that stays correct, so this wraps
  * {@code JavaUpdateRecipesTranslator} in the internal registry.
  *
+ * <h2>Smithing</h2>
+ * Smithing entries become {@code SmithingTransformRecipeData}. The recipe is only half of what
+ * Bedrock needs: the client also refuses to <em>place</em> anything in the base slot that does not
+ * carry the vanilla item tag {@code minecraft:transformable_items}, which
+ * {@code CustomItemsHandler} attaches when it registers custom items. Sending the recipe without
+ * the tag leaves the slot unusable; tagging without the recipe leaves the result slot empty.
+ *
+ * <p>Taking the finished item stays server-authoritative either way — Geyser converts the Bedrock
+ * take into a plain click on the Java result slot — so an injected recipe can only ever change
+ * what the client is willing to show, never what the player actually receives.
+ *
  * <h2>Fragility, stated plainly</h2>
  * This is the one part of GeyserExtra that touches Geyser internals ({@code Registries},
  * {@code GeyserSession}, {@code GameProtocol}). A Geyser update that renames any of them breaks
@@ -66,6 +78,13 @@ public final class BedrockRecipeInjector {
 
     /** Bedrock recipe tag for the 3x3 crafting grid. Same value Geyser uses for its own recipes. */
     private static final String CRAFTING_TABLE_TAG = "crafting_table";
+
+    /**
+     * Bedrock recipe tag for the smithing table. Same value Geyser's own
+     * {@code GeyserSmithingRecipe} uses; a different string makes the client file the recipe
+     * under a station that never opens it.
+     */
+    private static final String SMITHING_TABLE_TAG = "smithing_table";
 
     /** Prefix so our recipes cannot collide with Geyser's own ids. */
     private static final String ID_PREFIX = "geyserextra_";
@@ -92,6 +111,18 @@ public final class BedrockRecipeInjector {
     /** Ingredients we could not resolve, remembered so each one is only reported once. */
     private final Set<String> reportedMissing = Collections.synchronizedSet(new LinkedHashSet<>());
 
+    /**
+     * Whether the "recipes were dropped" warning has already been emitted.
+     *
+     * <p>The whole feature fails <b>into the exact symptom it exists to fix</b>: if the base items
+     * are not registered on the Bedrock side, every recipe is dropped and Bedrock crafting looks
+     * broken in precisely the way it did before. That must not be a debug-only line, or the only
+     * way to tell "not deployed" from "deployed and silently dropping everything" is to reproduce
+     * it in game. Warned once per load, not per session, so it cannot flood.
+     */
+    private final java.util.concurrent.atomic.AtomicBoolean dropWarningEmitted =
+        new java.util.concurrent.atomic.AtomicBoolean();
+
     public BedrockRecipeInjector(Supplier<Map<String, String>> customBedrockIdentifiers,
                                  Consumer<String> info, Consumer<String> warn, Consumer<String> debug) {
         this.customBedrockIdentifiers = customBedrockIdentifiers;
@@ -108,11 +139,14 @@ public final class BedrockRecipeInjector {
     /** Reads the shipped tables. Safe to call again to pick up a backend's reload. */
     public void reload(Path dataFolder) {
         this.dataFolder = dataFolder;
-        this.tableFingerprint = fingerprint(dataFolder);
         List<String> problems = new ArrayList<>();
         BedrockRecipeTable loaded = BedrockRecipeTable.readAll(dataFolder, problems::add);
         this.table = loaded;
+        // Fingerprint last: a session sending in parallel must never see "unchanged" while the
+        // table it would read is still the old one.
+        this.tableFingerprint = fingerprint(dataFolder);
         this.reportedMissing.clear();
+        this.dropWarningEmitted.set(false);
         if (loaded.isEmpty()) {
             info.accept("[bedrock-recipes] no corrected recipes available"
                 + " (backends have not shipped a table yet)");
@@ -211,6 +245,7 @@ public final class BedrockRecipeInjector {
         packet.setCleanRecipes(false);
 
         int added = 0;
+        int addedSmithing = 0;
         int dropped = 0;
         long truncated = 0;
         for (BedrockRecipeTable.Recipe recipe : snapshot.recipes()) {
@@ -228,43 +263,85 @@ public final class BedrockRecipeInjector {
 
             int variant = 0;
             for (List<BedrockRecipeTable.ItemRef> combination : combinations) {
-                List<ItemDescriptorWithCount> descriptors = describe(session, combination, recipe.shaped());
+                List<ItemDescriptorWithCount> descriptors = describe(session, combination, recipe.type());
                 if (descriptors == null) {
                     dropped++;
                     continue;
                 }
                 int netId = session.getLastRecipeNetId().getAndIncrement();
                 String id = ID_PREFIX + recipe.id().replace(':', '_') + "_" + variant++;
-                if (recipe.shaped()) {
-                    ShapedRecipeData data = ShapedRecipeData.shaped(id, recipe.width(), recipe.height(),
-                        descriptors, Collections.singletonList(result), UUID.randomUUID(),
-                        CRAFTING_TABLE_TAG, 0, netId, true, RecipeUnlockingRequirement.INVALID);
-                    if (split) {
-                        packet.getShapedData().add(data);
-                    } else {
-                        packet.getCraftingData().add(data);
+                switch (recipe.type()) {
+                    case SHAPED -> {
+                        ShapedRecipeData data = ShapedRecipeData.shaped(id, recipe.width(), recipe.height(),
+                            descriptors, Collections.singletonList(result), UUID.randomUUID(),
+                            CRAFTING_TABLE_TAG, 0, netId, true, RecipeUnlockingRequirement.INVALID);
+                        if (split) {
+                            packet.getShapedData().add(data);
+                        } else {
+                            packet.getCraftingData().add(data);
+                        }
                     }
-                } else {
-                    ShapelessRecipeData data = ShapelessRecipeData.shapeless(id, descriptors,
-                        Collections.singletonList(result), UUID.randomUUID(),
-                        CRAFTING_TABLE_TAG, 0, netId, RecipeUnlockingRequirement.INVALID);
-                    if (split) {
-                        packet.getShapelessData().add(data);
-                    } else {
-                        packet.getCraftingData().add(data);
+                    case SHAPELESS -> {
+                        ShapelessRecipeData data = ShapelessRecipeData.shapeless(id, descriptors,
+                            Collections.singletonList(result), UUID.randomUUID(),
+                            CRAFTING_TABLE_TAG, 0, netId, RecipeUnlockingRequirement.INVALID);
+                        if (split) {
+                            packet.getShapelessData().add(data);
+                        } else {
+                            packet.getCraftingData().add(data);
+                        }
                     }
+                    case SMITHING -> {
+                        if (descriptors.size() != BedrockRecipeTable.SMITHING_SLOT_COUNT) {
+                            // The parser already rejects this shape, so reaching here means the
+                            // parser changed. Drop the one recipe rather than letting an
+                            // IndexOutOfBounds disable the whole injector for the run.
+                            dropped++;
+                            continue;
+                        }
+                        SmithingTransformRecipeData data = SmithingTransformRecipeData.of(id,
+                            descriptors.get(BedrockRecipeTable.SMITHING_TEMPLATE_SLOT),
+                            descriptors.get(BedrockRecipeTable.SMITHING_BASE_SLOT),
+                            descriptors.get(BedrockRecipeTable.SMITHING_ADDITION_SLOT),
+                            result, SMITHING_TABLE_TAG, netId);
+                        if (split) {
+                            packet.getSmithingTransformData().add(data);
+                        } else {
+                            packet.getCraftingData().add(data);
+                        }
+                        addedSmithing++;
+                    }
+                    // アロー形式でも switch "文" なので網羅性は検査されない。default 無しだと、
+                    // Type が増えた日に「何もパケットへ足さないまま added++ だけ回り、ログは
+                    // N 件送ったと言う」という嘘のつき方をする。投げると外側の catch(Throwable)
+                    // が injector をこの起動の間だけ止めて WARN を出す ── 補正が効かなくなる
+                    // だけで、間違った素材のレシピが配られるよりはるかに安全な倒れ方。
+                    default -> throw new IllegalStateException(
+                        "unhandled recipe type " + recipe.type() + " for " + recipe.id());
                 }
                 added++;
             }
         }
 
         if (added == 0) {
+            if (dropped > 0 && dropWarningEmitted.compareAndSet(false, true)) {
+                warn.accept("[bedrock-recipes] all " + dropped + " corrected recipes were dropped:"
+                    + " none of their items resolve to a registered Bedrock item."
+                    + " Bedrock crafting and smithing with custom items stay broken."
+                    + " Enable debug to see which items.");
+            }
             debug.accept("[bedrock-recipes] nothing addressable for this session"
                 + " (dropped=" + dropped + ")");
             return;
         }
+        if (dropped > 0 && dropWarningEmitted.compareAndSet(false, true)) {
+            warn.accept("[bedrock-recipes] sent " + added + " corrected recipes but dropped "
+                + dropped + " (their items are not registered Bedrock items)."
+                + " Enable debug to see which.");
+        }
         session.sendUpstreamPacket(packet);
         debug.accept("[bedrock-recipes] sent " + added + " corrected recipes"
+            + (addedSmithing > 0 ? " (" + addedSmithing + " smithing)" : "")
             + (dropped > 0 ? ", dropped " + dropped + " (unresolvable items)" : "")
             + (truncated > 0 ? ", " + truncated + " ingredient combinations over the per-recipe"
                 + " cap of " + MAX_COMBINATIONS_PER_RECIPE + " were not sent" : ""));
@@ -278,13 +355,13 @@ public final class BedrockRecipeInjector {
      */
     private List<ItemDescriptorWithCount> describe(GeyserSession session,
                                                    List<BedrockRecipeTable.ItemRef> combination,
-                                                   boolean shaped) {
+                                                   BedrockRecipeTable.Type type) {
         List<ItemDescriptorWithCount> descriptors = new ArrayList<>(combination.size());
         for (BedrockRecipeTable.ItemRef ref : combination) {
             if (ref == null) {
-                // Empty square. Shapeless lists never contain one; shaped grids need the hole
-                // kept so the pattern lines up.
-                if (!shaped) {
+                // Empty square. Only a shaped grid has one, and it has to be kept so the pattern
+                // lines up. A shapeless list or a smithing slot with a hole is malformed input.
+                if (type != BedrockRecipeTable.Type.SHAPED) {
                     return null;
                 }
                 descriptors.add(ItemDescriptorWithCount.EMPTY);

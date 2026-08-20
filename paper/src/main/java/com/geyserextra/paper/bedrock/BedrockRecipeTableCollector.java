@@ -52,14 +52,30 @@ public final class BedrockRecipeTableCollector {
     public static final String OUTPUT_DIR = "bedrock-recipes";
 
     /**
-     * Format version this collector understands.
+     * Format versions this collector understands, written by {@code TrinityForge}'s
+     * {@code BedrockRecipeTable.FORMAT_VERSION} and {@code ArsPaper}'s
+     * {@code BedrockRecipeExporter.FORMAT_VERSION}.
      *
-     * <p>Must match {@code TrinityForge}'s {@code BedrockRecipeTable.FORMAT_VERSION} and
-     * {@code ArsPaper}'s {@code BedrockRecipeExporter.FORMAT_VERSION}. A file with any other
-     * version is <b>rejected loudly</b> rather than parsed optimistically — a half-understood
-     * table would inject wrong ingredients, which is worse than injecting nothing.
+     * <p>A file at any other version is <b>rejected loudly</b> rather than parsed optimistically —
+     * a half-understood table would inject wrong ingredients, which is worse than injecting
+     * nothing.
+     *
+     * <p>Two versions rather than one because the writers and this collector ship in
+     * <b>different repositories deployed by different scripts</b>. v2 only added the
+     * {@code smithing} recipe type, so v1 is a strict subset and a v1 writer that has not been
+     * redeployed yet keeps working instead of going silent.
      */
-    public static final int SUPPORTED_FORMAT_VERSION = 1;
+    public static final Set<Integer> SUPPORTED_FORMAT_VERSIONS = Set.of(1, 2);
+
+    /**
+     * Version stamped on the merged document.
+     *
+     * <p>Always the highest understood version: the merged file is read only by the extension
+     * shipped alongside this class, and labelling merged v1 content as v2 is accurate because
+     * v2 is a superset. Must stay in step with the extension's
+     * {@code BedrockRecipeTable.SUPPORTED_FORMAT_VERSIONS}.
+     */
+    public static final int OUTPUT_FORMAT_VERSION = 2;
 
     private BedrockRecipeTableCollector() {
     }
@@ -69,11 +85,13 @@ public final class BedrockRecipeTableCollector {
     }
 
     /** Outcome of one collection pass. {@code rejected} holds a human-readable reason per file. */
-    public record Result(List<Source> accepted, List<String> rejected, int recipes) {
+    public record Result(List<Source> accepted, List<String> rejected, int recipes,
+                         Set<String> smithingBases) {
 
         public Result {
             accepted = List.copyOf(accepted);
             rejected = List.copyOf(rejected);
+            smithingBases = smithingBases == null ? Set.of() : Set.copyOf(smithingBases);
         }
 
         public boolean isEmpty() {
@@ -83,6 +101,10 @@ public final class BedrockRecipeTableCollector {
         public String describe() {
             StringBuilder text = new StringBuilder();
             text.append(recipes).append(" recipes from ").append(accepted.size()).append(" plugin(s)");
+            if (!smithingBases.isEmpty()) {
+                text.append(", ").append(smithingBases.size())
+                    .append(" smithing base(s) exempt from CMD stripping");
+            }
             for (Source source : accepted) {
                 text.append(" [").append(source.plugin()).append('=').append(source.recipes()).append(']');
             }
@@ -101,7 +123,7 @@ public final class BedrockRecipeTableCollector {
      */
     public static JsonObject merge(List<JsonObject> tables, String backend) {
         JsonObject root = new JsonObject();
-        root.addProperty("version", SUPPORTED_FORMAT_VERSION);
+        root.addProperty("version", OUTPUT_FORMAT_VERSION);
         root.addProperty("backend", backend);
         JsonArray sources = new JsonArray();
         JsonArray recipes = new JsonArray();
@@ -143,9 +165,9 @@ public final class BedrockRecipeTableCollector {
             }
             JsonObject table = parsed.getAsJsonObject();
             int version = table.has("version") ? table.get("version").getAsInt() : -1;
-            if (version != SUPPORTED_FORMAT_VERSION) {
+            if (!SUPPORTED_FORMAT_VERSIONS.contains(version)) {
                 rejected.add(label + " (format version " + version
-                    + ", expected " + SUPPORTED_FORMAT_VERSION + ")");
+                    + ", expected one of " + SUPPORTED_FORMAT_VERSIONS + ")");
                 return null;
             }
             if (!table.has("recipes") || !table.get("recipes").isJsonArray()) {
@@ -207,8 +229,17 @@ public final class BedrockRecipeTableCollector {
         Path outputDir = extensionDataFolder.resolve(OUTPUT_DIR);
         Path target = outputDir.resolve(backend + ".json");
         if (tables.isEmpty()) {
-            Files.deleteIfExists(target);
-            return new Result(accepted, rejected, 0);
+            if (rejected.isEmpty()) {
+                // Genuinely nothing shipped a table: the plugins are gone, so the previously
+                // written one is stale and must not keep being injected.
+                Files.deleteIfExists(target);
+            }
+            // Every source was rejected (typically: this collector was rolled back to an older
+            // build that does not understand the writers' format version). Deleting here would
+            // take the working shaped/shapeless corrections down with the misunderstood ones,
+            // turning a one-sided rollback into a wider outage. Keep serving the last good copy
+            // and let the caller's WARNING be the signal.
+            return new Result(accepted, rejected, 0, Set.of());
         }
 
         JsonObject merged = merge(tables, backend);
@@ -220,7 +251,8 @@ public final class BedrockRecipeTableCollector {
         } catch (java.nio.file.AtomicMoveNotSupportedException e) {
             Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING);
         }
-        return new Result(accepted, rejected, merged.getAsJsonArray("recipes").size());
+        return new Result(accepted, rejected, merged.getAsJsonArray("recipes").size(),
+            SmithingBaseExemptions.fromMergedTable(merged));
     }
 
     /**
