@@ -95,6 +95,7 @@ public final class GeyserExtraPaper extends JavaPlugin {
     private com.geyserextra.paper.skin.BedrockSkinService bedrockSkinService;
     private com.geyserextra.paper.listener.BedrockSkinApplier bedrockSkinApplier;
     /** Set from general.skinFixOnlyMode; read by onDisable to skip the full teardown. */
+    private com.geyserextra.paper.bedrock.BedrockRecipeTableService bedrockRecipeTableService;
     private boolean skinFixOnlyMode;
 
     // Rescales the damage in outbound item packets so Bedrock draws the right
@@ -193,6 +194,9 @@ public final class GeyserExtraPaper extends JavaPlugin {
         // Perform initial scan of all online players
         performInitialScan();
 
+        // Ship this backend's bedrock-recipes.json tables to the proxy.
+        startBedrockRecipeTableService();
+
         getLogger().fine("GeyserExtra Paper plugin enabled successfully.");
     }
 
@@ -272,10 +276,37 @@ public final class GeyserExtraPaper extends JavaPlugin {
         initializePlayerSettings();
         registerCommands();
 
+        // Runs in this mode too. Shipping this backend's recipe tables to the proxy is a
+        // per-backend duty that has nothing to do with the pack generation this mode exists
+        // to suppress, and its output file is named per backend so it cannot collide.
+        startBedrockRecipeTableService();
+
         getLogger().info("GeyserExtra: skin-fix-only mode."
-            + " Bedrock skin repair, the DiscordSRV avatar hook, the player commands"
-            + " and the durability bar rescale are active; scanners, pack generation,"
-            + " recipe handlers and displays are not.");
+            + " Bedrock skin repair, the DiscordSRV avatar hook, the player commands,"
+            + " the durability bar rescale and the Bedrock recipe table shipping are"
+            + " active; scanners, pack generation, recipe handlers and displays are not.");
+    }
+
+    /**
+     * Starts shipping {@code plugins/<Plugin>/bedrock-recipes.json} to the shared Geyser
+     * extension folder.
+     *
+     * <p>Geyser runs on the proxy, so it cannot read a backend's {@code plugins/} folder.
+     * Without this the extension has no way to learn which custom item each ingredient
+     * really is, and Bedrock crafting with custom ingredients stays broken.
+     */
+    private void startBedrockRecipeTableService() {
+        try {
+            String backendId = com.geyserextra.paper.bedrock.BedrockRecipeTableCollector
+                .backendId(java.nio.file.Path.of(""), getServer().getPort());
+            bedrockRecipeTableService = new com.geyserextra.paper.bedrock.BedrockRecipeTableService(
+                this, getExtensionDataFolder(), backendId);
+            bedrockRecipeTableService.start();
+        } catch (RuntimeException e) {
+            // Only Bedrock crafting hints depend on this; never fail enable over it.
+            getLogger().log(java.util.logging.Level.WARNING,
+                "[bedrock-recipes] could not start the recipe table shipper", e);
+        }
     }
 
     @Override
@@ -286,6 +317,9 @@ public final class GeyserExtraPaper extends JavaPlugin {
         // does not own. The durability scaler is the one ProtocolLib listener
         // this mode does register, so it is the one that has to be torn down
         // here; leaving it would stack a second listener on every reload.
+        if (bedrockRecipeTableService != null) {
+            bedrockRecipeTableService.stop();
+        }
         if (skinFixOnlyMode) {
             if (discordSRVSkinHook != null) {
                 discordSRVSkinHook.unregister();
