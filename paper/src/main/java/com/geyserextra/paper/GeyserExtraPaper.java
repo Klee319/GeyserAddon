@@ -1021,6 +1021,34 @@ public final class GeyserExtraPaper extends JavaPlugin {
      * Saves registries to Extension data folder for Geyser extension access.
      * Config is not saved here as it's managed separately via loadConfiguration().
      */
+    /** Serialises pending-pack builds so two generations cannot interleave into one path. */
+    private final Object packBuildLock = new Object();
+
+    /**
+     * Whether the pending-pack build should be handed to an async task rather
+     * than run inline.
+     *
+     * <p>Two conditions, and both matter:</p>
+     * <ul>
+     *   <li>{@code primaryThread} — off-thread callers (the periodic save, the
+     *       one-shot dynamic-pack refresh) are already where we want them.
+     *       Scheduling from there would only add a hop.</li>
+     *   <li>{@code pluginEnabled} — {@code onDisable} calls the save one last
+     *       time, and the scheduler rejects new tasks for a disabling plugin.
+     *       Offloading there would throw and drop the final pack silently, so
+     *       shutdown deliberately keeps the blocking build: a stall during
+     *       shutdown costs nothing, and the tick loop is already gone.</li>
+     * </ul>
+     *
+     * <p>Static and parameterised so the decision is testable without a running
+     * server — the bug this guards against is a threading decision, and a
+     * threading decision that can only be checked by booting Paper is a
+     * threading decision that never gets checked.</p>
+     */
+    static boolean shouldOffloadPackBuild(boolean primaryThread, boolean pluginEnabled) {
+        return primaryThread && pluginEnabled;
+    }
+
     private synchronized void saveRegistriesToSharedFolder() {
         Path extensionFolder = getExtensionDataFolder();
         boolean debug = config.general().debugMode();
@@ -1176,30 +1204,69 @@ public final class GeyserExtraPaper extends JavaPlugin {
                     config.customItems().javaResourcePackFormat(),
                     debug);
 
-                try {
-                    AutoBedrockPackBuilder.build(
-                        itemMappingRegistry,
-                        autoPackPath,
-                        javaPackEntries,
-                        directItemModels,
-                        config.customItems().attachableGeneration(),
-                        entityTextureCopies,
-                        armorTextureCopies,
-                        config.customItems().armorGeneration(),
-                        getLogger(),
-                        debug
-                    );
-                    if (debug) {
-                        getLogger().fine("Built pending auto BE pack: " + autoPackPath
-                            + " (" + itemMappingRegistry.size() + " mappings"
-                            + (javaPackRoots.isEmpty()
-                                ? ""
-                                : ", Java packs: " + javaPackRoots.size())
-                            + ")");
+                // Deflating the pack is the single most expensive thing this
+                // method does, and on the startup path it lands on the server
+                // thread. Production caught it twice with the watchdog:
+                //
+                //   The server has not responded for 10 seconds!
+                //     java.util.zip.Deflater.deflateBytesBytes(Native Method)
+                //     AutoBedrockPackBuilder.putEntry(...)
+                //     GeyserExtraPaper.saveRegistriesToSharedFolder(...)
+                //     GeyserExtraPaper.runStartupScans(...)
+                //
+                // Nothing here touches the Bukkit API — the inputs are the
+                // registry plus the local maps computed above, and the output is
+                // the *pending* zip, which the Extension only promotes at its
+                // next resource-pack definition event. So the build never had to
+                // be synchronous with the tick loop; it was only synchronous
+                // because the scans around it have to be.
+                Runnable buildPendingPack = () -> {
+                    try {
+                        AutoBedrockPackBuilder.build(
+                            itemMappingRegistry,
+                            autoPackPath,
+                            javaPackEntries,
+                            directItemModels,
+                            config.customItems().attachableGeneration(),
+                            entityTextureCopies,
+                            armorTextureCopies,
+                            config.customItems().armorGeneration(),
+                            getLogger(),
+                            debug
+                        );
+                        if (debug) {
+                            getLogger().fine("Built pending auto BE pack: " + autoPackPath
+                                + " (" + itemMappingRegistry.size() + " mappings"
+                                + (javaPackRoots.isEmpty()
+                                    ? ""
+                                    : ", Java packs: " + javaPackRoots.size())
+                                + ")");
+                        }
+                    } catch (IOException e) {
+                        getLogger().log(Level.WARNING,
+                            "Failed to build pending auto BE pack at " + autoPackPath, e);
+                    } catch (Throwable t) {
+                        // An async task that dies takes its stack trace with it
+                        // unless we catch here; a half-written pending zip would
+                        // otherwise be the only symptom.
+                        getLogger().log(Level.WARNING,
+                            "Pending auto BE pack build failed at " + autoPackPath, t);
                     }
-                } catch (IOException e) {
-                    getLogger().log(Level.WARNING,
-                        "Failed to build pending auto BE pack at " + autoPackPath, e);
+                };
+
+                if (shouldOffloadPackBuild(getServer().isPrimaryThread(), isEnabled())) {
+                    // packBuildLock keeps two generations from interleaving into
+                    // the same pending path: the periodic async save and a
+                    // startup scan can otherwise overlap.
+                    getServer().getScheduler().runTaskAsynchronously(this, () -> {
+                        synchronized (packBuildLock) {
+                            buildPendingPack.run();
+                        }
+                    });
+                } else {
+                    synchronized (packBuildLock) {
+                        buildPendingPack.run();
+                    }
                 }
             }
 
