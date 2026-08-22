@@ -1,4 +1,4 @@
-{
+﻿{
     "resource_pack_name": "invisible_glow_frames",
     "texture_name": "atlas.terrain",
     "padding": 8,
@@ -6,9 +6,6 @@
     "texture_data": {
         "glow_item_frame": {
             "textures": "textures/blocks/glow_item_frame"
-        },
-        "itemframe_background": {
-            "textures": "textures/blocks/itemframe_background"
         }
     }
 }

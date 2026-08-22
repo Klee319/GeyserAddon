@@ -55,8 +55,17 @@ def main() -> None:
     os.makedirs(blocks_dir, exist_ok=True)
     os.makedirs(entity_dir, exist_ok=True)
 
-    # Create 16x16 transparent PNG for itemframe_background.png
-    create_transparent_png(os.path.join(blocks_dir, 'itemframe_background.png'), 16, 16)
+    # NOTE: do NOT generate textures/blocks/itemframe_background.png here.
+    #
+    # `itemframe_background` is the texture Bedrock draws inside the *normal*
+    # item frame (blocks.json entry "frame"), not the glow one. Shipping a fully
+    # transparent 16x16 for it blanked every ordinary item frame on the server
+    # and the client rendered the hole as solid black — reported from production
+    # on 2026-08-22 as "the inside of a plain item frame went black".
+    #
+    # The glow frame is hidden by `"blockshape": "invisible"` on the `glow_frame`
+    # entry in blocks.json, so overriding this texture was never what made it
+    # invisible. Only `glow_item_frame` belongs in this pack.
 
     # Create 16x16 transparent PNG for glow_itemframe.png
     create_transparent_png(os.path.join(blocks_dir, 'glow_itemframe.png'), 16, 16)
