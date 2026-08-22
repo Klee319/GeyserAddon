@@ -111,6 +111,38 @@ class InvisibleGlowFramesPackTest {
     }
 
     /**
+     * A UTF-8 BOM in front of a pack JSON makes Bedrock reject the file, and the
+     * pack then fails as a whole rather than in the one place that was edited.
+     *
+     * <p>This is not hypothetical: editing {@code terrain_texture.json} from
+     * PowerShell put a BOM in it during the very change this test class was
+     * written for. Gson skips a leading BOM in lenient mode, so every assertion
+     * above still passed on the broken file — the byte-level check is the only
+     * one that catches it.
+     */
+    @Test
+    void noShippedJsonStartsWithAByteOrderMark() throws Exception {
+        List<String> offenders = new ArrayList<>();
+        forEachEntry((name, body) -> {
+            if (!name.endsWith(".json")) {
+                return;
+            }
+            if (body.length >= 3
+                && (body[0] & 0xFF) == 0xEF
+                && (body[1] & 0xFF) == 0xBB
+                && (body[2] & 0xFF) == 0xBF) {
+                offenders.add(name);
+            }
+        });
+
+        assertThat(offenders)
+            .as("Bedrock refuses a JSON that starts with a BOM. Write these files"
+                + " as plain UTF-8 (PowerShell's Set-Content -Encoding UTF8 and"
+                + " '>' both prepend one).")
+            .isEmpty();
+    }
+
+    /**
      * Bedrock caches a resource pack by the version in its manifest, so an edit
      * that leaves the version alone never reaches a client that already joined —
      * the fix looks deployed on the server and dead in the game. Both version
