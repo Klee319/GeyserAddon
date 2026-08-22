@@ -258,7 +258,7 @@ public final class BedrockEnchantmentHandler implements Listener {
         PacketContainer packet = event.getPacket();
         ItemStack item = packet.getItemModifier().read(0);
 
-        if (!isBedrockPlayer(player)) {
+        if (!shouldRewriteFor(player)) {
             ItemStack cleaned = stripInjectedLoreFromItem(item);
             if (cleaned != null) {
                 packet.getItemModifier().write(0, cleaned);
@@ -315,7 +315,7 @@ public final class BedrockEnchantmentHandler implements Listener {
             return;
         }
 
-        if (!isBedrockPlayer(player)) {
+        if (!shouldRewriteFor(player)) {
             List<ItemStack> cleanedList = null;
             for (int i = 0; i < items.size(); i++) {
                 ItemStack cleaned = stripInjectedLoreFromItem(items.get(i));
@@ -1016,6 +1016,58 @@ public final class BedrockEnchantmentHandler implements Listener {
         if (cleaned != null) {
             packet.getItemModifier().write(0, cleaned);
         }
+    }
+
+    /**
+     * Whether this player's outbound item packets may be rewritten at all.
+     *
+     * <p><b>Creative is excluded</b>, for the same reason
+     * {@link com.geyserextra.paper.smithing.BedrockSmithingTableCmdStripper} and
+     * {@link com.geyserextra.paper.durability.BedrockDurabilityBarScaler} exclude
+     * it: Bedrock's creative inventory is client-authoritative, so whatever this
+     * handler writes into the packet can be echoed straight back through
+     * {@code SET_CREATIVE_SLOT} and stored as the <em>real</em> ItemStack.</p>
+     *
+     * <p>The lore side of that echo was already handled — {@code [GE]} lines carry
+     * a marker and {@link #stripInjectedLoreInPlace} scrubs them. The
+     * <em>display name</em> injected at the bottom of {@code injectEnchantmentLore}
+     * had neither: nothing marks it, so nothing can tell it apart from a name the
+     * player set in an anvil, and nothing removes it. A custom item that a
+     * creative Bedrock player merely moved in their inventory therefore came back
+     * carrying a burned-in {@code custom_name} — which is part of the item's
+     * component set, so it silently stops stacking with untouched copies of the
+     * same item. Not rewriting the packet at all is the only cure that cannot
+     * corrupt server-side state.</p>
+     *
+     * <p>Cost of the exclusion: a creative Bedrock player sees raw
+     * {@code gmdl_*} identifiers and loses the durability / enchantment tooltip.
+     * That is a display regression for one game mode, traded against permanently
+     * mutating items in every game mode.</p>
+     *
+     * <p>Package-private and taking the two properties separately so the policy
+     * can be pinned by a test without a live {@link Player}.</p>
+     */
+    static boolean shouldRewriteFor(boolean isBedrock, GameMode gameMode) {
+        return isBedrock && gameMode != GameMode.CREATIVE;
+    }
+
+    /**
+     * {@link #shouldRewriteFor(boolean, GameMode)} for a live player. Reads the
+     * game mode from the packet thread, which is what the sibling packet
+     * listeners already do.
+     */
+    private boolean shouldRewriteFor(Player player) {
+        if (!isBedrockPlayer(player)) {
+            return false;
+        }
+        GameMode mode;
+        try {
+            mode = player.getGameMode();
+        } catch (Throwable ignored) {
+            // A game mode we cannot read is not worth risking a write-back over.
+            return false;
+        }
+        return shouldRewriteFor(true, mode);
     }
 
     /**
