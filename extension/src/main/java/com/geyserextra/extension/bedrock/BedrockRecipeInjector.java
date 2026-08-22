@@ -328,7 +328,7 @@ public final class BedrockRecipeInjector {
                 warn.accept("[bedrock-recipes] all " + dropped + " corrected recipes were dropped:"
                     + " none of their items resolve to a registered Bedrock item."
                     + " Bedrock crafting and smithing with custom items stay broken."
-                    + " Enable debug to see which items.");
+                    + missingSample());
             }
             debug.accept("[bedrock-recipes] nothing addressable for this session"
                 + " (dropped=" + dropped + ")");
@@ -337,7 +337,7 @@ public final class BedrockRecipeInjector {
         if (dropped > 0 && dropWarningEmitted.compareAndSet(false, true)) {
             warn.accept("[bedrock-recipes] sent " + added + " corrected recipes but dropped "
                 + dropped + " (their items are not registered Bedrock items)."
-                + " Enable debug to see which.");
+                + missingSample());
         }
         session.sendUpstreamPacket(packet);
         debug.accept("[bedrock-recipes] sent " + added + " corrected recipes"
@@ -465,5 +465,46 @@ public final class BedrockRecipeInjector {
         if (reportedMissing.add(what)) {
             debug.accept("[bedrock-recipes] unaddressable ingredient: " + what);
         }
+    }
+
+    /** How many unaddressable items the drop warning names before it stops listing. */
+    static final int MISSING_SAMPLE_SIZE = 12;
+
+    /**
+     * The items behind the drop count, ready to append to the warning.
+     *
+     * <p>Why this is at WARN and not left to {@code debug}: the warning used to end with
+     * "Enable debug to see which", and that instruction does not work — this class's
+     * {@code debug} consumer is Geyser's own debug channel, gated by Geyser's
+     * {@code debug-mode}, while the switch an operator reaches for is GeyserExtra's
+     * {@code general.debugMode}. On the deployed proxy the latter was already {@code true}
+     * and not one line appeared, so the count was actionable only by reading this source.
+     * A count with no names cannot be triaged; the names are the whole diagnostic.
+     *
+     * <p>Capped, and the cap is <b>stated in the output</b> rather than silently applied —
+     * a truncated list that looks complete is how "we covered everything" gets believed.
+     */
+    private String missingSample() {
+        List<String> names;
+        synchronized (reportedMissing) {
+            names = new ArrayList<>(reportedMissing);
+        }
+        if (names.isEmpty()) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder(" Unaddressable items (")
+            .append(names.size())
+            .append(" distinct");
+        if (names.size() > MISSING_SAMPLE_SIZE) {
+            sb.append(", first ").append(MISSING_SAMPLE_SIZE).append(" shown");
+        }
+        sb.append("): ");
+        for (int i = 0; i < Math.min(MISSING_SAMPLE_SIZE, names.size()); i++) {
+            if (i > 0) {
+                sb.append(", ");
+            }
+            sb.append(names.get(i));
+        }
+        return sb.toString();
     }
 }
