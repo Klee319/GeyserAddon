@@ -60,6 +60,23 @@ public final class BedrockBlockIconGenerator {
         "lightning_rod", "candle", "sea_pickle", "turtle_egg", "amethyst_cluster"
     );
 
+    /**
+     * Bedrock ids that {@code blocks.json} still files under an older name.
+     *
+     * <p>The id we must key the output on is whatever {@code useBlockIcon} says, because that is
+     * what the pack builder looks up. When Mojang renames a block, their own sample pack can lag
+     * the name Geyser already uses, and the block silently gets no icon — which silently leaves its
+     * custom items unregistered. Mapping the lookup (never the output name) keeps both sides
+     * happy.</p>
+     */
+    private static final Map<String, String> BLOCKS_JSON_ALIASES = Map.of(
+        "iron_chain", "chain",
+        "grass_block", "grass",
+        // readBlockFaces lowercases every key, so the alias must be written lowercase even though
+        // blocks.json spells this one "seaLantern".
+        "sea_lantern", "sealantern"
+    );
+
     public static void main(String[] args) throws IOException {
         if (args.length < 6) {
             throw new IllegalArgumentException("usage: <terrain_texture.json> <blocks.json> "
@@ -84,6 +101,9 @@ public final class BedrockBlockIconGenerator {
         List<String> skipped = new ArrayList<>();
         for (String block : new LinkedHashSet<>(wanted)) {
             BlockFaces faces = blocks.get(block);
+            if (faces == null) {
+                faces = blocks.get(BLOCKS_JSON_ALIASES.get(block));
+            }
             if (faces == null) {
                 skipped.add(block + " (absent from blocks.json)");
                 continue;
@@ -231,7 +251,9 @@ public final class BedrockBlockIconGenerator {
                                              Path cacheDir, String base) {
         String path = terrain.get(textureKey);
         if (path == null) {
-            // Some blocks name a terrain path directly rather than a key.
+            // Some blocks name a terrain path directly rather than a key. Guessing
+            // "textures/blocks/<key>" for the rest was tried and resolved nothing, so an
+            // unresolved key is reported instead of paid for with a build-time 404.
             path = textureKey.startsWith("textures/") ? textureKey : null;
         }
         if (path == null) {

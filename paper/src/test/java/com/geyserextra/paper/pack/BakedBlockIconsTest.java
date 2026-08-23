@@ -39,6 +39,17 @@ class BakedBlockIconsTest {
     }
 
     @Test
+    @DisplayName("ships an icon for blocks bedrock-samples files under an older name")
+    void shipsIconsForRenamedBlocks() {
+        // These three are absent from blocks.json under the id Geyser uses, so the generator has an
+        // alias table. Asserting the icon rather than the table keeps the guard honest if the
+        // lookup is rewritten: iron_chain is what left fnis_peccati_profundi uncraftable.
+        assertThat(BakedBlockIcons.iconFor("iron_chain")).isNotNull().isNotEmpty();
+        assertThat(BakedBlockIcons.iconFor("grass_block")).isNotNull().isNotEmpty();
+        assertThat(BakedBlockIcons.iconFor("sea_lantern")).isNotNull().isNotEmpty();
+    }
+
+    @Test
     @DisplayName("returns null rather than throwing for anything not baked")
     void unknownBlocksReturnNull() {
         assertThat(BakedBlockIcons.iconFor("definitely_not_a_block")).isNull();
