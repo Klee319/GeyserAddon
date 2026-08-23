@@ -56,8 +56,15 @@ final class JavaAssetSource {
      *     itself, but Bedrock's {@code undyed_shulker_box} is Java's {@code shulker_box}
      * @param model bundled model supplying the geometry
      * @param textures texture-variable overrides, for families sharing one model
+     * @param gui synthetic chain head overriding the item's {@code display.gui}, for the one case
+     *     where Java's display presumes a geometry ours does not match
      */
-    private record CodeRendered(String displayId, String model, Map<String, String> textures) {}
+    private record CodeRendered(String displayId, String model, Map<String, String> textures,
+                                JsonObject gui) {
+        CodeRendered(String displayId, String model, Map<String, String> textures) {
+            this(displayId, model, textures, null);
+        }
+    }
 
     private static final List<String> DYE_COLORS = List.of(
         "white", "orange", "magenta", "light_blue", "yellow", "lime", "pink", "gray",
@@ -100,11 +107,19 @@ final class JavaAssetSource {
             map.put("waxed_" + entry.getKey(),
                 new CodeRendered("waxed_" + entry.getKey(), "entity/chest/normal", sheet));
         }
+        // Mojang's statue template cannot be used as-is: item/template_copper_golem_statue rolls
+        // the slot 180° around Z (gui rotation [30,45,180]) because the client's internal statue
+        // geometry is authored upside down, and its translation is stated for that geometry too.
+        // The bundled model stands upright spanning y 0..24, so the roll goes, and the translation
+        // recentres that span: -16 * 0.55 * cos(30°) * (12-8)/16 ≈ -1.9.
+        JsonObject statueGui = guiDisplay(
+            new double[] {30, 45, 0}, new double[] {0, -1.9, 0}, new double[] {0.55, 0.55, 0.55});
         for (String oxidation : List.of("", "exposed_", "weathered_", "oxidized_")) {
             String statue = oxidation + "copper_golem_statue";
             String model = "entity/copper_golem/" + statue + "_standing";
-            map.put(statue, new CodeRendered(statue, model, Map.of()));
-            map.put("waxed_" + statue, new CodeRendered("waxed_" + statue, model, Map.of()));
+            map.put(statue, new CodeRendered(statue, model, Map.of(), statueGui));
+            map.put("waxed_" + statue,
+                new CodeRendered("waxed_" + statue, model, Map.of(), statueGui));
         }
         return Map.copyOf(map);
     }
@@ -146,6 +161,10 @@ final class JavaAssetSource {
         CodeRendered mapped = CODE_RENDERED.get(blockId);
         List<JsonObject> chain = new ArrayList<>(
             resolveChain(displayModelName(mapped != null ? mapped.displayId() : blockId)));
+        if (mapped != null && mapped.gui() != null) {
+            // Ahead of the item chain: guiTransform takes the first display it finds.
+            chain.add(0, mapped.gui());
+        }
         if (mapped != null && !mapped.textures().isEmpty()) {
             // Ahead of the entity chain: mergedTextures lets earlier entries win, which is how a
             // colour's own sheet replaces the model's default without touching the file.
@@ -228,6 +247,27 @@ final class JavaAssetSource {
         JsonObject item = json("items/" + blockId + ".json");
         String base = item == null ? null : specialBase(item.get("model"));
         return base != null ? base : "item/" + blockId;
+    }
+
+    /** A synthetic chain entry carrying only a {@code display.gui}. */
+    private static JsonObject guiDisplay(double[] rotation, double[] translation, double[] scale) {
+        JsonObject gui = new JsonObject();
+        gui.add("rotation", jsonArray(rotation));
+        gui.add("translation", jsonArray(translation));
+        gui.add("scale", jsonArray(scale));
+        JsonObject display = new JsonObject();
+        display.add("gui", gui);
+        JsonObject model = new JsonObject();
+        model.add("display", display);
+        return model;
+    }
+
+    private static JsonArray jsonArray(double[] values) {
+        JsonArray array = new JsonArray();
+        for (double value : values) {
+            array.add(value);
+        }
+        return array;
     }
 
     /** A synthetic chain entry carrying only texture-variable overrides. */
