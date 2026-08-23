@@ -11,6 +11,7 @@ import java.awt.image.BufferedImage;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.Reader;
+import java.net.HttpURLConnection;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -133,6 +134,15 @@ public final class BedrockBlockIconGenerator {
             generated.add(block);
         }
 
+        if (generated.size() < wanted.size() / 2) {
+            // Far too few to be a data change. Something structural broke — a moved sample pack, a
+            // renamed json — and shipping the jar anyway would un-register hundreds of items and
+            // drop their recipes without a single failing test.
+            throw new IOException("only " + generated.size() + " of " + wanted.size()
+                + " block icons could be baked; refusing to ship a jar that would leave"
+                + " block-based items unregistered");
+        }
+
         writeIndex(outputDir.resolve("index.json"), generated);
 
         System.out.println("[block-icons] generated " + generated.size()
@@ -244,11 +254,17 @@ public final class BedrockBlockIconGenerator {
 
     /**
      * Resolves a texture key through {@code terrain_texture.json} and reads the PNG, downloading it
-     * into the cache on first use. Returns {@code null} when anything in that chain is missing, so
-     * the caller can skip one block instead of failing the whole build.
+     * into the cache on first use.
+     *
+     * <p>Returns {@code null} only when the texture genuinely is not there — an unresolvable key,
+     * or a 404 — so the caller can skip that one block. Anything else (no network, a proxy error, a
+     * corrupt cache entry) is thrown, because a silent skip here reproduces the exact bug this
+     * whole generator exists to fix: no icon means the item does not register, which means its
+     * Bedrock recipes are dropped. A failed build is loud; a jar quietly missing 900 icons is
+     * not.</p>
      */
     private static BufferedImage loadTexture(String textureKey, Map<String, String> terrain,
-                                             Path cacheDir, String base) {
+                                             Path cacheDir, String base) throws IOException {
         String path = terrain.get(textureKey);
         if (path == null) {
             // Some blocks name a terrain path directly rather than a key. Guessing
@@ -260,17 +276,40 @@ public final class BedrockBlockIconGenerator {
             return null;
         }
         Path cached = cacheDir.resolve(path.replace('/', '_') + ".png");
-        try {
-            if (!Files.isRegularFile(cached)) {
-                URI uri = URI.create(base + "/" + path + ".png");
-                try (InputStream in = uri.toURL().openStream()) {
-                    Files.createDirectories(cached.getParent());
-                    Files.copy(in, cached);
-                }
+        if (!Files.isRegularFile(cached)) {
+            byte[] bytes = download(base + "/" + path + ".png");
+            if (bytes == null) {
+                return null;
             }
-            return ImageIO.read(cached.toFile());
-        } catch (IOException | RuntimeException ex) {
-            return null;
+            Files.createDirectories(cached.getParent());
+            Files.write(cached, bytes);
+        }
+        BufferedImage image = ImageIO.read(cached.toFile());
+        if (image == null) {
+            throw new IOException("cached texture is not a readable image, delete it and rebuild: "
+                + cached);
+        }
+        return image;
+    }
+
+    /** Fetches one texture. {@code null} for a 404; throws for every other failure. */
+    private static byte[] download(String url) throws IOException {
+        HttpURLConnection connection = (HttpURLConnection) URI.create(url).toURL().openConnection();
+        connection.setConnectTimeout(15_000);
+        connection.setReadTimeout(30_000);
+        try {
+            int status = connection.getResponseCode();
+            if (status == HttpURLConnection.HTTP_NOT_FOUND) {
+                return null;
+            }
+            if (status != HttpURLConnection.HTTP_OK) {
+                throw new IOException("HTTP " + status + " for " + url);
+            }
+            try (InputStream in = connection.getInputStream()) {
+                return in.readAllBytes();
+            }
+        } finally {
+            connection.disconnect();
         }
     }
 
