@@ -215,7 +215,10 @@ val generateBlockIcons by tasks.registering(JavaExec::class) {
         terrainTexture,
         blocksDefinition,
         generatedVanillaTexturePaths,
-        sourceSets.named("generate").map { it.allJava }
+        sourceSets.named("generate").map { it.allJava },
+        // The bundled entity models are what shapes the blocks Minecraft renders from code;
+        // editing one has to re-bake, and without this it would not.
+        sourceSets.named("generate").map { it.resources }
     )
     // A Minecraft version bump must re-bake rather than reuse the previous version's cache.
     inputs.property("javaAssetsBase", javaAssetsBase)

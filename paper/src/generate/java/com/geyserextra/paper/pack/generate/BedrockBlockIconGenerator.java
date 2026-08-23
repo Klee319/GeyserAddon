@@ -70,6 +70,17 @@ public final class BedrockBlockIconGenerator {
     );
 
     /**
+     * Blocks whose shape can only come from the bundled entity models.
+     *
+     * <p>Minecraft draws these from code, so their Java model carries a particle texture and
+     * nothing else. They are listed to be checked, not to be treated specially — see the guard in
+     * {@code main}.</p>
+     */
+    private static final Set<String> MODEL_SHAPED_BY_BUNDLE = Set.of(
+        "decorated_pot", "conduit", "chest", "skeleton_skull", "wither_skeleton_skull"
+    );
+
+    /**
      * Bedrock ids that {@code blocks.json} still files under an older name.
      *
      * <p>The id we must key the output on is whatever {@code useBlockIcon} says, because that is
@@ -168,6 +179,26 @@ public final class BedrockBlockIconGenerator {
             throw new IOException("only " + generated.size() + " of " + written.size()
                 + " block icons could be baked; refusing to ship a jar that would leave"
                 + " block-based items unregistered");
+        }
+
+        // Every one of these is a block Minecraft renders from code, so each proves a different
+        // part of the bundled-entity-model path still works: the pot the plain lookup, the skull
+        // the parent chain, the chest a nested directory. Losing the bundle silently swaps them
+        // back to cubes, and the count guard above is nowhere near tight enough to notice.
+        List<String> checkable = MODEL_SHAPED_BY_BUNDLE.stream().filter(written::contains).toList();
+        if (checkable.isEmpty()) {
+            // An allow-list whose entries match nothing checks nothing. Bedrock renaming all five
+            // at once would otherwise turn this guard off without a word.
+            throw new IOException("none of " + MODEL_SHAPED_BY_BUNDLE + " were baked at all; the"
+                + " bundled-entity-model check has nothing left to check and must be updated");
+        }
+        List<String> lostShape = checkable.stream()
+            .filter(block -> !fromJavaModel.contains(block))
+            .toList();
+        if (!lostShape.isEmpty()) {
+            throw new IOException("fell back to the cube approximation for " + lostShape
+                + ", which the bundled entity models exist to shape; the bundle is missing from"
+                + " the generator's classpath or no longer resolves");
         }
 
         writeIndex(outputDir.resolve("index.json"), generated);

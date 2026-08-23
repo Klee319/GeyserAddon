@@ -42,10 +42,24 @@ import java.util.Map;
  * against the merged texture map.</p>
  *
  * <p>A model with no {@code elements} anywhere in its chain is not an error: Minecraft draws
- * decorated pots, conduits, chests, beds, banners and heads from code, and those models carry only
- * a particle texture. The caller falls back to the cube approximation for them.</p>
+ * decorated pots, conduits, chests, banners and heads from code, and those models carry only a
+ * particle texture. For those the lookup falls through to {@code models/entity/<id>.json}, which
+ * Mojang does not ship but this module bundles — see the README next to those resources. Anything
+ * still without geometry leaves the caller to fall back to the cube approximation.</p>
  */
 final class JavaAssetSource {
+
+    /**
+     * Blocks whose bundled entity model is not named after the block.
+     *
+     * <p>The chests are one model with three texture sets, so they are filed by variant rather
+     * than by block id. Every other code-rendered block matches its own name.</p>
+     */
+    private static final Map<String, String> ENTITY_MODEL_ALIASES = Map.of(
+        "chest", "entity/chest/normal",
+        "trapped_chest", "entity/chest/trapped",
+        "ender_chest", "entity/chest/ender"
+    );
 
     private final String baseUrl;
     private final Path cacheDir;
@@ -71,6 +85,15 @@ final class JavaAssetSource {
                 ? "item/" + blockId
                 : "block/" + blockId;
         }
+        JavaBlockModel model = build(modelName);
+        // Nothing to draw means Minecraft renders this one from code. The bundled entity models
+        // cover exactly that set, and are reached through the ordinary chain so a #entity texture
+        // variable and a parent (wither_skeleton_skull -> skull_32) still resolve.
+        return model != null ? model : build(ENTITY_MODEL_ALIASES.getOrDefault(blockId,
+            "entity/" + blockId));
+    }
+
+    private JavaBlockModel build(String modelName) throws IOException {
         List<JsonObject> chain = resolveChain(modelName);
         if (chain.isEmpty()) {
             return null;
@@ -82,15 +105,38 @@ final class JavaAssetSource {
         Map<String, String> textures = mergedTextures(chain);
         Transform gui = guiTransform(chain);
         boolean shaded = !"front".equals(firstString(chain, "gui_light"));
+        double[] uvScale = uvScale(chain);
 
         List<Element> out = new ArrayList<>();
         for (JsonElement raw : elements) {
-            Element element = readElement(raw.getAsJsonObject(), textures);
+            Element element = readElement(raw.getAsJsonObject(), textures, uvScale);
             if (element != null && !element.faces().isEmpty()) {
                 out.add(element);
             }
         }
         return out.isEmpty() ? null : new JavaBlockModel(out, gui, shaded);
+    }
+
+    /**
+     * Factor that brings a model's declared UVs into the 0..16 space the renderer samples in.
+     *
+     * <p>Vanilla models always use 0..16 regardless of how large the texture actually is. The
+     * bundled entity models are authored in Blockbench, which writes {@code texture_size} and then
+     * states UVs in the texture's own pixels — 0..32 for a decorated pot, 0..64 for a skull.
+     * Ignoring it samples roughly twice too far across the sheet, which lands on a neighbouring
+     * part of the entity texture rather than off the edge, so the icon comes out plausible and
+     * wrong.</p>
+     */
+    private static double[] uvScale(List<JsonObject> chain) {
+        JsonArray size = firstArray(chain, "texture_size");
+        if (size == null || size.size() < 2) {
+            return new double[] {1, 1};
+        }
+        double width = size.get(0).getAsDouble();
+        double height = size.get(1).getAsDouble();
+        return new double[] {
+            width > 0 ? 16.0 / width : 1,
+            height > 0 ? 16.0 / height : 1};
     }
 
     // ------------------------------------------------------------------
@@ -237,7 +283,8 @@ final class JavaAssetSource {
     // Elements
     // ------------------------------------------------------------------
 
-    private Element readElement(JsonObject raw, Map<String, String> textures) throws IOException {
+    private Element readElement(JsonObject raw, Map<String, String> textures, double[] uvScale)
+            throws IOException {
         double[] from = readVector(raw.get("from"), 0, 0, 0);
         double[] to = readVector(raw.get("to"), 16, 16, 16);
         boolean shade = !raw.has("shade") || raw.get("shade").getAsBoolean();
@@ -251,7 +298,7 @@ final class JavaAssetSource {
                     continue;
                 }
                 Face face = readFace(entry.getValue().getAsJsonObject(), direction, from, to,
-                    textures);
+                    textures, uvScale);
                 if (face != null) {
                     faces.put(direction, face);
                 }
@@ -261,13 +308,15 @@ final class JavaAssetSource {
     }
 
     private Face readFace(JsonObject raw, Direction direction, double[] from, double[] to,
-                          Map<String, String> textures) throws IOException {
+                          Map<String, String> textures, double[] uvScale) throws IOException {
         BufferedImage texture = texture(resolveTexture(asString(raw.get("texture")), textures));
         if (texture == null) {
             return null;
         }
+        // Only a declared uv lives in texture_size space; a default one is derived from the
+        // element's own extent and is already in model space.
         double[] uv = raw.has("uv")
-            ? readUv(raw.getAsJsonArray("uv"))
+            ? scaleUv(readUv(raw.getAsJsonArray("uv")), uvScale)
             : defaultUv(direction, from, to);
         int rotation = raw.has("rotation") ? raw.get("rotation").getAsInt() : 0;
         boolean tinted = raw.has("tintindex") && raw.get("tintindex").getAsInt() >= 0;
@@ -328,6 +377,11 @@ final class JavaAssetSource {
         };
     }
 
+    private static double[] scaleUv(double[] uv, double[] scale) {
+        return new double[] {
+            uv[0] * scale[0], uv[1] * scale[1], uv[2] * scale[0], uv[3] * scale[1]};
+    }
+
     private static double[] readUv(JsonArray raw) {
         return new double[] {
             raw.get(0).getAsDouble(), raw.get(1).getAsDouble(),
@@ -351,7 +405,13 @@ final class JavaAssetSource {
         if (jsonCache.containsKey(relativePath)) {
             return jsonCache.get(relativePath);
         }
-        byte[] bytes = fetch("assets/minecraft/" + relativePath);
+        String assetPath = "assets/minecraft/" + relativePath;
+        byte[] bytes = fetch(assetPath);
+        if (bytes == null) {
+            // Remote first, bundled second: if Mojang ever ships a real model for one of the
+            // code-rendered blocks, theirs wins and the bundled copy goes unused.
+            bytes = bundled(assetPath);
+        }
         JsonObject parsed = null;
         if (bytes != null) {
             parsed = JsonParser.parseString(new String(bytes, StandardCharsets.UTF_8))
@@ -359,6 +419,14 @@ final class JavaAssetSource {
         }
         jsonCache.put(relativePath, parsed);
         return parsed;
+    }
+
+    /** A model shipped with this module under the same path Minecraft would have used. */
+    private static byte[] bundled(String assetPath) throws IOException {
+        try (InputStream in = JavaAssetSource.class.getClassLoader()
+                .getResourceAsStream(assetPath)) {
+            return in == null ? null : in.readAllBytes();
+        }
     }
 
     private BufferedImage texture(String texturePath) throws IOException {
