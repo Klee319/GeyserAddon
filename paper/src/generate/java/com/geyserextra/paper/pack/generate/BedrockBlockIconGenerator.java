@@ -47,18 +47,25 @@ import java.util.TreeMap;
 public final class BedrockBlockIconGenerator {
 
     /**
-     * Blocks whose model is not a full cube. These get their texture flat instead of projected: a
-     * cube built from a decorated pot's side would misrepresent the block.
+     * Blocks whose <em>item</em> Java draws as a flat sprite rather than a rendered model.
      *
-     * <p>They are still baked. Skipping them entirely is what left {@code source_jar} and friends
-     * unregistered, and an unregistered item cannot be named by an injected recipe — so "no icon"
-     * costs the craft, while "flat icon" costs only some depth.</p>
+     * <p>The rule this file follows is "look like Java looks". Java decides per item model: a
+     * {@code block/*} parent is rendered in 3D under the gui transform, while an
+     * {@code item/generated} parent is a flat sprite — which is what a chain, a candle, a wither
+     * rose or a cauldron actually shows in the inventory. Projecting those into a cube would invent
+     * a solid block the player never sees.</p>
+     *
+     * <p>Everything not listed here is projected, <b>including the blocks whose model is not a
+     * plain cube</b> (decorated pot, lectern, anvil, campfire...). Java renders those in 3D, so a
+     * cube approximation is far closer to the real icon than a flat square is — the first cut of
+     * this list flattened them and the source jar came out looking 2D.</p>
+     *
+     * <p>Either way they are baked. Skipping them entirely is what left {@code source_jar} and
+     * friends unregistered, and an unregistered item cannot be named by an injected recipe.</p>
      */
-    private static final Set<String> NON_CUBE_BLOCKS = Set.of(
-        "decorated_pot", "lectern", "beacon", "enchanting_table", "wither_rose", "iron_chain",
-        "chain", "flower_pot", "cactus", "brewing_stand", "cauldron", "hopper", "anvil",
-        "grindstone", "stonecutter", "bell", "campfire", "soul_campfire", "conduit", "end_rod",
-        "lightning_rod", "candle", "sea_pickle", "turtle_egg", "amethyst_cluster"
+    private static final Set<String> FLAT_SPRITE_BLOCKS = Set.of(
+        "wither_rose", "iron_chain", "chain", "brewing_stand", "cauldron", "hopper",
+        "grindstone", "bell", "lightning_rod", "candle", "sea_pickle", "amethyst_cluster"
     );
 
     /**
@@ -119,9 +126,8 @@ public final class BedrockBlockIconGenerator {
                 : loadTexture(faces.side(), terrain, textureCacheDir, bedrockSamplesBase);
 
             BufferedImage icon;
-            if (NON_CUBE_BLOCKS.contains(block)) {
-                // Its own texture, undistorted. Recognisable, and — unlike no icon at all — it
-                // lets the item register and its recipes reach the client.
+            if (FLAT_SPRITE_BLOCKS.contains(block)) {
+                // Its own texture, undistorted — the same flat sprite Java shows for these.
                 icon = IsometricBlockRenderer.flat(side != null ? side : up);
                 flat.add(block);
             } else {

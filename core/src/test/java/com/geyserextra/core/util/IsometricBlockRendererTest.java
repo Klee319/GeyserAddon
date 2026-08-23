@@ -15,6 +15,12 @@ import static org.assertj.core.api.Assertions.assertThat;
 @DisplayName("IsometricBlockRenderer")
 class IsometricBlockRendererTest {
 
+    /**
+     * The icon edge. Every coordinate below is expressed as a fraction of it, so raising the bake
+     * resolution stays a one-line change instead of a test rewrite.
+     */
+    private static final int S = IsometricBlockRenderer.SIZE;
+
     /** Solid 16x16 of one colour, so a face can be identified purely by its shade. */
     private static BufferedImage solid(int rgb) {
         BufferedImage image = new BufferedImage(16, 16, BufferedImage.TYPE_INT_ARGB);
@@ -31,7 +37,7 @@ class IsometricBlockRendererTest {
     }
 
     @Test
-    @DisplayName("renders a 32x32 icon")
+    @DisplayName("renders a square icon of the declared size")
     void rendersFixedSize() {
         BufferedImage icon = IsometricBlockRenderer.render(solid(0xFFFFFF), null);
         assertThat(icon.getWidth()).isEqualTo(IsometricBlockRenderer.SIZE);
@@ -45,9 +51,9 @@ class IsometricBlockRendererTest {
         // look this bake exists to avoid.
         BufferedImage icon = IsometricBlockRenderer.render(solid(0xFFFFFF), null);
         assertThat(alphaAt(icon, 0, 0)).as("top-left").isZero();
-        assertThat(alphaAt(icon, 31, 0)).as("top-right").isZero();
-        assertThat(alphaAt(icon, 0, 31)).as("bottom-left").isZero();
-        assertThat(alphaAt(icon, 31, 31)).as("bottom-right").isZero();
+        assertThat(alphaAt(icon, S - 1, 0)).as("top-right").isZero();
+        assertThat(alphaAt(icon, 0, S - 1)).as("bottom-left").isZero();
+        assertThat(alphaAt(icon, S - 1, S - 1)).as("bottom-right").isZero();
     }
 
     @Test
@@ -56,8 +62,8 @@ class IsometricBlockRendererTest {
         BufferedImage icon = IsometricBlockRenderer.render(solid(0xFFFFFF), null);
         // The vertical centre line crosses all three faces top to bottom. A gap here is the classic
         // symptom of the shared edges rounding into neither face.
-        for (int y = 0; y < IsometricBlockRenderer.SIZE; y++) {
-            assertThat(alphaAt(icon, 16, y)).as("centre column at y=%d", y).isEqualTo(255);
+        for (int y = 0; y < S; y++) {
+            assertThat(alphaAt(icon, S / 2, y)).as("centre column at y=%d", y).isEqualTo(255);
         }
     }
 
@@ -66,9 +72,9 @@ class IsometricBlockRendererTest {
     void facesUseDistinctShading() {
         BufferedImage icon = IsometricBlockRenderer.render(solid(0xFFFFFF), null);
         // Sample well inside each face rather than near an edge.
-        int up = icon.getRGB(16, 6) & 0xFFFFFF;
-        int left = icon.getRGB(6, 22) & 0xFFFFFF;
-        int right = icon.getRGB(26, 22) & 0xFFFFFF;
+        int up = icon.getRGB(S / 2, S * 3 / 16) & 0xFFFFFF;
+        int left = icon.getRGB(S * 3 / 16, S * 11 / 16) & 0xFFFFFF;
+        int right = icon.getRGB(S * 13 / 16, S * 11 / 16) & 0xFFFFFF;
         assertThat(up).as("up face is brightest").isGreaterThan(left);
         assertThat(left).as("left face is brighter than right").isGreaterThan(right);
     }
@@ -78,8 +84,10 @@ class IsometricBlockRendererTest {
     void facesSampleTheirOwnTexture() {
         // Logs are the reason this matters: their top is the ring texture and their sides are bark.
         BufferedImage icon = IsometricBlockRenderer.render(solid(0xFF0000), solid(0x00FF00));
-        assertThat(icon.getRGB(16, 6) & 0x00FF00).as("top must not carry the side texture").isZero();
-        assertThat(icon.getRGB(6, 22) & 0xFF0000).as("side must not carry the up texture").isZero();
+        assertThat(icon.getRGB(S / 2, S * 3 / 16) & 0x00FF00)
+            .as("top must not carry the side texture").isZero();
+        assertThat(icon.getRGB(S * 3 / 16, S * 11 / 16) & 0xFF0000)
+            .as("side must not carry the up texture").isZero();
     }
 
     @Test
@@ -87,7 +95,7 @@ class IsometricBlockRendererTest {
     void transparencySurvives() {
         BufferedImage transparent = new BufferedImage(16, 16, BufferedImage.TYPE_INT_ARGB);
         BufferedImage icon = IsometricBlockRenderer.render(transparent, null);
-        assertThat(alphaAt(icon, 16, 6)).isZero();
-        assertThat(alphaAt(icon, 16, 20)).isZero();
+        assertThat(alphaAt(icon, S / 2, S * 3 / 16)).isZero();
+        assertThat(alphaAt(icon, S / 2, S * 5 / 8)).isZero();
     }
 }

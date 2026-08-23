@@ -20,8 +20,16 @@ import java.awt.image.BufferedImage;
  */
 public final class IsometricBlockRenderer {
 
-    /** Edge length of the rendered icon. 32 keeps every cube edge on a whole pixel at 2:1. */
-    public static final int SIZE = 32;
+    /**
+     * Edge length of the rendered icon.
+     *
+     * <p>64, not the texture's own 16: the icon is a projection, so a texel's edges land on the
+     * diagonal of the output. At 32 that diagonal has one output pixel per two texels and the cube
+     * came out visibly ragged — the first deployment was reported as "低画質で歪". 64 gives four
+     * output pixels per 16-texture texel, so every face edge lands on a whole pixel and the client
+     * still has resolution left when it scales the slot up.</p>
+     */
+    public static final int SIZE = 64;
 
     /**
      * Minecraft's face shading. The client multiplies each face's colour by these before drawing,
