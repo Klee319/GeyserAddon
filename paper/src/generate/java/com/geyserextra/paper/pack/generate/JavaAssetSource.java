@@ -50,16 +50,64 @@ import java.util.Map;
 final class JavaAssetSource {
 
     /**
-     * Blocks whose bundled entity model is not named after the block.
+     * A code-rendered block mapped onto a bundled entity model.
      *
-     * <p>The chests are one model with three texture sets, so they are filed by variant rather
-     * than by block id. Every other code-rendered block matches its own name.</p>
+     * @param displayId Java item whose {@code display} governs the slot — usually the block
+     *     itself, but Bedrock's {@code undyed_shulker_box} is Java's {@code shulker_box}
+     * @param model bundled model supplying the geometry
+     * @param textures texture-variable overrides, for families sharing one model
      */
-    private static final Map<String, String> ENTITY_MODEL_ALIASES = Map.of(
-        "chest", "entity/chest/normal",
-        "trapped_chest", "entity/chest/trapped",
-        "ender_chest", "entity/chest/ender"
-    );
+    private record CodeRendered(String displayId, String model, Map<String, String> textures) {}
+
+    private static final List<String> DYE_COLORS = List.of(
+        "white", "orange", "magenta", "light_blue", "yellow", "lime", "pink", "gray",
+        "light_gray", "cyan", "purple", "blue", "brown", "green", "red", "black");
+
+    /**
+     * Blocks whose bundled entity model is not simply {@code entity/<block id>}.
+     *
+     * <p>The chests are one model with a texture set per variant — the four copper sheets reuse
+     * the normal chest's geometry outright. The sixteen shulker colours reuse the plain box with
+     * their own sheet rather than {@code dyed_shulker_box}, whose faces expect a dye tint this
+     * renderer would paint foliage-green. The golem statues are filed by pose; a slot always shows
+     * the standing one, and waxing changes neither shape nor sheet. Banners and beds stay
+     * unmapped: the banner's cloth is tinted per dye, so it has the same problem as the dyed
+     * shulker template, and there is no bundled bed at all.</p>
+     */
+    private static final Map<String, CodeRendered> CODE_RENDERED = buildCodeRendered();
+
+    private static Map<String, CodeRendered> buildCodeRendered() {
+        Map<String, CodeRendered> map = new HashMap<>();
+        map.put("chest", new CodeRendered("chest", "entity/chest/normal", Map.of()));
+        map.put("trapped_chest",
+            new CodeRendered("trapped_chest", "entity/chest/trapped", Map.of()));
+        map.put("ender_chest", new CodeRendered("ender_chest", "entity/chest/ender", Map.of()));
+        map.put("undyed_shulker_box",
+            new CodeRendered("shulker_box", "entity/shulker_box", Map.of()));
+        for (String color : DYE_COLORS) {
+            map.put(color + "_shulker_box", new CodeRendered(color + "_shulker_box",
+                "entity/shulker_box", Map.of("0", "entity/shulker/shulker_" + color)));
+        }
+        Map<String, String> copperSheets = Map.of(
+            "copper_chest", "copper",
+            "exposed_copper_chest", "copper_exposed",
+            "weathered_copper_chest", "copper_weathered",
+            "oxidized_copper_chest", "copper_oxidized");
+        for (Map.Entry<String, String> entry : copperSheets.entrySet()) {
+            Map<String, String> sheet = Map.of("chest", "entity/chest/" + entry.getValue());
+            map.put(entry.getKey(),
+                new CodeRendered(entry.getKey(), "entity/chest/normal", sheet));
+            map.put("waxed_" + entry.getKey(),
+                new CodeRendered("waxed_" + entry.getKey(), "entity/chest/normal", sheet));
+        }
+        for (String oxidation : List.of("", "exposed_", "weathered_", "oxidized_")) {
+            String statue = oxidation + "copper_golem_statue";
+            String model = "entity/copper_golem/" + statue + "_standing";
+            map.put(statue, new CodeRendered(statue, model, Map.of()));
+            map.put("waxed_" + statue, new CodeRendered("waxed_" + statue, model, Map.of()));
+        }
+        return Map.copyOf(map);
+    }
 
     private final String baseUrl;
     private final Path cacheDir;
@@ -85,16 +133,68 @@ final class JavaAssetSource {
                 ? "item/" + blockId
                 : "block/" + blockId;
         }
-        JavaBlockModel model = build(modelName);
+        JavaBlockModel model = build(resolveChain(modelName));
+        if (model != null) {
+            return model;
+        }
         // Nothing to draw means Minecraft renders this one from code. The bundled entity models
-        // cover exactly that set, and are reached through the ordinary chain so a #entity texture
-        // variable and a parent (wither_skeleton_skull -> skull_32) still resolve.
-        return model != null ? model : build(ENTITY_MODEL_ALIASES.getOrDefault(blockId,
-            "entity/" + blockId));
+        // supply the geometry — reached through the ordinary chain so a #entity texture variable
+        // and a parent (wither_skeleton_skull -> skull_32) still resolve. The vanilla item model
+        // stays at the head of the chain because it is where Java declares how these items sit in
+        // a slot: display.gui is [30,45,0] (front-on; the block default shows the back corner),
+        // the pot adds gui_light front, the conduit scale 1.0, the skulls translation [0,3,0].
+        CodeRendered mapped = CODE_RENDERED.get(blockId);
+        List<JsonObject> chain = new ArrayList<>(
+            resolveChain(displayModelName(mapped != null ? mapped.displayId() : blockId)));
+        if (mapped != null && !mapped.textures().isEmpty()) {
+            // Ahead of the entity chain: mergedTextures lets earlier entries win, which is how a
+            // colour's own sheet replaces the model's default without touching the file.
+            chain.add(textureOverrides(mapped.textures()));
+        }
+        chain.addAll(resolveChain(mapped != null ? mapped.model() : "entity/" + blockId));
+        return build(chain);
     }
 
-    private JavaBlockModel build(String modelName) throws IOException {
+    /**
+     * Whether Java defines an item for this id.
+     *
+     * <p>The item definition is the authority on what an inventory slot shows. Several Java
+     * blocks share one Bedrock id, and the itemless ones (lava_cauldron, oak_wall_hanging_sign)
+     * must not out-draw a sibling that has a real item — plain cauldron's item is a flat sprite,
+     * and the lava variant's block model would otherwise win by iteration order.</p>
+     */
+    boolean hasItemDefinition(String blockId) throws IOException {
+        return json("items/" + blockId + ".json") != null
+            || json("models/item/" + blockId + ".json") != null;
+    }
+
+    /**
+     * The flat sprite Java shows for this block's item, or {@code null} when the item is not one.
+     *
+     * <p>Saplings, signs, rails, torches, flowers, doors and glass panes are 3D as blocks but
+     * their <em>items</em> resolve to a layer0 sprite ({@code item/generated}), and Java draws
+     * exactly that texture in the slot. Projecting them onto a cube instead invents a solid block
+     * the player never sees — which is what 160-odd of the cube approximations were doing.</p>
+     */
+    BufferedImage flatSpriteFor(String blockId) throws IOException {
+        String modelName = itemModelName(blockId);
+        if (modelName == null) {
+            modelName = json("models/item/" + blockId + ".json") != null
+                ? "item/" + blockId
+                : null;
+        }
+        if (modelName == null) {
+            return null;
+        }
         List<JsonObject> chain = resolveChain(modelName);
+        JsonArray elements = firstArray(chain, "elements");
+        if (elements != null && !elements.isEmpty()) {
+            return null; // has geometry, so the model renderer owns it
+        }
+        return texture(resolveTexture("#layer0", mergedTextures(chain)));
+    }
+
+    private JavaBlockModel build(List<JsonObject> chain) throws IOException {
         if (chain.isEmpty()) {
             return null;
         }
@@ -105,11 +205,10 @@ final class JavaAssetSource {
         Map<String, String> textures = mergedTextures(chain);
         Transform gui = guiTransform(chain);
         boolean shaded = !"front".equals(firstString(chain, "gui_light"));
-        double[] uvScale = uvScale(chain);
 
         List<Element> out = new ArrayList<>();
         for (JsonElement raw : elements) {
-            Element element = readElement(raw.getAsJsonObject(), textures, uvScale);
+            Element element = readElement(raw.getAsJsonObject(), textures);
             if (element != null && !element.faces().isEmpty()) {
                 out.add(element);
             }
@@ -118,25 +217,54 @@ final class JavaAssetSource {
     }
 
     /**
-     * Factor that brings a model's declared UVs into the 0..16 space the renderer samples in.
+     * The model whose {@code display} governs a code-rendered item in an inventory slot.
      *
-     * <p>Vanilla models always use 0..16 regardless of how large the texture actually is. The
-     * bundled entity models are authored in Blockbench, which writes {@code texture_size} and then
-     * states UVs in the texture's own pixels — 0..32 for a decorated pot, 0..64 for a skull.
-     * Ignoring it samples roughly twice too far across the sheet, which lands on a neighbouring
-     * part of the entity texture rather than off the edge, so the icon comes out plausible and
-     * wrong.</p>
+     * <p>Skulls have no {@code models/item/skeleton_skull.json}; their display lives in
+     * {@code item/template_skull}, which only the item definition's {@code special} node names via
+     * {@code base}. Everything else does have an item model of its own name, so that is the
+     * fallback.</p>
      */
-    private static double[] uvScale(List<JsonObject> chain) {
-        JsonArray size = firstArray(chain, "texture_size");
-        if (size == null || size.size() < 2) {
-            return new double[] {1, 1};
+    private String displayModelName(String blockId) throws IOException {
+        JsonObject item = json("items/" + blockId + ".json");
+        String base = item == null ? null : specialBase(item.get("model"));
+        return base != null ? base : "item/" + blockId;
+    }
+
+    /** A synthetic chain entry carrying only texture-variable overrides. */
+    private static JsonObject textureOverrides(Map<String, String> overrides) {
+        JsonObject textures = new JsonObject();
+        overrides.forEach(textures::addProperty);
+        JsonObject model = new JsonObject();
+        model.add("textures", textures);
+        return model;
+    }
+
+    /** The {@code base} of the first {@code special} node, or {@code null} if there is none. */
+    private static String specialBase(JsonElement node) {
+        if (node == null || !node.isJsonObject()) {
+            return null;
         }
-        double width = size.get(0).getAsDouble();
-        double height = size.get(1).getAsDouble();
-        return new double[] {
-            width > 0 ? 16.0 / width : 1,
-            height > 0 ? 16.0 / height : 1};
+        JsonObject object = node.getAsJsonObject();
+        if ("special".equals(bare(asString(object.get("type"))))) {
+            return asString(object.get("base"));
+        }
+        for (Map.Entry<String, JsonElement> entry : object.entrySet()) {
+            JsonElement value = entry.getValue();
+            if (value.isJsonObject()) {
+                String base = specialBase(value);
+                if (base != null) {
+                    return base;
+                }
+            } else if (value.isJsonArray()) {
+                for (JsonElement child : value.getAsJsonArray()) {
+                    String base = specialBase(child);
+                    if (base != null) {
+                        return base;
+                    }
+                }
+            }
+        }
+        return null;
     }
 
     // ------------------------------------------------------------------
@@ -283,8 +411,7 @@ final class JavaAssetSource {
     // Elements
     // ------------------------------------------------------------------
 
-    private Element readElement(JsonObject raw, Map<String, String> textures, double[] uvScale)
-            throws IOException {
+    private Element readElement(JsonObject raw, Map<String, String> textures) throws IOException {
         double[] from = readVector(raw.get("from"), 0, 0, 0);
         double[] to = readVector(raw.get("to"), 16, 16, 16);
         boolean shade = !raw.has("shade") || raw.get("shade").getAsBoolean();
@@ -298,7 +425,7 @@ final class JavaAssetSource {
                     continue;
                 }
                 Face face = readFace(entry.getValue().getAsJsonObject(), direction, from, to,
-                    textures, uvScale);
+                    textures);
                 if (face != null) {
                     faces.put(direction, face);
                 }
@@ -308,15 +435,18 @@ final class JavaAssetSource {
     }
 
     private Face readFace(JsonObject raw, Direction direction, double[] from, double[] to,
-                          Map<String, String> textures, double[] uvScale) throws IOException {
+                          Map<String, String> textures) throws IOException {
         BufferedImage texture = texture(resolveTexture(asString(raw.get("texture")), textures));
         if (texture == null) {
             return null;
         }
-        // Only a declared uv lives in texture_size space; a default one is derived from the
-        // element's own extent and is already in model space.
+        // UVs are 0..16 whatever the texture's resolution — for the bundled Blockbench models
+        // too. Their texture_size is metadata only: the skull's [6,4,8,8] lands exactly on the
+        // head's back face once multiplied by the real texture size, and scaling it by
+        // texture_size instead lands on a near-uniform patch, which is how the skulls once baked
+        // as plain white and black cubes without anything obviously failing.
         double[] uv = raw.has("uv")
-            ? scaleUv(readUv(raw.getAsJsonArray("uv")), uvScale)
+            ? readUv(raw.getAsJsonArray("uv"))
             : defaultUv(direction, from, to);
         int rotation = raw.has("rotation") ? raw.get("rotation").getAsInt() : 0;
         boolean tinted = raw.has("tintindex") && raw.get("tintindex").getAsInt() >= 0;
@@ -356,11 +486,24 @@ final class JavaAssetSource {
         };
     }
 
-    /** Follows {@code #name} indirection to a real texture path. */
+    /**
+     * Follows {@code #name} indirection to a real texture path.
+     *
+     * <p>A bare name that matches a texture variable is followed too: Mojang's own
+     * {@code block/heavy_core} writes {@code "texture": "all"} without the {@code #}, and the
+     * client resolves it anyway. Real texture paths always carry a directory, so the ambiguity is
+     * theoretical.</p>
+     */
     private static String resolveTexture(String reference, Map<String, String> textures) {
         String value = reference;
-        for (int depth = 0; value != null && value.startsWith("#") && depth < 16; depth++) {
-            value = textures.get(value.substring(1));
+        for (int depth = 0; value != null && depth < 16; depth++) {
+            if (value.startsWith("#")) {
+                value = textures.get(value.substring(1));
+            } else if (textures.containsKey(value)) {
+                value = textures.get(value);
+            } else {
+                break;
+            }
         }
         return value;
     }
@@ -375,11 +518,6 @@ final class JavaAssetSource {
             case "east" -> Direction.EAST;
             default -> null;
         };
-    }
-
-    private static double[] scaleUv(double[] uv, double[] scale) {
-        return new double[] {
-            uv[0] * scale[0], uv[1] * scale[1], uv[2] * scale[0], uv[3] * scale[1]};
     }
 
     private static double[] readUv(JsonArray raw) {

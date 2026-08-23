@@ -11,9 +11,12 @@ These files fill that gap. They are ordinary Java model JSON (`elements` + `text
 remote asset is missing, the bundled copy at the same relative path is used instead. If Mojang ever
 ships real models for these blocks, the remote copy wins and these become dead weight.
 
-`texture_size` is honoured here and nowhere in vanilla: these models are authored in Blockbench
-against the entity textures, whose UV space is the texture's own pixel size (32×32 for the pot,
-64×32 for a skull) rather than the 16×16 vanilla models assume.
+`texture_size` in these files is Blockbench metadata and must be **ignored**: the UVs are in the
+ordinary 0..16 model space, exactly like vanilla. Proof by the skull: its north face declares
+`[6,4,8,8]`, which multiplied by the real 64×32 sheet lands precisely on the head's back face
+(pixels 24..32 × 8..16). Scaling by `texture_size` instead lands on a near-uniform patch — that
+mistake once baked every skull as a plain white or black cube, and the pot's mostly-uniform
+terracotta sheet hid it from the first visual check.
 
 ## Source and licence
 

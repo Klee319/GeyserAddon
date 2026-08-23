@@ -48,28 +48,6 @@ import java.util.TreeMap;
 public final class BedrockBlockIconGenerator {
 
     /**
-     * Blocks whose <em>item</em> Java draws as a flat sprite rather than a rendered model.
-     *
-     * <p>The rule this file follows is "look like Java looks". Java decides per item model: a
-     * {@code block/*} parent is rendered in 3D under the gui transform, while an
-     * {@code item/generated} parent is a flat sprite — which is what a chain, a candle, a wither
-     * rose or a cauldron actually shows in the inventory. Projecting those into a cube would invent
-     * a solid block the player never sees.</p>
-     *
-     * <p>Everything not listed here is projected, <b>including the blocks whose model is not a
-     * plain cube</b> (decorated pot, lectern, anvil, campfire...). Java renders those in 3D, so a
-     * cube approximation is far closer to the real icon than a flat square is — the first cut of
-     * this list flattened them and the source jar came out looking 2D.</p>
-     *
-     * <p>Either way they are baked. Skipping them entirely is what left {@code source_jar} and
-     * friends unregistered, and an unregistered item cannot be named by an injected recipe.</p>
-     */
-    private static final Set<String> FLAT_SPRITE_BLOCKS = Set.of(
-        "wither_rose", "iron_chain", "chain", "brewing_stand", "cauldron", "hopper",
-        "grindstone", "bell", "lightning_rod", "candle", "sea_pickle", "amethyst_cluster"
-    );
-
-    /**
      * Blocks whose shape can only come from the bundled entity models.
      *
      * <p>Minecraft draws these from code, so their Java model carries a particle texture and
@@ -77,7 +55,8 @@ public final class BedrockBlockIconGenerator {
      * {@code main}.</p>
      */
     private static final Set<String> MODEL_SHAPED_BY_BUNDLE = Set.of(
-        "decorated_pot", "conduit", "chest", "skeleton_skull", "wither_skeleton_skull"
+        "decorated_pot", "conduit", "chest", "skeleton_skull", "wither_skeleton_skull",
+        "undyed_shulker_box", "white_shulker_box", "copper_chest", "copper_golem_statue"
     );
 
     /**
@@ -125,24 +104,64 @@ public final class BedrockBlockIconGenerator {
         List<String> flat = new ArrayList<>();
         List<String> skipped = new ArrayList<>();
         Set<String> written = new LinkedHashSet<>();
+        // Several Java blocks can name the same Bedrock id, and they are not equally good sources.
+        // Java's item definition is the authority on what a slot shows, so ids that have one come
+        // first — plain cauldron (a flat sprite) must beat lava_cauldron (an itemless block whose
+        // 3D model would win by iteration order). Itemless ids follow, and only the blocks
+        // nothing could draw fall to the cube approximation below.
+        List<Map.Entry<String, String>> byItemFirst = new ArrayList<>();
+        List<Map.Entry<String, String>> itemless = new ArrayList<>();
         for (Map.Entry<String, String> wanted : wantedByJavaId.entrySet()) {
+            (javaAssets.hasItemDefinition(wanted.getKey()) ? byItemFirst : itemless).add(wanted);
+        }
+        // The Bedrock name itself is a candidate too: the table keys cauldron only by its state
+        // blocks (lava_cauldron...) and hanging signs only by their wall variants, all itemless —
+        // while Java's own cauldron and oak_hanging_sign items exist and are what a slot shows.
+        for (String block : new LinkedHashSet<>(wantedByJavaId.values())) {
+            if (!wantedByJavaId.containsKey(block) && javaAssets.hasItemDefinition(block)) {
+                byItemFirst.add(Map.entry(block, block));
+            }
+        }
+        byItemFirst.addAll(itemless);
+        Map<String, String> cubeCandidates = new LinkedHashMap<>();
+        for (Map.Entry<String, String> wanted : byItemFirst) {
             String javaId = wanted.getKey();
             String block = wanted.getValue();
-            if (!written.add(block)) {
-                continue; // several Java blocks can name the same Bedrock id (furnace/lit_furnace)
+            if (written.contains(block)) {
+                continue;
             }
 
             // Java's own model first: it carries the real shape, so a lectern comes out a lectern
             // and not a cube of its side texture. Blocks Minecraft draws from code (decorated pot,
-            // conduit, chest, heads) have no elements and fall through to the cube below.
+            // conduit, chest, heads) have no elements and fall through.
             BufferedImage javaIcon = JavaModelRenderer.render(javaAssets.modelFor(javaId));
             if (javaIcon != null) {
                 write(outputDir.resolve(block + ".png"), javaIcon);
+                written.add(block);
                 generated.add(block);
                 fromJavaModel.add(block);
                 continue;
             }
 
+            // No geometry, but an item sprite: Java decides per item model, and an item/generated
+            // layer0 (sapling, sign, rail, torch, flower, door, glass pane...) means the slot
+            // shows that texture flat. This is Java's own item texture, not Bedrock's block face —
+            // a bell's item sprite is the whole bell, not a plate of its side.
+            BufferedImage javaSprite = javaAssets.flatSpriteFor(javaId);
+            if (javaSprite != null) {
+                write(outputDir.resolve(block + ".png"), IsometricBlockRenderer.flat(javaSprite));
+                written.add(block);
+                generated.add(block);
+                flat.add(block);
+                continue;
+            }
+
+            cubeCandidates.putIfAbsent(block, javaId);
+        }
+        for (String block : cubeCandidates.keySet()) {
+            if (!written.add(block)) {
+                continue; // a later Java id for the same Bedrock block drew the real thing
+            }
             BlockFaces faces = blocks.get(block);
             if (faces == null) {
                 faces = blocks.get(BLOCKS_JSON_ALIASES.get(block));
@@ -160,15 +179,7 @@ public final class BedrockBlockIconGenerator {
                 ? null
                 : loadTexture(faces.side(), terrain, textureCacheDir, bedrockSamplesBase);
 
-            BufferedImage icon;
-            if (FLAT_SPRITE_BLOCKS.contains(block)) {
-                // Its own texture, undistorted — the same flat sprite Java shows for these.
-                icon = IsometricBlockRenderer.flat(side != null ? side : up);
-                flat.add(block);
-            } else {
-                icon = IsometricBlockRenderer.render(up, side);
-            }
-            write(outputDir.resolve(block + ".png"), icon);
+            write(outputDir.resolve(block + ".png"), IsometricBlockRenderer.render(up, side));
             generated.add(block);
         }
 
@@ -210,6 +221,10 @@ public final class BedrockBlockIconGenerator {
         for (String note : skipped) {
             System.out.println("[block-icons]   skipped " + note);
         }
+        List<String> cubes = new ArrayList<>(generated);
+        cubes.removeAll(fromJavaModel);
+        cubes.removeAll(flat);
+        System.out.println("[block-icons]   cube: " + String.join(" ", cubes));
     }
 
     private static void write(Path target, BufferedImage icon) throws IOException {
