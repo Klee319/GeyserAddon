@@ -23,8 +23,10 @@ import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.zip.ZipEntry;
@@ -72,6 +74,20 @@ public final class JavaPackResolver {
 
     /** Base directory name for per-source extract folders. One subdir per configured pack. */
     private static final String EXTRACT_DIR_NAME = "java-pack-extracted";
+
+    /** Sidecar inside an extract directory naming the ZIP it was produced from. */
+    private static final String EXTRACT_STAMP_FILE = ".source-stamp";
+
+    /**
+     * One lock per extract directory, shared by every resolver in the process.
+     *
+     * <p>Static because the racing callers are separate {@code JavaPackResolver}
+     * instances built per pack rebuild; an instance field would guard nothing.
+     * Keyed by absolute path so two resolvers pointed at different data folders
+     * never wait on each other. Entries are never removed — there is one per
+     * configured pack, so the map is bounded by the config.</p>
+     */
+    private static final Map<String, Object> EXTRACT_LOCKS = new ConcurrentHashMap<>();
 
     /** Network timeouts kept short so a slow / down URL host never blocks server startup. */
     private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(15);
@@ -644,58 +660,105 @@ public final class JavaPackResolver {
 
     /**
      * Extracts {@code zipFile} into the named extract subdirectory and
-     * returns the extract root. Re-creates the directory from scratch on
-     * every call so stale files from a previous pack don't linger.
+     * returns the extract root.
      *
      * <p>Each call uses its own {@code subdirName} so multi-pack scans
      * don't share an extract root (and accidentally erase each other's
-     * files mid-scan).</p>
+     * files mid-scan). That separates <em>different</em> packs; it does
+     * nothing for two resolves of the <em>same</em> pack, which is why the
+     * work below is both stamped and locked — see {@link #extractStamp}.</p>
      *
      * <p>Path-traversal entries ({@code ../} or absolute paths) are
      * silently skipped per OWASP Zip Slip guidance.</p>
      */
     private Path extractZip(Path zipFile, String sourceLabel, String subdirName) {
         Path extractDir = cacheFile(subdirName);
-        try {
-            deleteRecursive(extractDir);
-            Files.createDirectories(extractDir);
-
-            int extracted = 0;
-            int skipped = 0;
-            try (ZipInputStream zis = new ZipInputStream(Files.newInputStream(zipFile))) {
-                ZipEntry entry;
-                while ((entry = zis.getNextEntry()) != null) {
-                    String name = entry.getName();
-                    if (name == null || name.isBlank()) {
-                        skipped++;
-                        continue;
-                    }
-                    Path target = extractDir.resolve(name).normalize();
-                    if (!target.startsWith(extractDir)) {
-                        // Zip-slip protection: refuse entries that resolve
-                        // outside the extract root (e.g. "../etc/passwd").
-                        skipped++;
-                        continue;
-                    }
-                    if (entry.isDirectory()) {
-                        Files.createDirectories(target);
-                    } else {
-                        Path parent = target.getParent();
-                        if (parent != null) {
-                            Files.createDirectories(parent);
-                        }
-                        Files.copy(zis, target, StandardCopyOption.REPLACE_EXISTING);
-                        extracted++;
-                    }
-                    zis.closeEntry();
+        // One lock per extract root, process-wide: two pack builds on different
+        // scheduler threads resolve the same server.properties pack, and without
+        // this the second one's deleteRecursive runs while the first is still
+        // reading textures out of the directory. Observed 2026-08-24 as 537
+        // NoSuchFileException warnings in a single startup, each of which drops
+        // that item's texture and makes Bedrock fall back to a vanilla one.
+        Object lock = EXTRACT_LOCKS.computeIfAbsent(
+            extractDir.toAbsolutePath().normalize().toString(), key -> new Object());
+        synchronized (lock) {
+            try {
+                String stamp = extractStamp(zipFile);
+                Path stampFile = extractDir.resolve(EXTRACT_STAMP_FILE);
+                if (stamp != null && Files.isRegularFile(stampFile)
+                    && stamp.equals(Files.readString(stampFile, StandardCharsets.UTF_8))) {
+                    // Same bytes as what is already on disk. Re-extracting would
+                    // delete and rewrite every file for no change, which is the
+                    // window the races above live in.
+                    logger.fine("[JavaPack] reusing extracted " + sourceLabel);
+                    return extractDir;
                 }
+                deleteRecursive(extractDir);
+                Files.createDirectories(extractDir);
+
+                int extracted = 0;
+                int skipped = 0;
+                try (ZipInputStream zis = new ZipInputStream(Files.newInputStream(zipFile))) {
+                    ZipEntry entry;
+                    while ((entry = zis.getNextEntry()) != null) {
+                        String name = entry.getName();
+                        if (name == null || name.isBlank()) {
+                            skipped++;
+                            continue;
+                        }
+                        Path target = extractDir.resolve(name).normalize();
+                        if (!target.startsWith(extractDir)) {
+                            // Zip-slip protection: refuse entries that resolve
+                            // outside the extract root (e.g. "../etc/passwd").
+                            skipped++;
+                            continue;
+                        }
+                        if (entry.isDirectory()) {
+                            Files.createDirectories(target);
+                        } else {
+                            Path parent = target.getParent();
+                            if (parent != null) {
+                                Files.createDirectories(parent);
+                            }
+                            Files.copy(zis, target, StandardCopyOption.REPLACE_EXISTING);
+                            extracted++;
+                        }
+                        zis.closeEntry();
+                    }
+                }
+                // Written last so a crash mid-extract leaves no stamp and the
+                // next resolve redoes the work rather than trusting a half copy.
+                if (stamp != null) {
+                    Files.writeString(stampFile, stamp, StandardCharsets.UTF_8);
+                }
+                logger.fine("[JavaPack] extracted " + extracted + " files from "
+                    + sourceLabel + (skipped > 0 ? " (skipped " + skipped + " unsafe entries)" : ""));
+                return extractDir;
+            } catch (IOException ex) {
+                logger.warning("[JavaPack] failed to extract " + zipFile + ": "
+                    + ex.getClass().getSimpleName() + ": " + ex.getMessage());
+                return null;
             }
-            logger.fine("[JavaPack] extracted " + extracted + " files from "
-                + sourceLabel + (skipped > 0 ? " (skipped " + skipped + " unsafe entries)" : ""));
-            return extractDir;
+        }
+    }
+
+    /**
+     * Identity of the ZIP currently extracted into a directory: its size and
+     * last-modified time.
+     *
+     * <p>Deliberately not a content hash. The point is to skip work, and
+     * hashing a 500 KB pack on every resolve to decide whether to skip
+     * re-reading that same pack trades one cost for another. Size plus mtime
+     * changes for any operator edit, which is the case the re-extraction
+     * exists to serve.</p>
+     *
+     * @return {@code null} when the ZIP cannot be stat'd, which makes the
+     *     caller extract unconditionally — the old behaviour
+     */
+    private static String extractStamp(Path zipFile) {
+        try {
+            return Files.size(zipFile) + ":" + Files.getLastModifiedTime(zipFile).toMillis();
         } catch (IOException ex) {
-            logger.warning("[JavaPack] failed to extract " + zipFile + ": "
-                + ex.getClass().getSimpleName() + ": " + ex.getMessage());
             return null;
         }
     }
