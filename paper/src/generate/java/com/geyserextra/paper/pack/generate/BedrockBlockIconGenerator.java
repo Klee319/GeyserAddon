@@ -1,6 +1,7 @@
 package com.geyserextra.paper.pack.generate;
 
 import com.geyserextra.core.util.IsometricBlockRenderer;
+import com.geyserextra.core.util.JavaModelRenderer;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
@@ -86,9 +87,10 @@ public final class BedrockBlockIconGenerator {
     );
 
     public static void main(String[] args) throws IOException {
-        if (args.length < 6) {
+        if (args.length < 7) {
             throw new IllegalArgumentException("usage: <terrain_texture.json> <blocks.json> "
-                + "<vanilla_texture_paths.json> <textureCacheDir> <outputDir> <bedrockSamplesBase>");
+                + "<vanilla_texture_paths.json> <textureCacheDir> <outputDir> <bedrockSamplesBase>"
+                + " <javaAssetsBase>");
         }
         Path terrainTextureFile = Path.of(args[0]);
         Path blocksFile = Path.of(args[1]);
@@ -96,18 +98,40 @@ public final class BedrockBlockIconGenerator {
         Path textureCacheDir = Path.of(args[3]);
         Path outputDir = Path.of(args[4]);
         String bedrockSamplesBase = args[5];
+        String javaAssetsBase = args[6];
 
         Map<String, String> terrain = readTerrainTexturePaths(readJson(terrainTextureFile));
         Map<String, BlockFaces> blocks = readBlockFaces(readJson(blocksFile));
-        Set<String> wanted = readUseBlockIconTargets(readJson(vanillaTexturePathsFile));
+        Map<String, String> wantedByJavaId = readUseBlockIcon(readJson(vanillaTexturePathsFile));
 
         Files.createDirectories(outputDir);
         Files.createDirectories(textureCacheDir);
+        JavaAssetSource javaAssets =
+            new JavaAssetSource(javaAssetsBase, textureCacheDir.resolve("java-assets"));
 
         List<String> generated = new ArrayList<>();
+        List<String> fromJavaModel = new ArrayList<>();
         List<String> flat = new ArrayList<>();
         List<String> skipped = new ArrayList<>();
-        for (String block : new LinkedHashSet<>(wanted)) {
+        Set<String> written = new LinkedHashSet<>();
+        for (Map.Entry<String, String> wanted : wantedByJavaId.entrySet()) {
+            String javaId = wanted.getKey();
+            String block = wanted.getValue();
+            if (!written.add(block)) {
+                continue; // several Java blocks can name the same Bedrock id (furnace/lit_furnace)
+            }
+
+            // Java's own model first: it carries the real shape, so a lectern comes out a lectern
+            // and not a cube of its side texture. Blocks Minecraft draws from code (decorated pot,
+            // conduit, chest, heads) have no elements and fall through to the cube below.
+            BufferedImage javaIcon = JavaModelRenderer.render(javaAssets.modelFor(javaId));
+            if (javaIcon != null) {
+                write(outputDir.resolve(block + ".png"), javaIcon);
+                generated.add(block);
+                fromJavaModel.add(block);
+                continue;
+            }
+
             BlockFaces faces = blocks.get(block);
             if (faces == null) {
                 faces = blocks.get(BLOCKS_JSON_ALIASES.get(block));
@@ -133,38 +157,45 @@ public final class BedrockBlockIconGenerator {
             } else {
                 icon = IsometricBlockRenderer.render(up, side);
             }
-            Path target = outputDir.resolve(block + ".png");
-            try (var out = Files.newOutputStream(target)) {
-                ImageIO.write(icon, "PNG", out);
-            }
+            write(outputDir.resolve(block + ".png"), icon);
             generated.add(block);
         }
 
-        if (generated.size() < wanted.size() / 2) {
-            // Far too few to be a data change. Something structural broke — a moved sample pack, a
+        if (generated.size() < written.size() / 2) {
+            // Far too few to be a data change. Something structural broke — a moved asset mirror, a
             // renamed json — and shipping the jar anyway would un-register hundreds of items and
             // drop their recipes without a single failing test.
-            throw new IOException("only " + generated.size() + " of " + wanted.size()
+            throw new IOException("only " + generated.size() + " of " + written.size()
                 + " block icons could be baked; refusing to ship a jar that would leave"
                 + " block-based items unregistered");
         }
 
         writeIndex(outputDir.resolve("index.json"), generated);
 
-        System.out.println("[block-icons] generated " + generated.size()
-            + " block icon(s) (" + flat.size() + " flat, not a full cube), skipped "
-            + skipped.size());
+        System.out.println("[block-icons] generated " + generated.size() + " block icon(s): "
+            + fromJavaModel.size() + " from Java's own model, "
+            + (generated.size() - fromJavaModel.size() - flat.size()) + " cube-approximated, "
+            + flat.size() + " flat; skipped " + skipped.size());
         for (String note : skipped) {
             System.out.println("[block-icons]   skipped " + note);
         }
     }
 
+    private static void write(Path target, BufferedImage icon) throws IOException {
+        try (var out = Files.newOutputStream(target)) {
+            ImageIO.write(icon, "PNG", out);
+        }
+    }
+
     /**
-     * The block ids we need an icon for: exactly the {@code useBlockIcon} targets, which is the set
-     * of bases {@code CustomItemsHandler} currently refuses to register for lack of a flat icon.
+     * The blocks we need an icon for: the {@code useBlockIcon} table, Java id to Bedrock id.
+     *
+     * <p>Both halves are needed now. The Java id is what Minecraft's assets are keyed on, and the
+     * Bedrock id is what the pack builder looks the baked file up by — the value is what the file
+     * must be named, never the key.</p>
      */
-    private static Set<String> readUseBlockIconTargets(JsonObject root) {
-        Set<String> out = new LinkedHashSet<>();
+    private static Map<String, String> readUseBlockIcon(JsonObject root) {
+        Map<String, String> out = new LinkedHashMap<>();
         JsonObject useBlockIcon = root.getAsJsonObject("useBlockIcon");
         if (useBlockIcon == null) {
             return out;
@@ -172,7 +203,8 @@ public final class BedrockBlockIconGenerator {
         for (Map.Entry<String, JsonElement> entry : useBlockIcon.entrySet()) {
             JsonElement value = entry.getValue();
             if (value != null && value.isJsonPrimitive()) {
-                out.add(value.getAsString().toLowerCase(Locale.ROOT));
+                out.put(entry.getKey().toLowerCase(Locale.ROOT),
+                    value.getAsString().toLowerCase(Locale.ROOT));
             }
         }
         return out;

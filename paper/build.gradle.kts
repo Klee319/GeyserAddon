@@ -14,6 +14,11 @@ val minecraftDataBase =
     "https://raw.githubusercontent.com/PrismarineJS/minecraft-data/master/data/pc/$minecraftDataVersion"
 val minecraftDataBedrockBase =
     "https://raw.githubusercontent.com/PrismarineJS/minecraft-data/master/data/bedrock/$minecraftDataBedrockVersion"
+// Minecraft's own Java assets (block models + block textures), from a mirror of the extracted
+// client jar. This is what lets the baked icons carry the real shape of a lectern or an anvil
+// instead of a cube of its side texture.
+val javaAssetsBase =
+    "https://raw.githubusercontent.com/InventivetalentDev/minecraft-assets/$minecraftDataVersion"
 val bedrockSamplesCacheDir = layout.buildDirectory.dir("bedrock-samples-cache")
 val minecraftDataCacheDir = layout.buildDirectory.dir("minecraft-data-cache/$minecraftDataVersion")
 val generatedResourcesDir = layout.buildDirectory.dir("generated/resources")
@@ -203,7 +208,8 @@ val generateBlockIcons by tasks.registering(JavaExec::class) {
         generatedVanillaTexturePaths.get().asFile,
         blockTextureCacheDir.get().asFile,
         generatedBlockIconsDir.get().asFile,
-        bedrockSamplesBase
+        bedrockSamplesBase,
+        javaAssetsBase
     )
     inputs.files(
         terrainTexture,
@@ -211,6 +217,8 @@ val generateBlockIcons by tasks.registering(JavaExec::class) {
         generatedVanillaTexturePaths,
         sourceSets.named("generate").map { it.allJava }
     )
+    // A Minecraft version bump must re-bake rather than reuse the previous version's cache.
+    inputs.property("javaAssetsBase", javaAssetsBase)
     outputs.dir(generatedBlockIconsDir)
 }
 
