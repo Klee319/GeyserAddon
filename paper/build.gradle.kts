@@ -18,6 +18,13 @@ val bedrockSamplesCacheDir = layout.buildDirectory.dir("bedrock-samples-cache")
 val minecraftDataCacheDir = layout.buildDirectory.dir("minecraft-data-cache/$minecraftDataVersion")
 val generatedResourcesDir = layout.buildDirectory.dir("generated/resources")
 val generatedVanillaTexturePaths = generatedResourcesDir.map { it.file("bedrock/vanilla_texture_paths.json") }
+// Baked block icons get their own resource root, deliberately NOT generatedResourcesDir: the
+// extension module bakes that directory into its own jar for the vanilla_texture_paths fallback,
+// and only the Paper module builds packs, so sharing the root would put ~650 KB of PNGs the
+// extension never reads into the extension jar.
+val generatedBlockIconResourcesDir = layout.buildDirectory.dir("generated/block-icon-resources")
+val generatedBlockIconsDir = generatedBlockIconResourcesDir.map { it.dir("bedrock/block_icons") }
+val blockTextureCacheDir = layout.buildDirectory.dir("bedrock-block-textures-cache")
 
 sourceSets {
     create("generate") {
@@ -28,6 +35,10 @@ sourceSets {
 dependencies {
     implementation(project(":core"))
     "generateImplementation"("com.google.code.gson:gson:2.10.1")
+    // IsometricBlockRenderer lives in :core so both this generator and a unit test can reach it.
+    // Putting it in :paper's main source set instead makes generateVanillaTexturePaths depend on
+    // compileJava, which already depends on it — an outright circular task graph.
+    "generateImplementation"(project(":core"))
     compileOnly("io.papermc.paper:paper-api:1.21.11-R0.1-SNAPSHOT")
     // Why 2.10.0-SNAPSHOT: matches the extension module so both halves of the plugin
     // compile against the same Geyser API surface. The v2 custom item types
@@ -82,7 +93,10 @@ val downloadBedrockSamples by tasks.registering {
     // ("Wooden Sword"). Taking the strings from Mojang's own pack means the
     // fallback name is exactly what the player would have seen anyway.
     val jaLang = bedrockSamplesCacheDir.map { it.file("ja_JP.lang") }
-    outputs.files(itemTexture, terrainTexture, manifest, jaLang)
+    // Per-block face texture keys. Needed to bake an inventory icon for blocks, which have no
+    // flat item texture of their own -- see BedrockBlockIconGenerator for why that matters.
+    val blocksDefinition = bedrockSamplesCacheDir.map { it.file("blocks.json") }
+    outputs.files(itemTexture, terrainTexture, manifest, jaLang, blocksDefinition)
 
     doLast {
         val cache = bedrockSamplesCacheDir.get().asFile
@@ -92,7 +106,8 @@ val downloadBedrockSamples by tasks.registering {
             "textures/item_texture.json" to itemTexture.get().asFile,
             "textures/terrain_texture.json" to terrainTexture.get().asFile,
             "manifest.json" to manifest.get().asFile,
-            "texts/ja_JP.lang" to jaLang.get().asFile
+            "texts/ja_JP.lang" to jaLang.get().asFile,
+            "blocks.json" to blocksDefinition.get().asFile
         ).forEach { (remotePath, localFile) ->
             if (forceRefresh || !localFile.exists()) {
                 URI("$bedrockSamplesBase/$remotePath").toURL().openStream().use { input ->
@@ -165,9 +180,44 @@ val generateVanillaTexturePaths by tasks.registering(JavaExec::class) {
     outputs.file(generatedVanillaTexturePaths)
 }
 
+// Bake an isometric inventory icon for every block that has no flat item texture.
+//
+// Java renders the block model live in the slot; Bedrock custom items can only name a flat PNG, and
+// Geyser rejects the block_placer component on vanilla-based definitions. Without a baked icon a
+// block-based custom item cannot be registered at all, and an unregistered item cannot be named by
+// an injected recipe -- which is what made 203 of 360 corrected recipes undeliverable.
+//
+// Textures are pulled from Mojang's bedrock-samples and cached under build/, so only the first
+// build pays for the downloads. A block that cannot be resolved is skipped, not fatal.
+val generateBlockIcons by tasks.registering(JavaExec::class) {
+    group = "build"
+    description = "Bake isometric inventory icons for blocks from Mojang bedrock-samples"
+    dependsOn("compileGenerateJava", downloadBedrockSamples, generateVanillaTexturePaths)
+    classpath = sourceSets["generate"].runtimeClasspath
+    mainClass.set("com.geyserextra.paper.pack.generate.BedrockBlockIconGenerator")
+    val terrainTexture = bedrockSamplesCacheDir.map { it.file("terrain_texture.json") }
+    val blocksDefinition = bedrockSamplesCacheDir.map { it.file("blocks.json") }
+    args(
+        terrainTexture.get().asFile,
+        blocksDefinition.get().asFile,
+        generatedVanillaTexturePaths.get().asFile,
+        blockTextureCacheDir.get().asFile,
+        generatedBlockIconsDir.get().asFile,
+        bedrockSamplesBase
+    )
+    inputs.files(
+        terrainTexture,
+        blocksDefinition,
+        generatedVanillaTexturePaths,
+        sourceSets.named("generate").map { it.allJava }
+    )
+    outputs.dir(generatedBlockIconsDir)
+}
+
 sourceSets.named("main") {
     resources {
         srcDir(generatedResourcesDir)
+        srcDir(generatedBlockIconResourcesDir)
     }
 }
 
@@ -176,7 +226,7 @@ tasks.named("compileJava") {
 }
 
 tasks.named<ProcessResources>("processResources") {
-    dependsOn(generateVanillaTexturePaths)
+    dependsOn(generateVanillaTexturePaths, generateBlockIcons)
 }
 
 // Surface every deprecated / marked-for-removal API call at build time so

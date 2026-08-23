@@ -801,6 +801,47 @@ public final class AutoBedrockPackBuilder {
             }
         }
 
+        // Blocks have no flat item texture of their own, so a block-based custom item had no icon
+        // it could name. Geyser also rejects geysermc:block_placer — the component that would hand
+        // the client the block model — on definitions extending a vanilla Java item, because every
+        // component in that namespace reports vanilla() == false. Those items were consequently
+        // left unregistered, and an unregistered item has no Bedrock identifier for an injected
+        // recipe to name: that is what made 203 of 360 corrected recipes undeliverable and every
+        // block-based craft impossible on Bedrock, in survival as much as creative.
+        //
+        // Fall back to the isometric cube baked at build time, which is the same view Java renders
+        // live in the slot. Only mappings that resolved no icon above reach this, so an authored
+        // texture always wins.
+        int bakedBlockIcons = 0;
+        for (CustomItemMapping mapping : mappings) {
+            String iconKey = toBedrockIconKey(mapping.name());
+            if (customIconToTexturePath.containsKey(iconKey)) {
+                continue;
+            }
+            String bedrockBlockId =
+                BedrockVanillaTexturePaths.blockIconBases().get(bareBaseId(mapping.baseItem()));
+            byte[] baked = BakedBlockIcons.iconFor(bedrockBlockId);
+            if (baked == null) {
+                // Either not a block, or a block that is not a full cube (decorated pot, lectern,
+                // beacon...) and so was deliberately not baked. Keeps the vanilla-base fallback.
+                continue;
+            }
+            String fileBase = zipSafeFileBase(iconKey);
+            String textureRelative = "textures/items/" + fileBase;
+            String zipEntry = textureRelative + ".png";
+            if (!plannedZipEntries.add(zipEntry)) {
+                continue;
+            }
+            itemTextureBytes.put(zipEntry, baked);
+            customIconToTexturePath.put(iconKey, textureRelative);
+            bakedBlockIcons++;
+        }
+        if (bakedBlockIcons > 0 && logger != null) {
+            logger.info("[AutoPack] baked a block icon for " + bakedBlockIcons
+                + " item(s) whose base material is a block — without one they stay unregistered"
+                + " and no injected Bedrock recipe can name them");
+        }
+
         // Bedrock names a custom item by looking its identifier up in the
         // pack's texts/*.lang; with no entry the client shows the raw
         // identifier, which is what surfaced as "item names are item IDs".
@@ -1787,6 +1828,19 @@ public final class AutoBedrockPackBuilder {
      */
     private static String vanillaTexturePathFor(String baseItem) {
         return BedrockVanillaTexturePaths.resolve(baseItem);
+    }
+
+    /**
+     * Strips the namespace from a base item id, since {@link BedrockVanillaTexturePaths} keys its
+     * maps on the bare Java id ({@code minecraft:oak_log} to {@code oak_log}).
+     */
+    static String bareBaseId(String baseItem) {
+        if (baseItem == null) {
+            return null;
+        }
+        int colon = baseItem.indexOf(':');
+        return (colon < 0 ? baseItem : baseItem.substring(colon + 1))
+            .toLowerCase(java.util.Locale.ROOT);
     }
 
     /**
