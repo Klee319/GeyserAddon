@@ -75,8 +75,40 @@ class IsometricBlockRendererTest {
         int up = icon.getRGB(S / 2, S * 3 / 16) & 0xFFFFFF;
         int left = icon.getRGB(S * 3 / 16, S * 11 / 16) & 0xFFFFFF;
         int right = icon.getRGB(S * 13 / 16, S * 11 / 16) & 0xFFFFFF;
-        assertThat(up).as("up face is brightest").isGreaterThan(left);
-        assertThat(left).as("left face is brighter than right").isGreaterThan(right);
+        assertThat(up).as("up face is brightest").isGreaterThan(right);
+        // Java's 225° yaw turns EAST toward the camera on the left and NORTH on the right, and
+        // Minecraft shades east/west 0.6 against north/south 0.8 — so the LEFT face is the dark
+        // one. Having these the wrong way round is what made the bake read as "not Java".
+        assertThat(right).as("right face (north, 0.8) is brighter than left (east, 0.6)")
+            .isGreaterThan(left);
+    }
+
+    @Test
+    @DisplayName("is taller than it is wide, in Java's proportion rather than the pixel-art cube's")
+    void silhouetteMatchesJavasProportion() {
+        // Java's gui transform is rotation [30, 225, 0]: the silhouette is 2·sin45° = 1.414 edges
+        // wide and 2·(0.354) + cos30° = 1.573 edges tall, i.e. 1.112 times taller than wide.
+        // The plain pixel-art cube uses a half-width body instead and comes out square — which is
+        // what the first deployment shipped, and what was reported back as "Java と違う".
+        BufferedImage icon = IsometricBlockRenderer.render(solid(0xFFFFFF), null);
+        int minX = S;
+        int maxX = -1;
+        int minY = S;
+        int maxY = -1;
+        for (int y = 0; y < S; y++) {
+            for (int x = 0; x < S; x++) {
+                if (alphaAt(icon, x, y) != 0) {
+                    minX = Math.min(minX, x);
+                    maxX = Math.max(maxX, x);
+                    minY = Math.min(minY, y);
+                    maxY = Math.max(maxY, y);
+                }
+            }
+        }
+        double width = maxX - minX + 1;
+        double height = maxY - minY + 1;
+        assertThat(height / width).as("silhouette height over width")
+            .isBetween(1.08, 1.15);
     }
 
     @Test
