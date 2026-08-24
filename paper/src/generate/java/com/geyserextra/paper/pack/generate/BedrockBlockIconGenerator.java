@@ -221,6 +221,8 @@ public final class BedrockBlockIconGenerator {
         for (String note : skipped) {
             System.out.println("[block-icons]   skipped " + note);
         }
+        // Name the cube-approximated ids, don't just count them. The count moving is meaningless
+        // on its own -- what matters is WHICH block lost its Java model, visible only here.
         List<String> cubes = new ArrayList<>(generated);
         cubes.removeAll(fromJavaModel);
         cubes.removeAll(flat);
