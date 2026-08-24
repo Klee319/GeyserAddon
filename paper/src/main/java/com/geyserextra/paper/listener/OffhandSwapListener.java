@@ -602,7 +602,7 @@ public final class OffhandSwapListener implements Listener {
                 if (!tryAcquireOp(player)) return;
                 event.setCancelled(true);
                 ItemStack snapshot = offhand.clone();
-                schedule(player, () -> {
+                scheduleGuarded(player, cursor, offhand, () -> {
                     inv.setItemInOffHand(null);
                     Map<Integer, ItemStack> overflow = inv.addItem(snapshot);
                     if (!overflow.isEmpty()) {
@@ -641,7 +641,7 @@ public final class OffhandSwapListener implements Listener {
                 if (!tryAcquireOp(player)) return;
                 event.setCancelled(true);
                 ItemStack snapshot = offhandEmpty ? null : offhand.clone();
-                schedule(player, () -> {
+                scheduleGuarded(player, cursor, offhand, () -> {
                     ItemStack hotbarItem = inv.getItem(hotbar);
                     inv.setItemInOffHand(hotbarItem);
                     inv.setItem(hotbar, snapshot);
@@ -658,7 +658,7 @@ public final class OffhandSwapListener implements Listener {
                     : offhand.clone();
                 final InventoryAction finalAction = action;
                 final int currentAmount = offhand.getAmount();
-                schedule(player, () -> {
+                scheduleGuarded(player, cursor, offhand, () -> {
                     if (finalAction == InventoryAction.DROP_ONE_SLOT && currentAmount > 1) {
                         ItemStack remaining = offhand.clone();
                         remaining.setAmount(currentAmount - 1);
@@ -739,7 +739,7 @@ public final class OffhandSwapListener implements Listener {
         }
         event.setCancelled(true);
         ItemStack toCursor = offhand.clone();
-        schedule(player, () -> {
+        scheduleGuarded(player, event.getCursor(), offhand, () -> {
             inv.setItemInOffHand(null);
             player.setItemOnCursor(toCursor);
             player.updateInventory();
@@ -759,7 +759,7 @@ public final class OffhandSwapListener implements Listener {
         event.setCancelled(true);
         ItemStack newOffhand = cursor.clone();
         ItemStack toCursor = offhand.clone();
-        schedule(player, () -> {
+        scheduleGuarded(player, cursor, offhand, () -> {
             inv.setItemInOffHand(newOffhand);
             player.setItemOnCursor(toCursor);
             player.updateInventory();
@@ -786,7 +786,7 @@ public final class OffhandSwapListener implements Listener {
         event.setCancelled(true);
         final ItemStack newOffhandFinal = plan.newOffhand();
         final ItemStack newCursorFinal = plan.newCursor();
-        schedule(player, () -> {
+        scheduleGuarded(player, cursor, offhand, () -> {
             inv.setItemInOffHand(newOffhandFinal);
             player.setItemOnCursor(newCursorFinal);
             player.updateInventory();
@@ -870,6 +870,65 @@ public final class OffhandSwapListener implements Listener {
 
     private static boolean isEmpty(ItemStack stack) {
         return stack == null || stack.getType() == Material.AIR || stack.getAmount() <= 0;
+    }
+
+    /**
+     * Schedules a deferred cursor/off-hand mutation that only applies when the
+     * player's cursor and off-hand still hold exactly what they held when the
+     * click was observed.
+     *
+     * <p>Why the guard exists — the duplication reported on 2026-08-24: a
+     * Bedrock recipe-book craft is translated into a burst of inventory
+     * operations that all land in the <em>same tick</em>. When one click of
+     * that burst hits the off-hand slot, this listener cancels it and queues a
+     * mutation computed from event-time snapshots. The rest of the burst then
+     * keeps moving the very stacks that were snapshotted (the ingredients go
+     * into the crafting grid and get consumed), and one tick later the queued
+     * mutation writes the snapshot back into the off-hand — <b>minting a copy
+     * of items that were already spent</b>. The victim sees the recipe placed
+     * incompletely and the "missing" part sitting duplicated in the off-hand.</p>
+     *
+     * <p>The fix is to treat the snapshots as a precondition, not a payload:
+     * if either the cursor or the off-hand changed between the click and the
+     * tick the mutation runs, someone else (vanilla, an autocraft burst)
+     * already resolved the situation, and applying stale state on top of it
+     * can only destroy or duplicate items. Aborting is always safe — the click
+     * was cancelled, so the world is exactly as if the player never clicked;
+     * a human just clicks again. {@code updateInventory()} still runs on the
+     * abort path so the Bedrock client's stale prediction gets corrected.</p>
+     */
+    private void scheduleGuarded(
+        Player player,
+        ItemStack expectedCursor,
+        ItemStack expectedOffhand,
+        Runnable task
+    ) {
+        final ItemStack cursorSnapshot = isEmpty(expectedCursor) ? null : expectedCursor.clone();
+        final ItemStack offhandSnapshot = isEmpty(expectedOffhand) ? null : expectedOffhand.clone();
+        schedule(player, () -> {
+            if (!sameStack(cursorSnapshot, player.getItemOnCursor())
+                || !sameStack(offhandSnapshot, player.getInventory().getItemInOffHand())) {
+                plugin.getLogger().fine(() -> "Skipped deferred off-hand mutation for "
+                    + player.getName() + " — cursor/off-hand changed since the click"
+                    + " (another operation in the same tick already resolved it)");
+                player.updateInventory();
+                return;
+            }
+            task.run();
+        });
+    }
+
+    /**
+     * Snapshot comparison for the deferred-write guard: both empty counts as
+     * equal, otherwise the stacks must match exactly (type, amount, meta).
+     */
+    static boolean sameStack(ItemStack expected, ItemStack actual) {
+        boolean expectedEmpty = isEmpty(expected);
+        boolean actualEmpty = isEmpty(actual);
+        if (expectedEmpty || actualEmpty) {
+            return expectedEmpty == actualEmpty;
+        }
+        return expected.equals(actual);
     }
 
     /**
