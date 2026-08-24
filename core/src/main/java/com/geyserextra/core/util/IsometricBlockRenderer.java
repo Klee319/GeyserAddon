@@ -32,13 +32,16 @@ public final class IsometricBlockRenderer {
     /**
      * Edge length of the rendered icon.
      *
-     * <p>64, not the texture's own 16: the icon is a projection, so a texel's edges land on the
+     * <p>128, not the texture's own 16: the icon is a projection, so a texel's edges land on the
      * diagonal of the output. At 32 that diagonal has one output pixel per two texels and the cube
-     * came out visibly ragged — the first deployment was reported as "低画質で歪". 64 gives four
-     * output pixels per 16-texture texel, so every face edge lands on a whole pixel and the client
-     * still has resolution left when it scales the slot up.</p>
+     * came out visibly ragged — the first deployment was reported as "低画質で歪". 64 fixed the
+     * raggedness but was still reported as softer than vanilla: Bedrock renders vanilla blocks as
+     * real 3D models at the display's native resolution, so a pre-baked PNG loses whenever the
+     * slot draws larger than the PNG (GUI scale ×2-3 on a 1080p+ screen draws the slot at
+     * 96-160 px). 128 gives eight output pixels per texel and covers those slot sizes without
+     * upscaling; beyond this the PNGs' cost in the pack outweighs a difference nobody can see.</p>
      */
-    public static final int SIZE = 64;
+    public static final int SIZE = 128;
 
     /**
      * Height of the cube's vertical edge as a fraction of the silhouette width: {@code cos30° /

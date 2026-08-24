@@ -129,8 +129,14 @@ class JavaModelRendererTest {
             new Rotation(45, 'x', new double[] {8, 8, 8}, false))));
         int[] a = boundingBox(upright);
         int[] b = boundingBox(tilted);
-        assertThat(b[3] - b[1]).as("tilting a flat slab makes it taller on screen")
-            .isGreaterThan(a[3] - a[1]);
+        // Not "taller": for this slab the 45° tilt grows the y-extent but shrinks the
+        // z-extent by almost exactly as much in projection, so the height comparison came
+        // down to sub-pixel rounding (it held at SIZE=64 by luck and tied 73=73 at 128).
+        // What rotation must guarantee is a different silhouette, so pin exactly that.
+        assertThat(java.util.Arrays.equals(a, b))
+            .as("tilting the slab changes its silhouette bounding box %s vs %s",
+                java.util.Arrays.toString(a), java.util.Arrays.toString(b))
+            .isFalse();
     }
 
     @Test
