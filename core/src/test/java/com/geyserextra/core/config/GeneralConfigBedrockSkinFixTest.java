@@ -108,6 +108,20 @@ class GeneralConfigBedrockSkinFixTest {
     }
 
     @Test
+    @DisplayName("the nether-sky repair is on for a config that predates it")
+    void netherSkyFixDefaultsOn() {
+        // Fourth flag with the same hazard: a primitive would have loaded as
+        // false on every existing install and left Bedrock players' skies
+        // stuck with no automatic repair and /fixsky answering "disabled".
+        assertThat(JsonUtil.fromJson("{\"general\":{\"enabled\":true}}", GeyserExtraConfig.class)
+            .general().bedrockNetherSkyFixEnabled()).isTrue();
+        assertThat(JsonUtil.fromJson(
+            "{\"general\":{\"bedrockNetherSkyFixEnabled\":false}}", GeyserExtraConfig.class)
+            .general().bedrockNetherSkyFixEnabled()).isFalse();
+        assertThat(new GeyserExtraConfig().general().bedrockNetherSkyFixEnabled()).isTrue();
+    }
+
+    @Test
     @DisplayName("the constructed default is enabled and survives a save/load round trip")
     void defaultRoundTripsThroughJson() {
         // The written config must state the value explicitly, otherwise the

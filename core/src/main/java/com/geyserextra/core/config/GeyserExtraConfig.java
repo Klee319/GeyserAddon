@@ -219,6 +219,8 @@ public final class GeyserExtraConfig {
         private final Boolean bedrockDurabilityBarFixEnabled;
         /** Boxed for the same reason as {@link #bedrockSkinFixEnabled}: absent must mean on. */
         private final Boolean bedrockSmithingCmdStripEnabled;
+        /** Boxed for the same reason as {@link #bedrockSkinFixEnabled}: absent must mean on. */
+        private final Boolean bedrockNetherSkyFixEnabled;
 
         public GeneralConfig() {
             this.enabled = true;
@@ -230,6 +232,7 @@ public final class GeyserExtraConfig {
             this.skinFixOnlyMode = false;
             this.bedrockDurabilityBarFixEnabled = true;
             this.bedrockSmithingCmdStripEnabled = true;
+            this.bedrockNetherSkyFixEnabled = true;
         }
 
         public GeneralConfig(boolean enabled, boolean debugMode,
@@ -280,6 +283,9 @@ public final class GeyserExtraConfig {
             this.skinFixOnlyMode = skinFixOnlyMode;
             this.bedrockDurabilityBarFixEnabled = bedrockDurabilityBarFixEnabled;
             this.bedrockSmithingCmdStripEnabled = bedrockSmithingCmdStripEnabled;
+            // Not constructor-configurable: tests and callers that build configs by
+            // hand get "absent", which the accessor reads as the default (on).
+            this.bedrockNetherSkyFixEnabled = null;
         }
 
         public boolean enabled() {
@@ -390,6 +396,25 @@ public final class GeyserExtraConfig {
          */
         public boolean bedrockSmithingCmdStripEnabled() {
             return bedrockSmithingCmdStripEnabled == null || bedrockSmithingCmdStripEnabled;
+        }
+
+        /**
+         * Whether to repair the Bedrock "stuck nether sky" by forcing a
+         * dimension round-trip after a risky join.
+         *
+         * <p>Default: true. A Bedrock client that starts a nether-portal fog
+         * transition and is then moved between backends (Velocity {@code
+         * /server}) or relogs keeps rendering the nether sky in the overworld
+         * — the switch reloads chunks without a dimension-change packet, so
+         * the client never re-renders the sky (GeyserMC #3005 family, unfixed
+         * upstream). The repair teleports the player to a world of a different
+         * environment and straight back, which forces the client to rebuild
+         * the dimension. Costs two loading screens on the affected join only.
+         * Set to false to disable both the automatic repair and
+         * {@code /fixsky}.</p>
+         */
+        public boolean bedrockNetherSkyFixEnabled() {
+            return bedrockNetherSkyFixEnabled == null || bedrockNetherSkyFixEnabled;
         }
     }
 

@@ -53,6 +53,10 @@ commands:
     description: GeyserExtra master command (opens the Bedrock menu)
     aliases: [ge, gxa]
     permission: geyserextra.menu
+  fixsky:
+    # No short alias on purpose — see "menu" above about generic names.
+    description: Repair a Bedrock sky stuck in the wrong dimension
+    permission: geyserextra.fixsky
 permissions:
   geyserextra.offhand:
     description: Allows using the offhand swap command
@@ -74,4 +78,7 @@ permissions:
     default: true
   geyserextra.settings:
     description: Allows configuring display settings
+    default: true
+  geyserextra.fixsky:
+    description: Allows repairing a stuck Bedrock sky
     default: true

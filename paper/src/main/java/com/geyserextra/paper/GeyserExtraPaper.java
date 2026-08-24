@@ -111,6 +111,10 @@ public final class GeyserExtraPaper extends JavaPlugin {
     // Rescales the damage in outbound item packets so Bedrock draws the right
     // durability bar for items with an overridden max_damage. Null when off.
     private com.geyserextra.paper.durability.BedrockDurabilityBarScaler durabilityBarScaler;
+
+    // Repairs the Bedrock stuck-nether-sky by a dimension round-trip. Null
+    // when general.bedrockNetherSkyFixEnabled is off; /fixsky checks for that.
+    private com.geyserextra.paper.dimension.DimensionJuggleService dimensionJuggleService;
     private com.geyserextra.paper.smithing.BedrockSmithingTableCmdStripper smithingCmdStripper;
 
     // Per-player display settings persistence and display orchestration
@@ -284,6 +288,14 @@ public final class GeyserExtraPaper extends JavaPlugin {
         JapaneseTranslationLoader.loadAsync(getExtensionDataFolder(), getLogger());
         // BedrockMenuCommand と SettingsCommand が要求するので、コマンド登録より先に作る。
         initializePlayerSettings();
+
+        // The nether-sky repair has the same shape as the skin repair: the
+        // player carries their stuck client from backend to backend, so a fix
+        // that lives on one backend only breaks the moment they transfer. Its
+        // per-player flag files are uuid-keyed, so unlike the pack generation
+        // they cannot collide in the shared folder.
+        enableDimensionHandoff();
+
         registerCommands();
 
         // Runs in this mode too. Shipping this backend's recipe tables to the proxy is a
@@ -815,6 +827,12 @@ public final class GeyserExtraPaper extends JavaPlugin {
         // Game rules command — view world game rules via forms
         Objects.requireNonNull(getCommand("gamerules"))
             .setExecutor(new GameRulesCommand(this));
+
+        // Manual stuck-sky repair. Registered even when the automatic repair
+        // is off by config — the executor answers with the reason instead of
+        // leaving an unknown-command error.
+        Objects.requireNonNull(getCommand("fixsky"))
+            .setExecutor(new com.geyserextra.paper.command.FixSkyCommand(this));
     }
 
     /**
@@ -926,6 +944,40 @@ public final class GeyserExtraPaper extends JavaPlugin {
         discordSRVSkinHook = new com.geyserextra.paper.listener.DiscordSRVSkinHook(this);
         discordSRVSkinHook.tryRegister();
 
+        // Repair the Bedrock stuck-nether-sky on risky joins. Also runs in
+        // skin-fix-only mode (see enableSkinFixOnly) for the same reason the
+        // skin repair does: the affected join can land on any backend.
+        enableDimensionHandoff();
+    }
+
+    /**
+     * Wires the Bedrock nether-sky repair: the quit/join listener, the juggle
+     * service behind it and {@code /fixsky}'s access to that service.
+     *
+     * <p>Uses the shared extension folder because the quit that arms the
+     * repair and the join that runs it happen on different backends during a
+     * Velocity transfer — the shared folder is their only common ground.</p>
+     */
+    private void enableDimensionHandoff() {
+        if (!config.general().bedrockNetherSkyFixEnabled()) {
+            getLogger().fine("Bedrock nether-sky repair disabled by config"
+                + " (general.bedrockNetherSkyFixEnabled=false)");
+            return;
+        }
+        com.geyserextra.paper.dimension.DimensionHandoffStore handoffStore =
+            new com.geyserextra.paper.dimension.DimensionHandoffStore(
+                getSharedFolder().resolve("dimension-handoff"), getLogger());
+        dimensionJuggleService =
+            new com.geyserextra.paper.dimension.DimensionJuggleService(this, handoffStore);
+        getServer().getPluginManager().registerEvents(
+            new com.geyserextra.paper.dimension.DimensionHandoffListener(
+                this, handoffStore, dimensionJuggleService),
+            this);
+    }
+
+    /** Null when {@code general.bedrockNetherSkyFixEnabled} is off. */
+    public com.geyserextra.paper.dimension.DimensionJuggleService getDimensionJuggleService() {
+        return dimensionJuggleService;
     }
 
     /**
