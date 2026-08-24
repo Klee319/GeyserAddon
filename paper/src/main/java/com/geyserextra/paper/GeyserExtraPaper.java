@@ -23,6 +23,8 @@ import com.geyserextra.paper.pack.PdcHintsReader;
 import com.geyserextra.paper.pack.JavaPackLangReader;
 import com.geyserextra.paper.pack.JavaPackReader;
 import com.geyserextra.paper.pack.JavaPackResolver;
+import com.geyserextra.paper.pack.PackRegistryReconciler;
+import com.geyserextra.paper.pack.VanillaDisplayNames;
 import com.geyserextra.paper.scanner.CustomItemScanner;
 import com.geyserextra.paper.scanner.RecipeScanner;
 import com.geyserextra.paper.scanner.SkullScanner;
@@ -1337,107 +1339,87 @@ public final class GeyserExtraPaper extends JavaPlugin {
      * "Java pack defines a texture for X" always implies "Bedrock sees the
      * texture for X" without depending on player interaction order.</p>
      *
-     * <p>Existing entries (whether from runtime scanning, custom_items.json
-     * load, or a previous pre-population pass) are left untouched: the first
-     * registration wins, so any operator-curated metadata (display name,
-     * creative category) is preserved.</p>
+     * <p>Since 2026-08-24 this is a full <em>reconcile</em>, not an
+     * append-only pre-population — see {@link PackRegistryReconciler} for the
+     * add / heal / evict rules and why "the first registration wins" turned
+     * transient pack-read failures into permanent placeholder names ("糸")
+     * and stale re-based ghosts ("旧テクスチャ"). Operator-curated entries
+     * (non-auto names, non-placeholder display names) are still never
+     * touched.</p>
      *
      * @param packEntries scan result from {@link JavaPackReader#scan()}
      */
     private void prepopulateRegistryFromJavaPack(
         Map<JavaPackReader.CmdKey, JavaPackReader.JavaModelDefinition> packEntries
     ) {
-        int added = 0;
-        int skipped = 0;
         // Snapshot the volatile field once per call so every mapping in this
         // batch sees a consistent reader (the load that populated it ran
         // before us, so the snapshot is already the final reader).
         JavaPackLangReader langSnapshot = javaPackLangReader;
-        for (Map.Entry<JavaPackReader.CmdKey, JavaPackReader.JavaModelDefinition> entry
-            : packEntries.entrySet()) {
-            JavaPackReader.CmdKey key = entry.getKey();
-            JavaPackReader.JavaModelDefinition def = entry.getValue();
-            if (key.cmd() <= 0) {
-                // Defence-in-depth: JavaPackReader already drops CMD<=0
-                // entries, but a future reader change could let one slip
-                // through. Registering CMD 0 here would build a Geyser
-                // CustomItemDefinition with no predicate, which Geyser
-                // treats as a wholesale override of the base vanilla item
-                // and clobbers its texture for every player.
-                skipped++;
-                continue;
-            }
-            if (itemMappingRegistry.getByCustomModelData(key.baseItem(), key.cmd()).isPresent()) {
-                skipped++;
-                continue;
-            }
-            String autoName = generateAutoMappingName(key.baseItem(), key.cmd());
-            if (itemMappingRegistry.contains(autoName)) {
-                skipped++;
-                continue;
-            }
-            CustomItemMapping mapping = new CustomItemMapping(
-                autoName,
-                key.baseItem(),
-                key.cmd(),
-                false,   // unbreakable unknown from pack alone
-                deriveFallbackDisplayName(key, def, langSnapshot),
-                null,    // icon falls back to name via item_texture.json
-                CustomItemMapping.CREATIVE_CATEGORY_ITEMS,
-                null,    // creative group unset
-                true     // register with Geyser
-            );
-            itemMappingRegistry.register(mapping);
-            added++;
-        }
-        if (added > 0 || skipped > 0) {
-            getLogger().fine("[JavaPack] pre-registration: " + added
-                + " items added from pack, " + skipped + " already in registry");
+        PackRegistryReconciler.Result result = PackRegistryReconciler.reconcile(
+            itemMappingRegistry,
+            packEntries,
+            (key, def) -> resolveLangDisplayName(def, langSnapshot),
+            GeyserExtraPaper::prettifyBaseItemName,
+            baseItem -> placeholderDisplaysForBase(baseItem, langSnapshot),
+            line -> getLogger().info("[JavaPack] " + line)
+        );
+        if (result.changedAnything()) {
+            // INFO, not FINE: healed/evicted entries are exactly the ones an
+            // operator was staring at ("why is this named 糸?"), so the pass
+            // that fixed them should be visible in a default log.
+            getLogger().info("[JavaPack] registry reconcile: " + result.added()
+                + " added, " + result.healed() + " display name(s) healed, "
+                + result.evicted() + " stale entr(y/ies) evicted");
         }
     }
 
     /**
-     * Builds the best display name we can derive for a pack-first registration.
-     *
-     * <p>Resolution chain (most-authoritative first):
-     * <ol>
-     *   <li><b>Lang-resolved customary translation key</b>: Mojang's convention
-     *       places an item's display name at {@code item.<namespace>.<name>},
-     *       where {@code <name>} is the model reference's terminal path
-     *       component. When the operator's Java pack ships a lang file (and
-     *       follows the convention), the resolved text matches exactly what a
-     *       Java player sees, giving Bedrock parity with zero extra config.</li>
-     *   <li><b>Prettified base material name</b>: vanilla Java's own fallback
-     *       for an un-named CMD item — "diamond_sword" → "Diamond Sword".
-     *       Used when no lang resolution is available; mirrors the legacy
-     *       behaviour so existing operators see no regression.</li>
-     * </ol>
-     * </p>
-     *
-     * <p>Once the runtime scanner observes an actual ItemStack with
-     * {@link org.bukkit.inventory.meta.ItemMeta#displayName()} set, it
-     * upgrades the mapping via {@code CustomItemScanner.scanItem}; this
-     * fallback is only the bootstrap placeholder.</p>
+     * Lang-only display resolution for the reconciler. Returns {@code null}
+     * when the pack lang has no entry — deliberately NOT falling back to the
+     * material name here, because the reconciler must be able to tell "a real
+     * name" from "a placeholder" (healing a placeholder with another
+     * placeholder would churn forever).
      */
-    private static String deriveFallbackDisplayName(
-        JavaPackReader.CmdKey key,
+    private static String resolveLangDisplayName(
         JavaPackReader.JavaModelDefinition def,
         JavaPackLangReader langReader
     ) {
-        if (def != null && langReader != null && !langReader.isEmpty()) {
-            String guessed = guessItemTranslationKey(def.modelRef());
-            if (guessed != null) {
-                try {
-                    String resolved = langReader.resolve(guessed);
-                    if (resolved != null && !resolved.isBlank()) {
-                        return resolved;
-                    }
-                } catch (RuntimeException ignored) {
-                    // resolver failure → continue to material-name fallback
-                }
-            }
+        if (def == null || langReader == null || langReader.isEmpty()) {
+            return null;
         }
-        return prettifyBaseItemName(key.baseItem());
+        String guessed = guessItemTranslationKey(def.modelRef());
+        if (guessed == null) {
+            return null;
+        }
+        try {
+            String resolved = langReader.resolve(guessed);
+            return (resolved == null || resolved.isBlank()) ? null : resolved;
+        } catch (RuntimeException ignored) {
+            return null;
+        }
+    }
+
+    /**
+     * Every display name that means "nobody actually chose this" for a base
+     * item: the prettified identifier ("String") and the vanilla lang name
+     * ("糸" under a Japanese pack). Entries carrying one of these may be
+     * healed by the reconciler; anything else is presumed operator-curated.
+     */
+    private static java.util.Set<String> placeholderDisplaysForBase(
+        String baseItem,
+        JavaPackLangReader langReader
+    ) {
+        java.util.Set<String> placeholders = new java.util.HashSet<>();
+        placeholders.add(prettifyBaseItemName(baseItem));
+        String trimmed = baseItem.startsWith("minecraft:")
+            ? baseItem.substring("minecraft:".length())
+            : baseItem;
+        org.bukkit.Material material = org.bukkit.Material.matchMaterial(trimmed);
+        if (material != null) {
+            placeholders.add(VanillaDisplayNames.resolve(material, langReader));
+        }
+        return placeholders;
     }
 
     /**
@@ -1493,18 +1475,6 @@ public final class GeyserExtraPaper extends JavaPlugin {
             }
         }
         return pretty.toString();
-    }
-
-    /**
-     * Mirrors {@code CustomItemScanner.generateMappingName}'s auto-generated
-     * fallback so a pack-first registration uses the same naming convention
-     * the scanner would have produced once a player interacted with the item.
-     */
-    private static String generateAutoMappingName(String baseItem, int cmd) {
-        String trimmed = baseItem.startsWith("minecraft:")
-            ? baseItem.substring("minecraft:".length())
-            : baseItem;
-        return "custom_" + trimmed + "_" + cmd;
     }
 
     /**

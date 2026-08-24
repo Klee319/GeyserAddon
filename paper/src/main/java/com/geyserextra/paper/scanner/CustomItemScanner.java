@@ -128,6 +128,10 @@ public final class CustomItemScanner {
         }
         String baseItem = buildBaseItemIdentifier(itemStack);
 
+        // Display name to carry over from an upgraded entry when the stack
+        // itself has no authored name (see the upgrade branch below).
+        String preservedDisplayName = null;
+
         // Check if already registered by CMD
         Optional<CustomItemMapping> existingByCmd = registry.getByCustomModelData(baseItem, primaryCmdValue);
         if (existingByCmd.isPresent()) {
@@ -150,13 +154,23 @@ public final class CustomItemScanner {
             //   (2) The previous "auto-name + no PDC" entry now has a PDC value
             //       available because a plugin filled it in after the fact.
             String pdcId = extractItemIdFromPDC(itemStack);
-            String currentDisplayName = extractDisplayName(itemStack);
+            String authoredDisplayName = extractAuthoredDisplayName(itemStack);
             boolean currentUnbreakable = isUnbreakable(itemStack);
             int currentCategory = determineCreativeCategory(itemStack.getType());
 
             boolean wantNameUpgrade = pdcId != null && !pdcId.startsWith("custom_");
-            boolean wantDisplayUpgrade = !existing.hasDisplayName()
-                && currentDisplayName != null && !currentDisplayName.isBlank();
+            // An entry whose display name equals the base material's vanilla
+            // name is a placeholder written by the fallback chain (nameless
+            // stack, or a registration that ran while the pack was unreadable)
+            // — it must stay upgradeable, or one bad observation names the
+            // item "糸" forever. Only a name someone actually authored on the
+            // stack counts as an upgrade source, so the fallback can never
+            // "upgrade" one placeholder into another.
+            boolean placeholderDisplay = existing.hasDisplayName()
+                && existing.displayName().equals(resolveVanillaMaterialName(itemStack.getType()));
+            boolean wantDisplayUpgrade = (!existing.hasDisplayName() || placeholderDisplay)
+                && authoredDisplayName != null && !authoredDisplayName.isBlank()
+                && !authoredDisplayName.equals(existing.displayName());
             boolean wantUnbreakableUpgrade = !existing.unbreakable() && currentUnbreakable;
             boolean wantCategoryUpgrade = currentCategory != CustomItemMapping.CREATIVE_CATEGORY_ITEMS
                 && existing.creativeCategory() == CustomItemMapping.CREATIVE_CATEGORY_ITEMS;
@@ -164,6 +178,15 @@ public final class CustomItemScanner {
             if (!wantNameUpgrade && !wantDisplayUpgrade
                 && !wantUnbreakableUpgrade && !wantCategoryUpgrade) {
                 return Optional.of(existing);
+            }
+
+            // When another field (unbreakable, category) triggers the
+            // re-registration but this particular stack carries no authored
+            // name, keep the existing non-placeholder display instead of
+            // letting the fallback chain overwrite an already-healed name
+            // with the base material's name again.
+            if (authoredDisplayName == null && existing.hasDisplayName() && !placeholderDisplay) {
+                preservedDisplayName = existing.displayName();
             }
 
             registry.unregister(existing.name());
@@ -199,7 +222,7 @@ public final class CustomItemScanner {
             baseItem,
             primaryCmdValue,
             isUnbreakable(itemStack),
-            extractDisplayName(itemStack),
+            preservedDisplayName != null ? preservedDisplayName : extractDisplayName(itemStack),
             null,
             determineCreativeCategory(itemStack.getType()),
             null,
@@ -514,6 +537,24 @@ public final class CustomItemScanner {
     }
 
     private String extractDisplayName(ItemStack itemStack) {
+        String authored = extractAuthoredDisplayName(itemStack);
+        if (authored != null) {
+            return authored;
+        }
+        return resolveVanillaMaterialName(itemStack.getType());
+    }
+
+    /**
+     * The display name someone actually put on the stack (ItemMeta component
+     * or a recognised PDC key) — {@code null} when the stack carries none.
+     *
+     * <p>Split out of {@link #extractDisplayName} so the upgrade path can tell
+     * "this stack has a real name" apart from "the fallback chain produced the
+     * base material's name". Without the distinction, an entry once written
+     * with the material-name fallback ("糸") counted as having a display name
+     * and could never be healed by a later observation of the real item.</p>
+     */
+    private String extractAuthoredDisplayName(ItemStack itemStack) {
         ItemMeta meta = itemStack.getItemMeta();
         if (meta != null && meta.hasDisplayName() && meta.displayName() != null) {
             net.kyori.adventure.text.Component name = meta.displayName();
@@ -558,7 +599,7 @@ public final class CustomItemScanner {
             return pdcName;
         }
 
-        return resolveVanillaMaterialName(itemStack.getType());
+        return null;
     }
 
     /**
