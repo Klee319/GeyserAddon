@@ -1,6 +1,7 @@
 package com.geyserextra.paper.listener;
 
 import com.geyserextra.paper.util.BedrockPlayerUtil;
+import com.geyserextra.paper.util.DebugLog;
 
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
@@ -9,6 +10,7 @@ import com.google.gson.reflect.TypeToken;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 
+import org.bukkit.Bukkit;
 import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
 import org.bukkit.attribute.Attribute;
@@ -97,14 +99,74 @@ public final class ElytraFlightListener implements Listener {
     /** File name for crash recovery persistence. */
     private static final String PERSISTENCE_FILE = "gliding_players.json";
 
-    /** Monitoring interval in ticks for detecting plugin-initiated gliding. */
-    private static final int MONITOR_INTERVAL_TICKS = 5;
+    /**
+     * Monitoring interval in ticks for detecting plugin-initiated gliding.
+     *
+     * <p>Sampling at 5 was wrong because the thing being sampled is not a
+     * plateau. A plugin that grants elytra-less flight has to re-assert the
+     * glide flag <em>every tick</em>, since vanilla
+     * {@code LivingEntity#updateFallFlying} clears it every tick for a player
+     * with no working elytra. The observable state is a flag that flickers off
+     * and back on once per tick until a real elytra exists, so a 5-tick sample
+     * both missed take-offs and mistook a single cleared tick for a landing —
+     * pulling the stand-in back off mid-flight. (The consequence of missing a
+     * take-off is total: the Bedrock client refuses to glide without an elytra,
+     * falls, lands, and the grantor's own {@code isOnGround()} guard then tears
+     * the state down before the stand-in was ever equipped.)</p>
+     *
+     * <p><b>Not yet established:</b> whether 1 is sufficient, as opposed to
+     * merely necessary. Both this task and the grantor's run in the same
+     * scheduler heartbeat, so whether this task can observe the flag at all
+     * depends on which of the two the scheduler runs first — an ordering
+     * neither plugin controls. If the traces in {@link #onToggleGlide} and
+     * {@link #traceFlightToggle} show the grant arriving while this task still
+     * never sees {@code isGliding()}, polling is the wrong mechanism entirely
+     * and the stand-in has to be driven from the glide event instead.</p>
+     */
+    private static final int MONITOR_INTERVAL_TICKS = 1;
+
+    /**
+     * Consecutive non-gliding samples required before the fake elytra is taken
+     * back off. One sample is not evidence: see {@link #MONITOR_INTERVAL_TICKS}
+     * for why the flag legitimately reads false for single ticks while the
+     * player is still flying. A genuine landing keeps reading false, so a small
+     * streak separates the two without adding perceptible lag.
+     */
+    private static final int GLIDE_END_CONFIRM_SAMPLES = 4;
+
+    /** How often a player who did not look like a Bedrock player is re-probed. */
+    private static final int BEDROCK_REPROBE_TICKS = 40;
 
     private final Plugin plugin;
     private final Logger logger;
     private final Path persistenceFile;
     private final Gson gson;
     private final Map<UUID, GlidingPlayerData> glidingPlayers = new ConcurrentHashMap<>();
+
+    /**
+     * Consecutive ticks each tracked player has read as "not gliding".
+     * Reset the moment they read as gliding again.
+     */
+    private final Map<UUID, Integer> glideEndStreak = new ConcurrentHashMap<>();
+
+    /**
+     * Cached Bedrock-ness per player, because the monitor now runs every tick.
+     * {@link BedrockPlayerUtil#isBedrockPlayer} probes the Floodgate and Geyser
+     * APIs and swallows the failure, so on a proxy setup — where Geyser lives
+     * on the proxy and its API class is absent from this server — every call
+     * constructs and discards a {@code NoClassDefFoundError}. Paying that once
+     * per player per tick is exactly the kind of cost a 1-tick task must not
+     * carry. A player's edition never changes within a session, so caching is
+     * safe; entries are dropped on quit.
+     */
+    private final Map<UUID, Boolean> bedrockCache = new ConcurrentHashMap<>();
+
+    /** Last observed {@code isFlying()} per player, for the edge-triggered toggle trace. */
+    private final Map<UUID, Boolean> lastFlyingState = new ConcurrentHashMap<>();
+
+    /** Server tick each not-yet-known-Bedrock player was last probed on. */
+    private final Map<UUID, Integer> bedrockProbeTick = new ConcurrentHashMap<>();
+
     private BukkitTask monitorTask;
 
     /**
@@ -150,15 +212,35 @@ public final class ElytraFlightListener implements Listener {
         if (!(event.getEntity() instanceof Player player)) {
             return;
         }
-        if (!BedrockPlayerUtil.isBedrockPlayer(player)) {
+        if (!isBedrock(player)) {
             return;
         }
+
+        // The one trace that distinguishes the remaining failure modes: whether
+        // this event fires at all for a Bedrock player who is trying to glide
+        // without an elytra, and with which value. Vanilla clears the flag once
+        // per tick for such a player, so a stream of isGliding=false here means
+        // the grant is reaching the server and only the stand-in is missing;
+        // silence means the glide is never being asserted in the first place.
+        DebugLog.log(logger, () -> "[ElytraFlight] toggle-glide event for "
+                + player.getName() + ": gliding=" + event.isGliding()
+                + " tracked=" + glidingPlayers.containsKey(player.getUniqueId())
+                + " chest=" + describeChestplate(player));
 
         if (event.isGliding()) {
             handleGlideStart(player);
         } else {
             handleGlideEnd(player);
         }
+    }
+
+    /** Chest-slot summary for the glide traces. */
+    private String describeChestplate(Player player) {
+        ItemStack chest = player.getInventory().getChestplate();
+        if (chest == null || chest.getType() == Material.AIR) {
+            return "empty";
+        }
+        return chest.getType().name() + (isGeyserExtraElytra(chest) ? "(stand-in)" : "");
     }
 
     /**
@@ -233,6 +315,7 @@ public final class ElytraFlightListener implements Listener {
     public void onPlayerJoin(PlayerJoinEvent event) {
         Player player = event.getPlayer();
         UUID uuid = player.getUniqueId();
+        glideEndStreak.remove(uuid);
 
         GlidingPlayerData pendingData = glidingPlayers.remove(uuid);
         if (pendingData == null) {
@@ -265,7 +348,7 @@ public final class ElytraFlightListener implements Listener {
         removeArmorModifiers(player);
         savePersistence();
 
-        logger.fine("[ElytraFlight] Restored crash-recovery chestplate for: "
+        DebugLog.log(logger, () -> "[ElytraFlight] Restored crash-recovery chestplate for: "
                 + player.getName());
     }
 
@@ -300,6 +383,11 @@ public final class ElytraFlightListener implements Listener {
     @EventHandler(priority = EventPriority.MONITOR)
     public void onPlayerQuit(PlayerQuitEvent event) {
         restoreAndRemove(event.getPlayer());
+        UUID uuid = event.getPlayer().getUniqueId();
+        glideEndStreak.remove(uuid);
+        bedrockCache.remove(uuid);
+        lastFlyingState.remove(uuid);
+        bedrockProbeTick.remove(uuid);
     }
 
     /**
@@ -312,6 +400,7 @@ public final class ElytraFlightListener implements Listener {
     @EventHandler(priority = EventPriority.HIGH)
     public void onPlayerDeath(PlayerDeathEvent event) {
         Player player = event.getEntity();
+        glideEndStreak.remove(player.getUniqueId());
         GlidingPlayerData data = glidingPlayers.remove(player.getUniqueId());
         if (data == null) {
             return;
@@ -322,15 +411,24 @@ public final class ElytraFlightListener implements Listener {
 
         if (event.getKeepInventory()) {
             // keepInventory=true: restore chestplate directly (items not dropped)
-            player.getInventory().setChestplate(data.originalChestplate());
+            restoreChestplate(player, data);
         } else {
-            // Replace fake elytra in drops with original chestplate
-            event.getDrops().removeIf(item ->
+            // Swap the stand-in out of the drops for the original — but only if
+            // the stand-in is actually there. If something replaced the chest
+            // slot before the player died, their drops already contain that
+            // replacement, and adding the original on top mints a second
+            // chestplate out of nothing.
+            boolean removedStandIn = event.getDrops().removeIf(item ->
                     item != null && item.getType() == Material.ELYTRA && isGeyserExtraElytra(item));
 
-            if (data.originalChestplate() != null
+            if (removedStandIn
+                    && data.originalChestplate() != null
                     && data.originalChestplate().getType() != Material.AIR) {
                 event.getDrops().add(data.originalChestplate());
+            } else if (!removedStandIn) {
+                DebugLog.log(logger, () -> "[ElytraFlight] " + player.getName()
+                        + " died without the stand-in in their drops — leaving the drops"
+                        + " untouched rather than adding a second chestplate.");
             }
         }
     }
@@ -364,7 +462,7 @@ public final class ElytraFlightListener implements Listener {
                 MONITOR_INTERVAL_TICKS,
                 MONITOR_INTERVAL_TICKS
         );
-        logger.fine("[ElytraFlight] Gliding monitor task started (interval: "
+        DebugLog.log(logger, () -> "[ElytraFlight] Gliding monitor task started (interval: "
                 + MONITOR_INTERVAL_TICKS + " ticks).");
     }
 
@@ -377,15 +475,21 @@ public final class ElytraFlightListener implements Listener {
      * 2. Player is not gliding but still tracked
      *    -> gliding ended without event; trigger handleGlideEnd
      */
+    @SuppressWarnings("deprecation") // Player#isOnGround is diagnostics-only here —
+    // it is deliberately the *client-reported* value, because that is the value the
+    // flight-granting plugin gates its own glide start on. Reading anything else
+    // would trace a different number from the one that decides the outcome.
     private void checkGlidingStates() {
         for (Player player : plugin.getServer().getOnlinePlayers()) {
-            if (!BedrockPlayerUtil.isBedrockPlayer(player)) {
+            UUID uuid = player.getUniqueId();
+            if (!isBedrock(player)) {
                 continue;
             }
 
-            UUID uuid = player.getUniqueId();
             boolean isGliding = player.isGliding();
             boolean isTracked = glidingPlayers.containsKey(uuid);
+
+            traceFlightToggle(player, uuid, isGliding);
 
             if (isGliding && !isTracked) {
                 // Player started gliding without triggering the event
@@ -394,13 +498,95 @@ public final class ElytraFlightListener implements Listener {
                         && currentChest.getType() == Material.ELYTRA
                         && !isGeyserExtraElytra(currentChest);
                 if (!hasRealElytra) {
+                    DebugLog.log(logger, () -> "[ElytraFlight] " + player.getName()
+                            + " started gliding without an elytra"
+                            + " (onGround=" + player.isOnGround()
+                            + ", allowFlight=" + player.getAllowFlight()
+                            + ", flying=" + player.isFlying()
+                            + ") — equipping the stand-in.");
                     handleGlideStart(player);
                 }
-            } else if (!isGliding && isTracked) {
-                // Player stopped gliding without triggering the event
-                handleGlideEnd(player);
+                glideEndStreak.remove(uuid);
+            } else if (isGliding) {
+                glideEndStreak.remove(uuid);
+            } else if (isTracked) {
+                // Not gliding this tick. Only act once it has held for several
+                // ticks — a single false reading is the vanilla per-tick clear,
+                // not a landing.
+                int streak = glideEndStreak.merge(uuid, 1, Integer::sum);
+                if (streak >= GLIDE_END_CONFIRM_SAMPLES) {
+                    DebugLog.log(logger, () -> "[ElytraFlight] " + player.getName()
+                            + " has read as not gliding for " + GLIDE_END_CONFIRM_SAMPLES
+                            + " ticks (onGround=" + player.isOnGround()
+                            + ") — removing the stand-in.");
+                    glideEndStreak.remove(uuid);
+                    handleGlideEnd(player);
+                }
             }
         }
+    }
+
+    /**
+     * Traces the Bedrock flight toggle, which is the input the whole workaround
+     * depends on and the one failure this class could not previously see.
+     *
+     * <p>Elytra-less flight is granted by a plugin that watches for the player
+     * entering flight mode and converts it into gliding. If the toggle never
+     * reaches the server from a Bedrock client, that conversion never runs, the
+     * glide flag never turns on, and every other trace in this class stays
+     * silent — a dead ability that looks identical to a disabled listener. This
+     * logs the {@code isFlying()} edge so the two are distinguishable at a
+     * glance, and reports whether gliding followed.</p>
+     *
+     * <p>Edge-triggered on purpose: the monitor runs every tick, and a level
+     * trace here would be twenty lines a second per flying player.</p>
+     */
+    @SuppressWarnings("deprecation") // Player#isOnGround — see checkGlidingStates.
+    private void traceFlightToggle(Player player, UUID uuid, boolean isGliding) {
+        if (!DebugLog.isEnabled()) {
+            return;
+        }
+        boolean flying = player.isFlying();
+        Boolean previous = lastFlyingState.put(uuid, flying);
+        if (previous != null && previous == flying) {
+            return;
+        }
+        DebugLog.log(logger, () -> "[ElytraFlight] " + player.getName()
+                + " flight toggle: flying=" + flying
+                + " allowFlight=" + player.getAllowFlight()
+                + " gliding=" + isGliding
+                + " onGround=" + player.isOnGround());
+    }
+
+    /**
+     * Bedrock check for the per-tick monitor, memoised per player.
+     *
+     * @see #bedrockCache
+     */
+    private boolean isBedrock(Player player) {
+        UUID uuid = player.getUniqueId();
+        if (Boolean.TRUE.equals(bedrockCache.get(uuid))) {
+            return true;
+        }
+        // Only a positive answer is cached for good. A negative one can be a
+        // lie told early in a session — on auth-type: online the UUID
+        // fallback cannot tell the editions apart, so the answer depends on the
+        // Geyser session already being registered. Freezing that "no" would
+        // disable the workaround for the rest of the session, so it is retried,
+        // but only occasionally: the probe throws and swallows a
+        // NoClassDefFoundError on setups where Geyser lives on the proxy, and
+        // this runs every tick.
+        int tick = Bukkit.getCurrentTick();
+        Integer lastProbe = bedrockProbeTick.get(uuid);
+        if (lastProbe != null && tick - lastProbe < BEDROCK_REPROBE_TICKS) {
+            return false;
+        }
+        bedrockProbeTick.put(uuid, tick);
+        boolean bedrock = BedrockPlayerUtil.isBedrockPlayer(player);
+        if (bedrock) {
+            bedrockCache.put(uuid, Boolean.TRUE);
+        }
+        return bedrock;
     }
 
     /**
@@ -421,19 +607,43 @@ public final class ElytraFlightListener implements Listener {
         // persistence file ensures recovery on next startup
         savePersistence();
 
-        for (Map.Entry<UUID, GlidingPlayerData> entry : glidingPlayers.entrySet()) {
+        // Restore everyone reachable, and keep only those who are not.
+        glidingPlayers.entrySet().removeIf(entry -> {
             Player player = plugin.getServer().getPlayer(entry.getKey());
-            if (player != null && player.isOnline()) {
-                restoreChestplate(player, entry.getValue());
-                removeArmorModifiers(player);
+            if (player == null || !player.isOnline()) {
+                // Offline: their chestplate is still owed to them and only the
+                // persistence file remembers it.
+                return false;
             }
+            restoreChestplate(player, entry.getValue());
+            removeArmorModifiers(player);
+            return true;
+        });
+
+        // Re-save so the file lists exactly the chestplates still owed, then
+        // discard it only when nothing is owed. Deleting it while an offline
+        // player is still listed — the state a crash-then-restart leaves
+        // behind — loses their armour permanently, because their own .dat only
+        // has the stand-in. Re-saving matters just as much: leaving the
+        // pre-restore snapshot on disk would hand the players we just restored
+        // a second chestplate on the next boot.
+        int stillOwed = glidingPlayers.size();
+        savePersistence();
+        if (stillOwed == 0) {
+            deletePersistenceFile();
+        } else {
+            logger.warning("[ElytraFlight] Keeping " + PERSISTENCE_FILE + ": "
+                    + stillOwed + " chestplate(s) are still owed to players who are not"
+                    + " online. They will be restored when those players next join.");
         }
+
         glidingPlayers.clear();
+        glideEndStreak.clear();
+        bedrockCache.clear();
+        lastFlyingState.clear();
+        bedrockProbeTick.clear();
 
-        // Delete persistence file after successful cleanup
-        deletePersistenceFile();
-
-        logger.fine("[ElytraFlight] Cleanup complete — all gliding states restored.");
+        DebugLog.log(logger, () -> "[ElytraFlight] Cleanup complete — all gliding states restored.");
     }
 
     // ── Core Logic ──────────────────────────────────────────────────
@@ -480,7 +690,7 @@ public final class ElytraFlightListener implements Listener {
         // Persist state for crash recovery
         savePersistence();
 
-        logger.fine("[ElytraFlight] Equipped fake elytra for Bedrock player: "
+        DebugLog.log(logger, () -> "[ElytraFlight] Equipped fake elytra for Bedrock player: "
                 + player.getName());
     }
 
@@ -495,6 +705,12 @@ public final class ElytraFlightListener implements Listener {
      * Restores chestplate and removes tracking for the given player if tracked.
      */
     private void restoreAndRemove(Player player) {
+        // Always clear the streak, even when nothing was tracked. It is keyed
+        // on "consecutive ticks while tracked", so a leftover count from an
+        // earlier flight would fire the moment the next one starts and rip the
+        // stand-in back off a tick after take-off.
+        glideEndStreak.remove(player.getUniqueId());
+
         GlidingPlayerData data = glidingPlayers.remove(player.getUniqueId());
         if (data == null) {
             return;
@@ -506,15 +722,42 @@ public final class ElytraFlightListener implements Listener {
         // Update persistence after state change
         savePersistence();
 
-        logger.fine("[ElytraFlight] Restored chestplate for Bedrock player: "
+        DebugLog.log(logger, () -> "[ElytraFlight] Restored chestplate for Bedrock player: "
                 + player.getName());
     }
 
     /**
-     * Sets the player's chestplate back to the saved original.
+     * Puts the saved chestplate back, without overwriting whatever is in the
+     * chest slot now unless it is this plugin's own stand-in.
+     *
+     * <p>The click and drag guards only stop the <em>player</em> from changing
+     * the chest slot. A command, a kit, or a syncing plugin can still replace
+     * it, and an unconditional {@code setChestplate} would then destroy that
+     * armour — the same reasoning {@link #onPlayerJoin} already applies to the
+     * crash-recovery path.</p>
      */
     private void restoreChestplate(Player player, GlidingPlayerData data) {
-        player.getInventory().setChestplate(data.originalChestplate());
+        ItemStack current = player.getInventory().getChestplate();
+        ItemStack original = data.originalChestplate();
+
+        if (current == null || current.getType() == Material.AIR
+                || isGeyserExtraElytra(current)) {
+            player.getInventory().setChestplate(original);
+            return;
+        }
+
+        // Something else owns the chest slot now. Leave it alone and hand the
+        // original back through the inventory instead of overwriting.
+        if (original != null && original.getType() != Material.AIR) {
+            DebugLog.log(logger, () -> "[ElytraFlight] Chest slot of " + player.getName()
+                    + " holds " + current.getType()
+                    + " rather than the stand-in — returning the original to the inventory.");
+            for (ItemStack leftover : player.getInventory().addItem(original).values()) {
+                if (leftover != null && leftover.getType() != Material.AIR) {
+                    player.getWorld().dropItemNaturally(player.getLocation(), leftover);
+                }
+            }
+        }
     }
 
     // ── Inventory Helpers ───────────────────────────────────────────
@@ -854,7 +1097,8 @@ public final class ElytraFlightListener implements Listener {
             }
 
             if (restoredCount > 0) {
-                logger.fine("[ElytraFlight] Loaded " + restoredCount
+                final int loaded = restoredCount;
+                DebugLog.log(logger, () -> "[ElytraFlight] Loaded " + loaded
                         + " pending chestplate restoration(s) from crash recovery.");
             }
         } catch (IOException e) {
