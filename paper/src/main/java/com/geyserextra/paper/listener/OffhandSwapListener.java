@@ -12,6 +12,7 @@ import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.inventory.InventoryAction;
 import org.bukkit.event.inventory.InventoryClickEvent;
+import org.bukkit.event.inventory.InventoryDragEvent;
 import org.bukkit.event.inventory.InventoryType;
 import org.bukkit.event.player.PlayerDropItemEvent;
 import org.bukkit.event.player.PlayerItemHeldEvent;
@@ -547,7 +548,7 @@ public final class OffhandSwapListener implements Listener {
         boolean cursorEmpty = isEmpty(cursor);
         boolean offhandEmpty = isEmpty(offhand);
 
-        plugin.getLogger().fine(() -> String.format(
+        DebugLog.log(plugin.getLogger(), () -> String.format(
             "Bedrock offhand click: view=%s rawSlot=%d slot=%d action=%s cursor=%s offhand=%s",
             event.getView().getType(),
             event.getRawSlot(),
@@ -569,14 +570,14 @@ public final class OffhandSwapListener implements Listener {
                 if (!cursorEmpty || offhandEmpty) {
                     return;
                 }
-                applyPickupAll(event, player, inv, offhand);
+                applyPickupAll(event, player, offhand);
             }
             case SWAP_WITH_CURSOR -> {
                 // Cursor and off-hand swap (cursor holds a different stack).
                 if (cursorEmpty || offhandEmpty) {
                     return;
                 }
-                applySwapWithCursor(event, player, inv, cursor, offhand);
+                applySwapWithCursor(event, player, cursor, offhand);
             }
             case PLACE_ALL, PLACE_ONE, PLACE_SOME -> {
                 // Cursor → off-hand placement. Bedrock's UI does not refresh
@@ -592,7 +593,7 @@ public final class OffhandSwapListener implements Listener {
                 };
                 if (requested <= 0) return;
 
-                applyPlacement(event, player, inv, cursor, offhand, requested);
+                applyPlacement(event, player, cursor, offhand, requested);
             }
             case MOVE_TO_OTHER_INVENTORY -> {
                 // Shift-click: send off-hand stack to the first slot that
@@ -601,10 +602,13 @@ public final class OffhandSwapListener implements Listener {
                 if (offhandEmpty) return;
                 if (!tryAcquireOp(player)) return;
                 event.setCancelled(true);
-                ItemStack snapshot = offhand.clone();
-                scheduleGuarded(player, cursor, offhand, () -> {
-                    inv.setItemInOffHand(null);
-                    Map<Integer, ItemStack> overflow = inv.addItem(snapshot);
+                final ItemStack observedShiftSource = offhand.clone();
+                scheduleLive(player, (p, liveInv, liveCursor, liveOffhand) -> {
+                    if (isEmpty(liveOffhand)) return;
+                    if (!liveOffhand.isSimilar(observedShiftSource)) return;
+                    ItemStack snapshot = liveOffhand.clone();
+                    liveInv.setItemInOffHand(null);
+                    Map<Integer, ItemStack> overflow = liveInv.addItem(snapshot);
                     if (!overflow.isEmpty()) {
                         // addItem partially succeeded — sum the overflow
                         // ItemStacks and restore only that amount to the
@@ -623,10 +627,9 @@ public final class OffhandSwapListener implements Listener {
                         if (overflowAmount > 0) {
                             ItemStack remaining = snapshot.clone();
                             remaining.setAmount(overflowAmount);
-                            inv.setItemInOffHand(remaining);
+                            liveInv.setItemInOffHand(remaining);
                         }
                     }
-                    player.updateInventory();
                 });
             }
             case HOTBAR_SWAP, HOTBAR_MOVE_AND_READD -> {
@@ -640,12 +643,19 @@ public final class OffhandSwapListener implements Listener {
                 }
                 if (!tryAcquireOp(player)) return;
                 event.setCancelled(true);
-                ItemStack snapshot = offhandEmpty ? null : offhand.clone();
-                scheduleGuarded(player, cursor, offhand, () -> {
-                    ItemStack hotbarItem = inv.getItem(hotbar);
-                    inv.setItemInOffHand(hotbarItem);
-                    inv.setItem(hotbar, snapshot);
-                    player.updateInventory();
+                final ItemStack observedHotbarSource = offhandEmpty ? null : offhand.clone();
+                scheduleLive(player, (p, liveInv, liveCursor, liveOffhand) -> {
+                    if (!sameKind(liveOffhand, observedHotbarSource)) return;
+                    ItemStack hotbarItem = liveInv.getItem(hotbar);
+                    if (isEmpty(liveOffhand) && isEmpty(hotbarItem)) return;
+                    // getItemInOffHand hands back a live mirror of slot 40, so
+                    // both sides are snapshotted before either write — reading
+                    // liveOffhand back after setItemInOffHand would read the
+                    // value just written and duplicate the hotbar stack.
+                    ItemStack toHotbar = isEmpty(liveOffhand) ? null : liveOffhand.clone();
+                    ItemStack toOffhand = isEmpty(hotbarItem) ? null : hotbarItem.clone();
+                    liveInv.setItemInOffHand(toOffhand);
+                    liveInv.setItem(hotbar, toHotbar);
                 });
             }
             case DROP_ALL_SLOT, DROP_ONE_SLOT -> {
@@ -653,21 +663,29 @@ public final class OffhandSwapListener implements Listener {
                 if (offhandEmpty) return;
                 if (!tryAcquireOp(player)) return;
                 event.setCancelled(true);
-                final ItemStack toDrop = action == InventoryAction.DROP_ONE_SLOT
-                    ? singleItem(offhand)
-                    : offhand.clone();
-                final InventoryAction finalAction = action;
-                final int currentAmount = offhand.getAmount();
-                scheduleGuarded(player, cursor, offhand, () -> {
-                    if (finalAction == InventoryAction.DROP_ONE_SLOT && currentAmount > 1) {
-                        ItemStack remaining = offhand.clone();
-                        remaining.setAmount(currentAmount - 1);
-                        inv.setItemInOffHand(remaining);
+                final boolean dropOne = action == InventoryAction.DROP_ONE_SLOT;
+                final ItemStack observedDropSource = offhand.clone();
+                scheduleLive(player, (p, liveInv, liveCursor, liveOffhand) -> {
+                    if (isEmpty(liveOffhand)) return;
+                    // Throwing a stack into the world is the one irreversible
+                    // thing this listener does, so it must be the stack the
+                    // player actually aimed at. Without this, an off-hand that
+                    // was refilled in the same tick — a totem re-equipper, a
+                    // second gesture that lost the lock and fell through to
+                    // vanilla — gets thrown away instead.
+                    if (!liveOffhand.isSimilar(observedDropSource)) return;
+                    int liveAmount = liveOffhand.getAmount();
+                    ItemStack toDrop;
+                    if (dropOne && liveAmount > 1) {
+                        toDrop = singleItem(liveOffhand);
+                        ItemStack remaining = liveOffhand.clone();
+                        remaining.setAmount(liveAmount - 1);
+                        liveInv.setItemInOffHand(remaining);
                     } else {
-                        inv.setItemInOffHand(null);
+                        toDrop = liveOffhand.clone();
+                        liveInv.setItemInOffHand(null);
                     }
-                    player.getWorld().dropItemNaturally(player.getLocation(), toDrop);
-                    player.updateInventory();
+                    p.getWorld().dropItemNaturally(p.getLocation(), toDrop);
                 });
             }
             case COLLECT_TO_CURSOR -> {
@@ -679,6 +697,56 @@ public final class OffhandSwapListener implements Listener {
             default -> applyForcedNothingAction(
                 event, player, inv, cursor, offhand, cursorEmpty, offhandEmpty
             );
+        }
+    }
+
+    /**
+     * Re-syncs the Bedrock client after a drag that touched the off-hand slot.
+     *
+     * <p>A Bukkit drag is a different delivery path from a click and this
+     * listener deliberately does not rewrite it: vanilla's own drag resolution
+     * distributes the carried stack correctly, and the only thing wrong on
+     * Bedrock is that the client does not repaint the off-hand afterwards. So
+     * this observes and re-syncs, and never cancels or mutates — there is no
+     * snapshot here that could go stale, and therefore nothing to lose.</p>
+     *
+     * <p>It also answers a question the click traces cannot: whether Geyser
+     * delivers a Bedrock drag-and-drop onto the off-hand as a Bukkit drag or as
+     * a burst of clicks. Whichever path a report comes in on, one of the two
+     * traces now names it.</p>
+     */
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onInventoryDrag(InventoryDragEvent event) {
+        if (!(event.getWhoClicked() instanceof Player player)) {
+            return;
+        }
+        if (!event.getRawSlots().contains(OFFHAND_RAW_SLOT)) {
+            return;
+        }
+        if (!BedrockPlayerUtil.isBedrockPlayer(player)) {
+            return;
+        }
+
+        DebugLog.log(plugin.getLogger(), () -> String.format(
+            "Bedrock offhand drag: view=%s type=%s rawSlots=%s cursor=%s offhand=%s",
+            event.getView().getType(),
+            event.getType(),
+            event.getRawSlots(),
+            describeStack(event.getOldCursor()),
+            describeStack(player.getInventory().getItemInOffHand())
+        ));
+
+        try {
+            Bukkit.getScheduler().runTask(plugin, () -> {
+                if (player.isOnline() && !player.isDead()) {
+                    player.updateInventory();
+                }
+            });
+        } catch (Throwable failedToQueue) {
+            // Plugin is being disabled; the client will resync on relog.
+            DebugLog.log(plugin.getLogger(),
+                () -> "Could not queue off-hand drag resync for " + player.getName()
+                    + ": " + failedToQueue);
         }
     }
 
@@ -718,38 +786,48 @@ public final class OffhandSwapListener implements Listener {
             return;
         }
         if (!cursorEmpty && offhandEmpty) {
-            applyPlacement(event, player, inv, cursor, offhand, cursor.getAmount());
+            applyPlacement(event, player, cursor, offhand, cursor.getAmount());
             return;
         }
         if (!cursorEmpty) {
-            applySwapWithCursor(event, player, inv, cursor, offhand);
+            applySwapWithCursor(event, player, cursor, offhand);
             return;
         }
-        applyPickupAll(event, player, inv, offhand);
+        applyPickupAll(event, player, offhand);
     }
 
     private void applyPickupAll(
         InventoryClickEvent event,
         Player player,
-        PlayerInventory inv,
         ItemStack offhand
     ) {
         if (!tryAcquireOp(player)) {
             return;
         }
         event.setCancelled(true);
-        ItemStack toCursor = offhand.clone();
-        scheduleGuarded(player, event.getCursor(), offhand, () -> {
-            inv.setItemInOffHand(null);
-            player.setItemOnCursor(toCursor);
-            player.updateInventory();
+        final ItemStack observedOffhand = offhand.clone();
+        scheduleLive(player, (p, liveInv, liveCursor, liveOffhand) -> {
+            // Only lift what is actually in the off-hand right now, onto a
+            // cursor that is still free, and only if the off-hand still holds
+            // the kind of stack the click was about. Anything else means
+            // something already resolved this, and lifting the newcomer would
+            // move an item the player never picked — onto a cursor Bedrock
+            // does not even render.
+            if (!isEmpty(liveCursor) || isEmpty(liveOffhand)) {
+                return;
+            }
+            if (!liveOffhand.isSimilar(observedOffhand)) {
+                return;
+            }
+            ItemStack toCursor = liveOffhand.clone();
+            liveInv.setItemInOffHand(null);
+            p.setItemOnCursor(toCursor);
         });
     }
 
     private void applySwapWithCursor(
         InventoryClickEvent event,
         Player player,
-        PlayerInventory inv,
         ItemStack cursor,
         ItemStack offhand
     ) {
@@ -757,25 +835,39 @@ public final class OffhandSwapListener implements Listener {
             return;
         }
         event.setCancelled(true);
-        ItemStack newOffhand = cursor.clone();
-        ItemStack toCursor = offhand.clone();
-        scheduleGuarded(player, cursor, offhand, () -> {
-            inv.setItemInOffHand(newOffhand);
-            player.setItemOnCursor(toCursor);
-            player.updateInventory();
+        final ItemStack observedCursor = cursor.clone();
+        final ItemStack observedOffhand = offhand.clone();
+        scheduleLive(player, (p, liveInv, liveCursor, liveOffhand) -> {
+            // The cursor must still be carrying the same kind of item the click
+            // was about. A different item means the player's original stack was
+            // already resolved elsewhere, and swapping the newcomer into the
+            // off-hand would move an item they never asked to move.
+            if (isEmpty(liveCursor) || !liveCursor.isSimilar(observedCursor)) {
+                return;
+            }
+            if (sameKind(liveOffhand, observedOffhand) && !isEmpty(liveOffhand)) {
+                ItemStack newOffhand = liveCursor.clone();
+                ItemStack toCursor = liveOffhand.clone();
+                liveInv.setItemInOffHand(newOffhand);
+                p.setItemOnCursor(toCursor);
+                return;
+            }
+            // The destination changed under us, so the swap the player asked
+            // for no longer exists. Their stack is on the cursor only because
+            // this listener cancelled the click, so hand it back instead of
+            // leaving it somewhere Bedrock never draws.
+            returnCursorToInventory(p, liveCursor);
         });
     }
 
     private void applyPlacement(
         InventoryClickEvent event,
         Player player,
-        PlayerInventory inv,
         ItemStack cursor,
         ItemStack offhand,
         int requested
     ) {
-        PlacementResult plan = planPlacement(cursor, offhand, requested);
-        if (plan == null) {
+        if (planPlacement(cursor, offhand, requested) == null) {
             // Nothing legal to place (e.g. dissimilar full-stack offhand
             // with no room). Let Bukkit handle / cancel naturally.
             return;
@@ -784,13 +876,66 @@ public final class OffhandSwapListener implements Listener {
             return;
         }
         event.setCancelled(true);
-        final ItemStack newOffhandFinal = plan.newOffhand();
-        final ItemStack newCursorFinal = plan.newCursor();
-        scheduleGuarded(player, cursor, offhand, () -> {
-            inv.setItemInOffHand(newOffhandFinal);
-            player.setItemOnCursor(newCursorFinal);
-            player.updateInventory();
+        final ItemStack observedCursor = cursor.clone();
+        final ItemStack observedOffhand = offhand.clone();
+        final int requestedAmount = requested;
+        scheduleLive(player, (p, liveInv, liveCursor, liveOffhand) -> {
+            if (isEmpty(liveCursor) || !liveCursor.isSimilar(observedCursor)) {
+                // The stack this click was about is no longer on the cursor,
+                // so something else already placed it. Writing anything now
+                // would mint a copy of an item that has already landed, and
+                // nothing of the player's is stranded either way.
+                return;
+            }
+            // The destination has to be what it was too. Re-planning against a
+            // changed off-hand can silently turn "place onto empty" into "swap
+            // with whatever arrived", which conserves the item count but moves
+            // a stack the player never chose.
+            if (sameKind(liveOffhand, observedOffhand)) {
+                PlacementResult plan = planPlacement(liveCursor, liveOffhand, requestedAmount);
+                if (plan != null) {
+                    liveInv.setItemInOffHand(plan.newOffhand());
+                    p.setItemOnCursor(plan.newCursor());
+                    return;
+                }
+            }
+            // The placement cannot be completed as asked. The stack sits on the
+            // cursor only because this listener cancelled the click, and the
+            // Bedrock client believes it already reached the off-hand — so it
+            // draws nothing, and the carried stack is discarded the moment the
+            // inventory closes. Give it back instead.
+            returnCursorToInventory(p, liveCursor);
         });
+    }
+
+    /**
+     * Whether two stacks are interchangeable for a precondition check: both
+     * empty, or both holding the same kind of item. Amounts are deliberately
+     * ignored — a burst that only changed a count has not changed which
+     * operation the player asked for.
+     */
+    private static boolean sameKind(ItemStack a, ItemStack b) {
+        boolean aEmpty = isEmpty(a);
+        boolean bEmpty = isEmpty(b);
+        if (aEmpty || bEmpty) {
+            return aEmpty == bEmpty;
+        }
+        return a.isSimilar(b);
+    }
+
+    /**
+     * Clears the cursor and puts {@code carried} back into the player's
+     * inventory, dropping any surplus at their feet.
+     *
+     * <p>This is the lossless way to abandon a cancelled off-hand click. The
+     * cursor is not a place a Bedrock player can see or recover from: Geyser's
+     * client believes the gesture completed, so it paints no carried stack, and
+     * vanilla discards the carried stack when the container closes.</p>
+     */
+    private static void returnCursorToInventory(Player player, ItemStack carried) {
+        ItemStack stack = carried.clone();
+        player.setItemOnCursor(null);
+        returnToPlayer(player, stack);
     }
 
     private static String describeStack(ItemStack stack) {
@@ -873,63 +1018,64 @@ public final class OffhandSwapListener implements Listener {
     }
 
     /**
-     * Schedules a deferred cursor/off-hand mutation that only applies when the
-     * player's cursor and off-hand still hold exactly what they held when the
-     * click was observed.
-     *
-     * <p>Why the guard exists — the duplication reported on 2026-08-24: a
-     * Bedrock recipe-book craft is translated into a burst of inventory
-     * operations that all land in the <em>same tick</em>. When one click of
-     * that burst hits the off-hand slot, this listener cancels it and queues a
-     * mutation computed from event-time snapshots. The rest of the burst then
-     * keeps moving the very stacks that were snapshotted (the ingredients go
-     * into the crafting grid and get consumed), and one tick later the queued
-     * mutation writes the snapshot back into the off-hand — <b>minting a copy
-     * of items that were already spent</b>. The victim sees the recipe placed
-     * incompletely and the "missing" part sitting duplicated in the off-hand.</p>
-     *
-     * <p>The fix is to treat the snapshots as a precondition, not a payload:
-     * if either the cursor or the off-hand changed between the click and the
-     * tick the mutation runs, someone else (vanilla, an autocraft burst)
-     * already resolved the situation, and applying stale state on top of it
-     * can only destroy or duplicate items. Aborting is always safe — the click
-     * was cancelled, so the world is exactly as if the player never clicked;
-     * a human just clicks again. {@code updateInventory()} still runs on the
-     * abort path so the Bedrock client's stale prediction gets corrected.</p>
+     * A deferred off-hand mutation, recomputed from the inventory state that is
+     * live at the moment it runs rather than from the state observed at click
+     * time. Implementations must move only what {@code liveCursor} /
+     * {@code liveOffhand} actually contain, so that no path can mint or destroy
+     * items no matter what happened in between.
      */
-    private void scheduleGuarded(
-        Player player,
-        ItemStack expectedCursor,
-        ItemStack expectedOffhand,
-        Runnable task
-    ) {
-        final ItemStack cursorSnapshot = isEmpty(expectedCursor) ? null : expectedCursor.clone();
-        final ItemStack offhandSnapshot = isEmpty(expectedOffhand) ? null : expectedOffhand.clone();
-        schedule(player, () -> {
-            if (!sameStack(cursorSnapshot, player.getItemOnCursor())
-                || !sameStack(offhandSnapshot, player.getInventory().getItemInOffHand())) {
-                plugin.getLogger().fine(() -> "Skipped deferred off-hand mutation for "
-                    + player.getName() + " — cursor/off-hand changed since the click"
-                    + " (another operation in the same tick already resolved it)");
-                player.updateInventory();
-                return;
-            }
-            task.run();
-        });
+    @FunctionalInterface
+    private interface LiveMutation {
+        void apply(Player player, PlayerInventory inv, ItemStack liveCursor, ItemStack liveOffhand);
     }
 
     /**
-     * Snapshot comparison for the deferred-write guard: both empty counts as
-     * equal, otherwise the stacks must match exactly (type, amount, meta).
+     * Runs {@code mutation} next tick against the live cursor and off-hand, then
+     * re-syncs the Bedrock client.
+     *
+     * <p>Why deferred writes are recomputed instead of replayed — the two
+     * failure modes this module has actually produced in the field:</p>
+     *
+     * <p><b>Duplication (2026-08-24).</b> A Bedrock recipe-book craft arrives as
+     * a burst of inventory operations that all land in the <em>same tick</em>.
+     * When one click of that burst hit the off-hand slot, this listener
+     * cancelled it and queued a mutation computed from event-time snapshots.
+     * The rest of the burst then kept moving the very stacks that were
+     * snapshotted (the ingredients went into the crafting grid and were
+     * consumed), and one tick later the queued mutation wrote the snapshot back
+     * into the off-hand — <b>minting a copy of items that were already
+     * spent</b>.</p>
+     *
+     * <p><b>Loss (this change).</b> The first fix for that was a precondition
+     * check: if the cursor or off-hand had changed since the click, write
+     * nothing. Its rationale — "aborting is always safe, the click was
+     * cancelled, so the world is exactly as if the player never clicked" — is
+     * false for the placement path, and that is the path a drag-and-drop takes.
+     * By the time the off-hand click is cancelled, an <em>earlier, uncancelled</em>
+     * click of the same burst has already lifted the stack onto the cursor.
+     * Aborting therefore does not restore anything; it strands the stack on the
+     * server-side cursor, which the Bedrock client does not render because it
+     * believes the item reached the off-hand. The player sees the item vanish,
+     * and it is destroyed for real the moment the carried stack is discarded —
+     * on inventory close, on quit, or by an inventory-syncing plugin that has
+     * no cursor to save.</p>
+     *
+     * <p>Recomputing from live state fixes both at once and needs no
+     * precondition: a mutation that only ever moves items that exist right now
+     * cannot duplicate them, and one that always completes the move cannot
+     * strand them. Where intent still matters — placing onto the off-hand — the
+     * appliers additionally require the cursor to still carry a similar stack,
+     * so a burst that resolved the click by other means results in a no-op
+     * rather than in moving an item the player never picked.</p>
      */
-    static boolean sameStack(ItemStack expected, ItemStack actual) {
-        boolean expectedEmpty = isEmpty(expected);
-        boolean actualEmpty = isEmpty(actual);
-        if (expectedEmpty || actualEmpty) {
-            return expectedEmpty == actualEmpty;
-        }
-        return expected.equals(actual);
+    private void scheduleLive(Player player, LiveMutation mutation) {
+        schedule(player, () -> {
+            PlayerInventory inv = player.getInventory();
+            mutation.apply(player, inv, player.getItemOnCursor(), inv.getItemInOffHand());
+            player.updateInventory();
+        });
     }
+
 
     /**
      * Returns a clone of {@code stack} with amount = 1, for the DROP_ONE_SLOT
