@@ -95,6 +95,12 @@ public final class OffhandSwapListener implements Listener {
      */
     private final Map<UUID, HeldSlotChange> lastHeldSlotChange = new ConcurrentHashMap<>();
 
+    /**
+     * Players already reported as "not a Bedrock player" by the drop handler,
+     * so the note is made once instead of on every item they ever drop.
+     */
+    private final Set<UUID> loggedNonBedrockDrop = ConcurrentHashMap.newKeySet();
+
     public OffhandSwapListener(Plugin plugin) {
         this.plugin = Objects.requireNonNull(plugin, "plugin must not be null");
     }
@@ -170,11 +176,11 @@ public final class OffhandSwapListener implements Listener {
         }
         lastHeldSlotChange.put(player.getUniqueId(), new HeldSlotChange(
             event.getPreviousSlot(), event.getNewSlot(), Bukkit.getCurrentTick()));
-        DebugLog.log(plugin.getLogger(),
-            () -> "Held-slot change for " + player.getName()
-                + ": " + event.getPreviousSlot() + " -> " + event.getNewSlot()
-                + " (inventory reports "
-                + player.getInventory().getHeldItemSlot() + ")");
+        // No trace: this fires on every hotbar scroll of every Bedrock player,
+        // which is the single noisiest thing this plugin could print. The
+        // question its traces existed to answer — which slot Geyser reports —
+        // is settled and written up above; the slot itself still reaches the
+        // gesture's own outcome lines when something actually goes wrong.
     }
 
     /**
@@ -206,11 +212,10 @@ public final class OffhandSwapListener implements Listener {
             vacatedHoldsDrop, vacatedIsEmpty)) {
             return reported;
         }
-        DebugLog.log(plugin.getLogger(),
-            () -> "Drop source slot resolved for " + player.getName()
-                + ": inventory reports " + reported
-                + " but Geyser moved off slot " + change.vacatedSlot()
-                + " this tick and that slot holds " + describeStack(vacated));
+        // No trace: Geyser moves the selection on essentially every Bedrock
+        // drop, so this branch is the common case rather than the notable one.
+        // The slot it picked is printed by the gesture's abort lines, which is
+        // where knowing it actually changes what you do next.
         return change.vacatedSlot();
     }
 
@@ -278,9 +283,16 @@ public final class OffhandSwapListener implements Listener {
             // Bedrock player whose detection failed, and nothing downstream
             // ever runs to say so. The UUID is here because the fallback leg of
             // the detection keys on its version nibble.
-            DebugLog.log(plugin.getLogger(),
-                () -> "Sneak-drop swap ignored for " + player.getName()
-                    + ": not detected as a Bedrock player (uuid=" + player.getUniqueId() + ")");
+            //
+            // Once per player, not once per drop. The answer cannot change
+            // within a session, so repeating it on every dropped item on a
+            // mixed server buries the traces that do change.
+            if (loggedNonBedrockDrop.add(player.getUniqueId())) {
+                DebugLog.log(plugin.getLogger(),
+                    () -> "Sneak-drop swap ignored for " + player.getName()
+                        + ": not detected as a Bedrock player (uuid=" + player.getUniqueId()
+                        + "). Not repeated for this player.");
+            }
             return;
         }
 
@@ -308,19 +320,13 @@ public final class OffhandSwapListener implements Listener {
                     + ": a previous gesture is still in flight");
             return;
         }
-        DebugLog.log(plugin.getLogger(),
-            () -> "Sneak-drop candidate from " + player.getName()
-                + ": sneakingAtDrop=" + sneakingAtDrop
-                + ", heldSlot=" + heldSlot
-                + ", dropped=" + describeStack(droppedSnapshot)
-                // The whole hotbar, because heldSlot alone cannot be trusted:
-                // every trace so far reported slot 0 while the dropped item
-                // plainly came from elsewhere. Printing the row says whether
-                // the source slot is even recoverable from inventory state
-                // (exactly one slot short of the drop => yes; several equally
-                // plausible slots => the gesture needs a different anchor).
-                + ", hotbar=" + describeHotbar(inv)
-                + ", offhand=" + describeStack(inv.getItemInOffHand()));
+        // Deliberately no trace here. Every drop a Bedrock player makes reaches
+        // this point, but only the ones that turn out to be the gesture carry
+        // any information, and that is not known until next tick. Tracing here
+        // meant two lines plus a full hotbar dump for every ordinary dropped
+        // item — the reason the console was unreadable with debugMode on.
+        // completeSneakDropSwap logs the outcome instead, and stays quiet for
+        // the "they just dropped something" case.
         schedule(player, () -> completeSneakDropSwap(
             player, heldSlot, droppedSnapshot, heldAmountAtDrop, entity, sneakingAtDrop));
     }
@@ -372,17 +378,26 @@ public final class OffhandSwapListener implements Listener {
             sneakingAtDrop, player.isSneaking(), entityUsable, slotHoldsDrop, original != null);
 
         switch (decision) {
-            case SKIP_NOT_SNEAKING -> DebugLog.log(plugin.getLogger(),
-                () -> "Sneak-drop swap skipped for " + player.getName()
-                    + ": not sneaking at drop time nor on the following tick");
+            case SKIP_NOT_SNEAKING -> {
+                // Silent on purpose: this is an ordinary dropped item, which is
+                // the overwhelming majority of what reaches here. It says
+                // nothing about the gesture and drowns out everything that does.
+            }
             case ABORT_ENTITY_GONE -> DebugLog.log(plugin.getLogger(),
                 () -> "Sneak-drop swap aborted for " + player.getName()
                     + ": the dropped entity never reached the world and the held slot"
                     + " does not hold the stack back (held=" + describeStack(occupant)
                     + ", dropped=" + describeStack(droppedSnapshot) + ")");
             case ABORT_FOREIGN_SLOT -> DebugLog.log(plugin.getLogger(), () -> String.format(
-                "Sneak-drop swap aborted for %s: held slot %d holds %s, dropped %s",
-                player.getName(), heldSlot, describeStack(occupant), describeStack(liveDrop)));
+                // The hotbar row belongs to this case and only this case: the
+                // question it answers is whether the source slot is recoverable
+                // from inventory state at all (exactly one slot short of the
+                // drop => yes; several equally plausible slots => the gesture
+                // needs a different anchor).
+                "Sneak-drop swap aborted for %s: held slot %d holds %s, dropped %s,"
+                    + " sneakingAtDrop=%s, hotbar=%s",
+                player.getName(), heldSlot, describeStack(occupant), describeStack(liveDrop),
+                sneakingAtDrop, describeHotbar(inv)));
             case SWAP_RESTORED_STACK -> {
                 DebugLog.log(plugin.getLogger(),
                     () -> "Sneak-drop swap for " + player.getName()
@@ -968,6 +983,7 @@ public final class OffhandSwapListener implements Listener {
     public void onPlayerQuit(PlayerQuitEvent event) {
         pendingOffhandOps.remove(event.getPlayer().getUniqueId());
         lastHeldSlotChange.remove(event.getPlayer().getUniqueId());
+        loggedNonBedrockDrop.remove(event.getPlayer().getUniqueId());
     }
 
     /**

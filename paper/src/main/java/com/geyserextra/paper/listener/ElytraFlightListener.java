@@ -134,6 +134,9 @@ public final class ElytraFlightListener implements Listener {
      */
     private static final int GLIDE_END_CONFIRM_SAMPLES = 4;
 
+    /** How often an unchanged run of glide toggles reprints, in ticks. */
+    private static final int TOGGLE_SUMMARY_TICKS = 100;
+
     /** How often a player who did not look like a Bedrock player is re-probed. */
     private static final int BEDROCK_REPROBE_TICKS = 40;
 
@@ -163,6 +166,15 @@ public final class ElytraFlightListener implements Listener {
 
     /** Last observed {@code isFlying()} per player, for the edge-triggered toggle trace. */
     private final Map<UUID, Boolean> lastFlyingState = new ConcurrentHashMap<>();
+
+    /** Last glide value traced per player, so repeats can be collapsed. */
+    private final Map<UUID, Boolean> lastToggleGlide = new ConcurrentHashMap<>();
+
+    /** Consecutive identical glide values seen since the last trace line. */
+    private final Map<UUID, Integer> toggleGlideRepeats = new ConcurrentHashMap<>();
+
+    /** Server tick the glide trace last printed for each player. */
+    private final Map<UUID, Integer> lastToggleSummaryTick = new ConcurrentHashMap<>();
 
     /** Server tick each not-yet-known-Bedrock player was last probed on. */
     private final Map<UUID, Integer> bedrockProbeTick = new ConcurrentHashMap<>();
@@ -216,22 +228,54 @@ public final class ElytraFlightListener implements Listener {
             return;
         }
 
-        // The one trace that distinguishes the remaining failure modes: whether
-        // this event fires at all for a Bedrock player who is trying to glide
-        // without an elytra, and with which value. Vanilla clears the flag once
-        // per tick for such a player, so a stream of isGliding=false here means
-        // the grant is reaching the server and only the stand-in is missing;
-        // silence means the glide is never being asserted in the first place.
-        DebugLog.log(logger, () -> "[ElytraFlight] toggle-glide event for "
-                + player.getName() + ": gliding=" + event.isGliding()
-                + " tracked=" + glidingPlayers.containsKey(player.getUniqueId())
-                + " chest=" + describeChestplate(player));
+        traceToggleGlide(player, event.isGliding());
 
         if (event.isGliding()) {
             handleGlideStart(player);
         } else {
             handleGlideEnd(player);
         }
+    }
+
+    /**
+     * Traces the glide toggle — the signal that distinguishes the remaining
+     * failure modes: whether this event fires at all for a Bedrock player who
+     * is trying to glide without an elytra, and with which value.
+     *
+     * <p>Vanilla clears the flag once per tick for such a player, so a repeated
+     * {@code gliding=false} here means the grant <em>is</em> reaching the server
+     * and only the stand-in is missing, while silence means the glide is never
+     * being asserted at all. Both readings need the repeats to be visible and
+     * neither needs twenty identical lines a second, so repeats are collapsed
+     * into a periodic count: transitions print immediately, and a run of the
+     * same value prints once per {@link #TOGGLE_SUMMARY_TICKS} with its tally.</p>
+     */
+    private void traceToggleGlide(Player player, boolean gliding) {
+        if (!DebugLog.isEnabled()) {
+            return;
+        }
+        UUID uuid = player.getUniqueId();
+        int tick = Bukkit.getCurrentTick();
+        Boolean previous = lastToggleGlide.put(uuid, gliding);
+        boolean changed = previous == null || previous != gliding;
+        int repeats = changed ? 0 : toggleGlideRepeats.merge(uuid, 1, Integer::sum);
+
+        if (changed) {
+            toggleGlideRepeats.remove(uuid);
+        } else {
+            Integer lastSummary = lastToggleSummaryTick.get(uuid);
+            if (lastSummary != null && tick - lastSummary < TOGGLE_SUMMARY_TICKS) {
+                return;
+            }
+        }
+        lastToggleSummaryTick.put(uuid, tick);
+
+        final int repeated = repeats;
+        DebugLog.log(logger, () -> "[ElytraFlight] toggle-glide for " + player.getName()
+                + ": gliding=" + gliding
+                + (repeated > 0 ? " (x" + (repeated + 1) + " unchanged)" : "")
+                + " tracked=" + glidingPlayers.containsKey(uuid)
+                + " chest=" + describeChestplate(player));
     }
 
     /** Chest-slot summary for the glide traces. */
@@ -388,6 +432,9 @@ public final class ElytraFlightListener implements Listener {
         bedrockCache.remove(uuid);
         lastFlyingState.remove(uuid);
         bedrockProbeTick.remove(uuid);
+        lastToggleGlide.remove(uuid);
+        toggleGlideRepeats.remove(uuid);
+        lastToggleSummaryTick.remove(uuid);
     }
 
     /**
@@ -642,6 +689,9 @@ public final class ElytraFlightListener implements Listener {
         bedrockCache.clear();
         lastFlyingState.clear();
         bedrockProbeTick.clear();
+        lastToggleGlide.clear();
+        toggleGlideRepeats.clear();
+        lastToggleSummaryTick.clear();
 
         DebugLog.log(logger, () -> "[ElytraFlight] Cleanup complete — all gliding states restored.");
     }
